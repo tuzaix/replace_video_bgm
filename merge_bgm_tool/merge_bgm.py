@@ -178,20 +178,24 @@ def main():
     parser = argparse.ArgumentParser(description='合成视频仅保留BGM的批量工具')
     parser.add_argument('video_dir', help='视频目录')
     parser.add_argument('bgm_dir', help='BGM目录或具体音频文件')
-    parser.add_argument('output_dir', help='合成输出视频目录')
+    parser.add_argument('--output-dir', default=None, help='合成输出视频目录（默认在视频目录旁创建_bgm后缀目录）')
     parser.add_argument('--ffmpeg-path', default=None, help='ffmpeg可执行路径（默认使用PATH中的ffmpeg）')
     parser.add_argument('--audio-bitrate', default='192k', help='音频码率，默认192k')
     parser.add_argument('--workers', type=int, default=6, help='并发合成数量，默认6')
     parser.add_argument('--random-bgm', action='store_true', help='为每个视频随机挑选一个BGM')
     parser.add_argument('--seed', type=int, default=None, help='随机种子，用于复现随机选择')
     parser.add_argument('--crf', type=int, default=28, help='视频质量CRF，数值越大压缩越强、体积越小，默认28（建议范围24-30）')
-    parser.add_argument('--preset', default='medium', choices=['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'], help='压缩速度/效率preset，越慢压缩越好，默认veryslow')
+    parser.add_argument('--preset', default='veryslow', choices=['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'], help='压缩速度/效率preset，越慢压缩越好，默认veryslow')
 
     args = parser.parse_args()
 
     video_dir = Path(args.video_dir)
     bgm_input = Path(args.bgm_dir)
-    out_dir = Path(args.output_dir)
+
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+    else:
+        out_dir = video_dir.parent / f"{video_dir.name}_bgm"
 
     if not video_dir.exists() or not video_dir.is_dir():
         print(f"错误：视频目录不存在或不可用：{video_dir}")
