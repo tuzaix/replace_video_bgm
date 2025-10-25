@@ -125,7 +125,7 @@ def pair_videos_bgms(videos: List[Path], bgms: List[Path], random_bgm: bool = Fa
     return pairs
 
 
-def build_ffmpeg_cmd(ffmpeg_bin: str, video: Path, bgm: Path, output: Path, audio_bitrate: str, loop_audio: bool, crf: int, preset: str) -> List[str]:
+def build_ffmpeg_cmd(ffmpeg_bin: str, video: Path, bgm: Path, output: Path, audio_bitrate: str, loop_audio: bool, crf: int, preset: str, use_gpu: bool) -> List[str]:
     cmd = [
         ffmpeg_bin,
         '-y',
@@ -138,9 +138,23 @@ def build_ffmpeg_cmd(ffmpeg_bin: str, video: Path, bgm: Path, output: Path, audi
         '-map', '0:v',
         '-map', '1:a',
         '-r', '30',
-        '-c:v', 'libx264',
-        '-crf', str(crf),
-        '-preset', preset,
+    ]
+
+    if use_gpu:
+        cmd += [
+            '-c:v', 'h264_nvenc',
+            '-preset', 'p7',
+            '-rc', 'vbr',
+            '-cq', str(crf),
+        ]
+    else:
+        cmd += [
+            '-c:v', 'libx264',
+            '-crf', str(crf),
+            '-preset', preset,
+        ]
+
+    cmd += [
         '-c:a', 'aac',
         '-b:a', audio_bitrate,
         '-shortest',
@@ -149,29 +163,61 @@ def build_ffmpeg_cmd(ffmpeg_bin: str, video: Path, bgm: Path, output: Path, audi
     return cmd
 
 
-def process_one(ffmpeg_bin: str, ffprobe_bin: str, video: Path, bgm: Path, out_dir: Path, audio_bitrate: str, crf: int, preset: str) -> Tuple[bool, Path | None, str | None]:
+def process_one(ffmpeg_bin: str, ffprobe_bin: str, video: Path, bgm: Path, out_dir: Path, audio_bitrate: str, crf: int, preset: str, use_gpu_flag: bool, has_gpu_encoder: bool) -> Tuple[bool, Path | None, str | None]:
     out_dir.mkdir(parents=True, exist_ok=True)
     output = out_dir / f"{video.stem}_bgm.mp4"
     loop_audio = should_loop_audio(ffprobe_bin, video, bgm)
-    cmd = build_ffmpeg_cmd(ffmpeg_bin, video, bgm, output, audio_bitrate, loop_audio, crf, preset)
-    
-    try:
-        print(f"🎬 合成: {video.name} + 🎵 {bgm.name} -> {output.name} (loop={loop_audio})")
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
-        )
+
+    def run_ffmpeg(use_gpu: bool):
+        codec_name = "GPU (h264_nvenc)" if use_gpu else "CPU (libx264)"
+        print(f"🎬 合成 ({codec_name}): {video.name} + 🎵 {bgm.name} -> {output.name} (loop={loop_audio})")
+        cmd = build_ffmpeg_cmd(ffmpeg_bin, video, bgm, output, audio_bitrate, loop_audio, crf, preset, use_gpu)
+        try:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace'
+            )
+        except Exception as e:
+            class MockProc:
+                returncode = -1
+                stderr = str(e)
+            return MockProc()
+
+    # Try GPU first if requested and available
+    if use_gpu_flag and has_gpu_encoder:
+        proc = run_ffmpeg(use_gpu=True)
         if proc.returncode == 0:
-            print(f"✅ 成功: {output}")
+            print(f"✅ 成功 (GPU): {output.name}")
             return True, output, None
         else:
-            print(f"❌ 失败: {video.name} -> {output.name}\n{proc.stderr[:2000]}...")
-            return False, None, proc.stderr
-    except Exception as e:
-        return False, None, str(e)
+            print(f"""⚠️ GPU 合成失败，自动切换到 CPU... 
+{proc.stderr[:500]}...""")
+            # Fallback to CPU
+            proc = run_ffmpeg(use_gpu=False)
+    else:
+        # Directly use CPU
+        proc = run_ffmpeg(use_gpu=False)
+
+    # Check final result (either from direct CPU run or fallback)
+    if proc.returncode == 0:
+        print(f"✅ 成功 (CPU): {output.name}")
+        return True, output, None
+    else:
+        print(f"""❌ 失败 (CPU): {video.name} -> {output.name}
+{proc.stderr[:2000]}...""")
+        return False, None, proc.stderr
+
+
+def has_nvenc(ffmpeg_bin: str) -> bool:
+    """Checks if NVIDIA NVENC encoder is available in ffmpeg."""
+    try:
+        proc = subprocess.run([ffmpeg_bin, '-encoders'], capture_output=True, text=True, encoding='utf-8', errors='replace')
+        return 'h264_nvenc' in proc.stdout
+    except Exception:
+        return False
 
 
 def main():
@@ -186,6 +232,7 @@ def main():
     parser.add_argument('--seed', type=int, default=None, help='随机种子，用于复现随机选择')
     parser.add_argument('--crf', type=int, default=28, help='视频质量CRF，数值越大压缩越强、体积越小，默认28（建议范围24-30）')
     parser.add_argument('--preset', default='veryslow', choices=['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'], help='压缩速度/效率preset，越慢压缩越好，默认veryslow')
+    parser.add_argument('--gpu', action='store_true', default=True, help='优先使用GPU(NVIDIA NVENC)进行视频编码，失败时自动切换回CPU')
 
     args = parser.parse_args()
 
@@ -231,6 +278,15 @@ def main():
         print(f"错误：{e}")
         sys.exit(1)
 
+    # 检测GPU支持
+    nvenc_supported = False
+    if args.gpu:
+        nvenc_supported = has_nvenc(ffmpeg_bin)
+        if not nvenc_supported:
+            print("⚠️ 未检测到 NVIDIA NVENC 编码器，将使用 CPU。")
+        else:
+            print("✅ 检测到 NVIDIA NVENC 编码器，将优先使用 GPU。")
+
     # 选择 ffprobe
     try:
         ffprobe_bin = pick_ffprobe(ffmpeg_bin)
@@ -254,7 +310,7 @@ def main():
     # 并发执行合成任务
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         future_to_pair = {
-            executor.submit(process_one, ffmpeg_bin, ffprobe_bin, v, b, out_dir, args.audio_bitrate, args.crf, args.preset): (v, b)
+            executor.submit(process_one, ffmpeg_bin, ffprobe_bin, v, b, out_dir, args.audio_bitrate, args.crf, args.preset, args.gpu, nvenc_supported): (v, b)
             for (v, b) in pairs
         }
         i = 0
