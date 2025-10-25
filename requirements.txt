@@ -1,0 +1,28 @@
+# 视频BGM分离和替换工具依赖
+
+# 深度学习框架
+torch>=1.12.0
+torchaudio>=0.12.0
+
+# 音频分离库
+demucs>=4.0.0
+
+# 视频处理库
+moviepy>=1.0.3
+
+# 音频处理库
+librosa>=0.9.0
+soundfile>=0.10.0
+
+# 数值计算
+numpy>=1.21.0
+
+# 其他工具库
+pathlib2>=2.3.0
+tqdm>=4.64.0
+
+# GPU支持（可选，如果有NVIDIA GPU）
+# 取消注释下面的行来安装CUDA版本的PyTorch
+# torch>=1.12.0+cu116
+# torchaudio>=0.12.0+cu116
+# --extra-index-url https://download.pytorch.org/whl/cu116
