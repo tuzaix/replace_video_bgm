@@ -125,7 +125,51 @@ def pair_videos_bgms(videos: List[Path], bgms: List[Path], random_bgm: bool = Fa
     return pairs
 
 
-def build_ffmpeg_cmd(ffmpeg_bin: str, video: Path, bgm: Path, output: Path, audio_bitrate: str, loop_audio: bool, crf: int, preset: str, use_gpu: bool) -> List[str]:
+# 添加：探测视频平均码率（优先使用视频流bit_rate，其次使用容器format bit_rate）
+def probe_video_bitrate(ffprobe_bin: str, video: Path) -> int | None:
+    try:
+        proc = subprocess.run([
+            ffprobe_bin, '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=bit_rate',
+            '-of', 'default=nw=1:nk=1',
+            str(video)
+        ], capture_output=True, text=True, encoding='utf-8', errors='replace')
+        if proc.returncode == 0:
+            out = proc.stdout.strip()
+            if out:
+                try:
+                    br = int(float(out))
+                    if br > 0:
+                        return br
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        proc2 = subprocess.run([
+            ffprobe_bin, '-v', 'error',
+            '-show_entries', 'format=bit_rate',
+            '-of', 'default=nw=1:nk=1',
+            str(video)
+        ], capture_output=True, text=True, encoding='utf-8', errors='replace')
+        if proc2.returncode == 0:
+            out2 = proc2.stdout.strip()
+            if out2:
+                try:
+                    br2 = int(float(out2))
+                    if br2 > 0:
+                        return br2
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return None
+
+# 修改：添加 copy_video 开关参数
+def build_ffmpeg_cmd(ffmpeg_bin: str, video: Path, bgm: Path, output: Path, audio_bitrate: str, loop_audio: bool, crf: int, preset: str, use_gpu: bool, max_compression: bool = False, two_pass: bool = False, target_bitrate_bps: int | None = None, copy_video: bool = False) -> List[str]:
     cmd = [
         ffmpeg_bin,
         '-y',
@@ -137,41 +181,151 @@ def build_ffmpeg_cmd(ffmpeg_bin: str, video: Path, bgm: Path, output: Path, audi
         '-i', str(bgm),
         '-map', '0:v',
         '-map', '1:a',
-        '-r', '30',
     ]
 
-    if use_gpu:
+    if copy_video:
+        # 视频不重编码，直接复制
         cmd += [
-            '-c:v', 'h264_nvenc',
-            '-preset', 'p7',
-            '-rc', 'vbr',
-            '-cq', str(crf),
+            '-c:v', 'copy',
         ]
     else:
+        # 非复制模式，按GPU/CPU路径设置压缩参数
+        # 为避免改变帧率，保留原始fps，不强制设置 -r
+        if use_gpu:
+            cmd += [
+                '-c:v', 'h264_nvenc',
+                '-preset', 'p7',
+                '-rc', 'vbr',
+            ]
+            if target_bitrate_bps:
+                br_k = f"{int(target_bitrate_bps/1000)}k"
+                max_k = f"{int(target_bitrate_bps*1.2/1000)}k"
+                buf_k = f"{int(target_bitrate_bps*2/1000)}k"
+                cmd += ['-b:v', br_k, '-maxrate', max_k, '-bufsize', buf_k, '-cq', str(crf)]
+            else:
+                cmd += [
+                    '-cq', str(crf),
+                    '-b:v', '0',
+                    '-maxrate', '10M',
+                    '-bufsize', '20M',
+                ]
+        else:
+            if target_bitrate_bps:
+                br_k = f"{int(target_bitrate_bps/1000)}k"
+                max_k = f"{int(target_bitrate_bps*1.2/1000)}k"
+                buf_k = f"{int(target_bitrate_bps*2/1000)}k"
+                cmd += [
+                    '-c:v', 'libx264',
+                    '-preset', preset,
+                    '-b:v', br_k,
+                    '-maxrate', max_k,
+                    '-bufsize', buf_k,
+                    '-tune', 'film',
+                    '-profile:v', 'high',
+                    '-level', '4.1',
+                ]
+            else:
+                cmd += [
+                    '-c:v', 'libx264',
+                    '-crf', str(crf),
+                    '-preset', preset,
+                    '-tune', 'film',
+                    '-profile:v', 'high',
+                    '-level', '4.1',
+                ]
+            # 最大压缩参数（仅在不复制视频时适用）
+            if max_compression:
+                cmd += [
+                    '-x264-params', 'aq-mode=3:aq-strength=0.8:deblock=1,1:ref=5:bframes=5:b-adapt=2:direct=auto:me=umh:subme=10:merange=24:trellis=2:partitions=all:8x8dct=1:fast-pskip=0:mixed-refs=1',
+                    '-flags', '+cgop',
+                    '-g', '250',
+                ]
+
+        # 通用视频优化参数
+        if not copy_video:
+            cmd += [
+                '-pix_fmt', 'yuv420p',
+            ]
         cmd += [
-            '-c:v', 'libx264',
-            '-crf', str(crf),
-            '-preset', preset,
+            '-movflags', '+faststart',
         ]
 
+        # 两遍编码（仅CPU且非复制视频时）
+        if two_pass and not use_gpu:
+            cmd += ['-pass', '1', '-f', 'null']
+
+    # 音频：统一编码为AAC并设置码率
     cmd += [
         '-c:a', 'aac',
         '-b:a', audio_bitrate,
+        '-ac', '2',
+        '-ar', '44100',
+    ]
+
+    cmd += [
         '-shortest',
         str(output),
     ]
     return cmd
 
 
-def process_one(ffmpeg_bin: str, ffprobe_bin: str, video: Path, bgm: Path, out_dir: Path, audio_bitrate: str, crf: int, preset: str, use_gpu_flag: bool, has_gpu_encoder: bool) -> Tuple[bool, Path | None, str | None]:
+# 修改：process_one 支持 copy_video 并在打印中体现
+def process_one(ffmpeg_bin: str, ffprobe_bin: str, video: Path, bgm: Path, out_dir: Path, audio_bitrate: str, crf: int, preset: str, use_gpu_flag: bool, has_gpu_encoder: bool, max_compression: bool = False, two_pass: bool = False, target_reduction: float = 0.5, copy_video: bool = False) -> Tuple[bool, Path | None, str | None]:
     out_dir.mkdir(parents=True, exist_ok=True)
     output = out_dir / f"{video.stem}_bgm.mp4"
     loop_audio = should_loop_audio(ffprobe_bin, video, bgm)
 
+    # 计算目标码率（复制视频时无需）
+    src_br = None
+    target_bitrate_bps = None
+    if not copy_video:
+        src_br = probe_video_bitrate(ffprobe_bin, video)
+        if src_br and 0 < target_reduction < 1:
+            target_bitrate_bps = int(src_br * target_reduction)
+
     def run_ffmpeg(use_gpu: bool):
-        codec_name = "GPU (h264_nvenc)" if use_gpu else "CPU (libx264)"
-        print(f"🎬 合成 ({codec_name}): {video.name} + 🎵 {bgm.name} -> {output.name} (loop={loop_audio})")
-        cmd = build_ffmpeg_cmd(ffmpeg_bin, video, bgm, output, audio_bitrate, loop_audio, crf, preset, use_gpu)
+        codec_name = "COPY" if copy_video else ("GPU (h264_nvenc)" if use_gpu else "CPU (libx264)")
+        compression_info = ""
+        if max_compression and not copy_video:
+            compression_info += " [最大压缩]"
+        if (two_pass or (target_bitrate_bps is not None)) and not use_gpu and not copy_video:
+            compression_info += " [两遍编码]"
+        if target_bitrate_bps and not copy_video:
+            kbps = int(target_bitrate_bps/1000)
+            compression_info += f" [目标码率≈{kbps}kbps]"
+        print(f"🎬 合成 ({codec_name}{compression_info}): {video.name} + 🎵 {bgm.name} -> {output.name} (loop={loop_audio})")
+
+        # 复制视频：直接构建一次命令
+        if copy_video:
+            cmd = build_ffmpeg_cmd(ffmpeg_bin, video, bgm, output, audio_bitrate, loop_audio, crf, preset, False, max_compression, False, None, True)
+        else:
+            # 非复制：两遍编码（仅CPU）
+            if (two_pass or (target_bitrate_bps is not None)) and not use_gpu:
+                cmd1 = build_ffmpeg_cmd(ffmpeg_bin, video, bgm, Path("/dev/null"), audio_bitrate, loop_audio, crf, preset, use_gpu, max_compression, False, target_bitrate_bps, False)
+                cmd1[-1] = "NUL" if os.name == 'nt' else "/dev/null"
+                cmd1.insert(-1, '-pass')
+                cmd1.insert(-1, '1')
+                cmd1.insert(-1, '-f')
+                cmd1.insert(-1, 'null')
+                try:
+                    proc1 = subprocess.run(cmd1, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                    if proc1.returncode != 0:
+                        class MockProc:
+                            returncode = proc1.returncode
+                            stderr = f"第一遍编码失败: {proc1.stderr}"
+                        return MockProc()
+                except Exception as e:
+                    class MockProc:
+                        returncode = -1
+                        stderr = f"第一遍编码异常: {str(e)}"
+                    return MockProc()
+                cmd2 = build_ffmpeg_cmd(ffmpeg_bin, video, bgm, output, audio_bitrate, loop_audio, crf, preset, use_gpu, max_compression, False, target_bitrate_bps, False)
+                cmd2.insert(-1, '-pass')
+                cmd2.insert(-1, '2')
+                cmd = cmd2
+            else:
+                cmd = build_ffmpeg_cmd(ffmpeg_bin, video, bgm, output, audio_bitrate, loop_audio, crf, preset, use_gpu, max_compression, two_pass, target_bitrate_bps, False)
+
         try:
             return subprocess.run(
                 cmd,
@@ -186,27 +340,24 @@ def process_one(ffmpeg_bin: str, ffprobe_bin: str, video: Path, bgm: Path, out_d
                 stderr = str(e)
             return MockProc()
 
-    # Try GPU first if requested and available
-    if use_gpu_flag and has_gpu_encoder:
-        proc = run_ffmpeg(use_gpu=True)
-        if proc.returncode == 0:
-            print(f"✅ 成功 (GPU): {output.name}")
-            return True, output, None
-        else:
-            print(f"""⚠️ GPU 合成失败，自动切换到 CPU... 
-{proc.stderr[:500]}...""")
-            # Fallback to CPU
-            proc = run_ffmpeg(use_gpu=False)
-    else:
-        # Directly use CPU
+    # 执行逻辑：复制视频时不走GPU优先策略
+    if copy_video:
         proc = run_ffmpeg(use_gpu=False)
+    else:
+        if use_gpu_flag and has_gpu_encoder:
+            proc = run_ffmpeg(use_gpu=True)
+            if proc.returncode != 0:
+                print(f"""⚠️ GPU 合成失败，自动切换到 CPU... 
+{proc.stderr[:500]}...""")
+                proc = run_ffmpeg(use_gpu=False)
+        else:
+            proc = run_ffmpeg(use_gpu=False)
 
-    # Check final result (either from direct CPU run or fallback)
     if proc.returncode == 0:
-        print(f"✅ 成功 (CPU): {output.name}")
+        print(f"✅ 成功 ({'COPY' if copy_video else ('GPU' if use_gpu_flag and has_gpu_encoder else 'CPU')}): {output.name}")
         return True, output, None
     else:
-        print(f"""❌ 失败 (CPU): {video.name} -> {output.name}
+        print(f"""❌ 失败: {video.name} -> {output.name}
 {proc.stderr[:2000]}...""")
         return False, None, proc.stderr
 
@@ -233,6 +384,10 @@ def main():
     parser.add_argument('--crf', type=int, default=28, help='视频质量CRF，数值越大压缩越强、体积越小，默认28（建议范围24-30）')
     parser.add_argument('--preset', default='veryslow', choices=['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'], help='压缩速度/效率preset，越慢压缩越好，默认veryslow')
     parser.add_argument('--gpu', action='store_true', default=True, help='优先使用GPU(NVIDIA NVENC)进行视频编码，失败时自动切换回CPU')
+    parser.add_argument('--copy-video', action='store_true', help='不重编码视频，直接替换合成BGM（速度最快，依赖容器/视频编码兼容性）')
+    parser.add_argument('--max-compression', action='store_true', help='启用最大压缩模式，进一步减小文件体积（会增加编码时间）')
+    parser.add_argument('--two-pass', action='store_true', help='启用两遍编码，获得更好的压缩效果（会显著增加编码时间）')
+    parser.add_argument('--target-reduction', type=float, default=0.5, help='目标体积压缩比例，例如0.5表示压缩到50%大小')
 
     args = parser.parse_args()
 
@@ -310,7 +465,7 @@ def main():
     # 并发执行合成任务
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         future_to_pair = {
-            executor.submit(process_one, ffmpeg_bin, ffprobe_bin, v, b, out_dir, args.audio_bitrate, args.crf, args.preset, args.gpu, nvenc_supported): (v, b)
+            executor.submit(process_one, ffmpeg_bin, ffprobe_bin, v, b, out_dir, args.audio_bitrate, args.crf, args.preset, args.gpu, nvenc_supported, args.max_compression, args.two_pass, args.target_reduction, args.copy_video): (v, b)
             for (v, b) in pairs
         }
         i = 0
