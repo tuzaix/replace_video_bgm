@@ -78,6 +78,160 @@ def get_video_info(video_path: Path) -> dict:
         return {}
 
 
+def probe_resolution_ffprobe(video_path: Path) -> Optional[tuple]:
+    """使用 ffprobe 获取视频分辨率 (width, height)。
+    优先使用 ffprobe，若不可用或失败，回退到 MoviePy 的 get_video_info。
+    """
+    ffprobe_bin = shutil.which('ffprobe')
+    if ffprobe_bin:
+        try:
+            cmd = [
+                ffprobe_bin,
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height',
+                '-of', 'csv=p=0:s=x',
+                str(video_path)
+            ]
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode == 0:
+                text = ''
+                try:
+                    text = (res.stdout or b'').decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    try:
+                        text = (res.stdout or b'').decode('mbcs', errors='ignore').strip()
+                    except Exception:
+                        text = ''
+                if 'x' in text:
+                    parts = text.split('x')
+                    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                        return int(parts[0]), int(parts[1])
+        except Exception:
+            pass
+    # 回退到 MoviePy
+    info = get_video_info(video_path)
+    w = info.get('width')
+    h = info.get('height')
+    if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+        return w, h
+    return None
+
+
+def group_videos_by_resolution(videos: List[Path]) -> dict:
+    """按分辨率分组视频，返回 dict: {(width, height): [Path, ...]}"""
+    groups = {}
+    for v in videos:
+        res = probe_resolution_ffprobe(v)
+        if not res:
+            print(f"⚠️ 跳过无法获取分辨率的视频: {v.name}")
+            continue
+        groups.setdefault(res, []).append(v)
+    return groups
+
+
+def allocate_outputs_by_group_size(groups: dict, total_outputs: int) -> List[tuple]:
+    """按分组视频数量比例分配输出数量，总和等于 total_outputs。
+    使用配额法：先分配 floor(share)，再将剩余输出分配给小数部分最大的分组。
+    返回列表 [(group_key, outputs_for_group), ...]
+    """
+    if total_outputs <= 0 or not groups:
+        return []
+    items = list(groups.items())
+    total_videos = sum(len(vs) for _, vs in items)
+    if total_videos == 0:
+        return []
+    # 初始分配
+    base = {}
+    remainders = []
+    for k, vs in items:
+        share = total_outputs * (len(vs) / total_videos)
+        base_share = int(share)
+        base[k] = base_share
+        remainders.append((share - base_share, k))
+    assigned = sum(base.values())
+    remaining = total_outputs - assigned
+    # 分配剩余给小数部分最大的分组
+    remainders.sort(reverse=True)
+    for i in range(remaining):
+        _, k = remainders[i]
+        base[k] += 1
+    # 转为列表并过滤为正数的分配
+    result = [(k, n) for k, n in base.items() if n > 0]
+    # 按分辨率排序（高到低）以稳定输出顺序
+    result.sort(key=lambda kv: (kv[0][1], kv[0][0]), reverse=False)
+    return result
+
+
+def process_group_single_output(args_tuple):
+    """处理分辨率分组的单个输出任务：
+    - 从组内随机选择 count 个视频（不足时允许重复选择）
+    - 按组分辨率拼接并替换 BGM
+    - 输出文件名追加分辨率与序号后缀
+    返回 (success, msg)
+    """
+    (group_key, group_videos, out_index, bgm_input_path, temp_dir, output_spec,
+     default_output_dir, args_count, args_gpu, target_fps) = args_tuple
+    try:
+        w, h = group_key
+        auto_seed = generate_auto_seed()
+        random.seed(auto_seed)
+
+        # 选择 count 个视频：优先无重复，数量不足则允许重复
+        if len(group_videos) >= args_count:
+            selected = random.sample(group_videos, args_count)
+        else:
+            selected = random.choices(group_videos, k=args_count)
+
+        print(f"🔄 [组 {w}x{h}] 输出{out_index} 选择了 {len(selected)} 个视频片段…")
+
+        # 输出路径与临时文件
+        if output_spec:
+            out_spec = Path(output_spec)
+            if out_spec.suffix.lower() == '.mp4':
+                out_dir = out_spec.parent
+                out_name = f"{out_spec.stem}_{w}x{h}_{out_index}{out_spec.suffix}"
+            else:
+                out_dir = out_spec
+                out_name = f"concat_{args_count}videos_{w}x{h}_{out_index}.mp4"
+        else:
+            out_dir = default_output_dir
+            out_name = f"concat_{args_count}videos_{w}x{h}_{out_index}.mp4"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        temp_concat_output = temp_dir / f"temp_concat_{w}x{h}_{out_index}.mp4"
+        final_out = out_dir / out_name
+
+        # 拼接（目标分辨率采用组分辨率，避免额外缩放）
+        ok = concat_videos(
+            selected,
+            temp_concat_output,
+            use_gpu=args_gpu,
+            temp_dir=temp_dir,
+            target_width=w,
+            target_height=h,
+            target_fps=target_fps,
+            fill_mode='pad',
+        )
+        if not ok:
+            return False, f"组 {w}x{h} 输出{out_index} 拼接失败"
+
+        # 选择 BGM 并合成
+        try:
+            bgm_path = select_bgm_file(bgm_input_path, auto_seed)
+        except ValueError as e:
+            return False, f"组 {w}x{h} 输出{out_index} BGM选择错误: {e}"
+
+        ok2 = replace_audio_with_bgm(temp_concat_output, bgm_path, final_out, use_gpu=args_gpu)
+        if not ok2:
+            return False, f"组 {w}x{h} 输出{out_index} BGM替换失败"
+
+        size_mb = final_out.stat().st_size / (1024*1024)
+        return True, f"{final_out} ({size_mb:.1f} MB)"
+    except Exception as e:
+        return False, f"异常: {e}"
+
+
 def is_nvenc_available() -> bool:
     """检测本机 ffmpeg 是否支持 h264_nvenc（NVIDIA 编码器）"""
     ffmpeg_bin = shutil.which('ffmpeg')
@@ -166,7 +320,12 @@ def concat_videos(
 
         # 创建临时文件列表
         ts_suffix = int(time.time() * 1000)
-        list_file = (temp_dir or output_path.parent) / f"temp_video_list_{ts_suffix}.txt"
+        # 随机数种子，确保每次运行时生成不同的文件名
+        random.seed(ts_suffix)
+        # 随机数，确保每次运行时生成不同的文件名
+        random_suffix = random.randint(10000, 999999)
+        
+        list_file = (temp_dir or output_path.parent) / f"temp_video_list_{ts_suffix}_{random_suffix}.txt"
 
         try:
             lines = []
@@ -421,6 +580,7 @@ def main():
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=30, help='输出帧率（默认30）')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
+    parser.add_argument('--group-res', action='store_true', help='按照分辨率分组拼接并输出（文件名追加分辨率后缀）')
     
     args = parser.parse_args()
     
@@ -470,7 +630,79 @@ def main():
         temp_dir.mkdir(parents=True, exist_ok=True)
         print(f"📁 临时目录: {temp_dir}")
         
-        # 决定是否使用并发处理
+        # 决定是否使用分辨率分组模式
+        if args.group_res:
+            print("📐 开启分辨率分组模式：将按分辨率分别拼接输出")
+            groups = group_videos_by_resolution(all_videos)
+            if not groups:
+                print("❌ 错误：无法按分辨率分组（可能没有有效视频）")
+                sys.exit(1)
+
+            # 仅保留视频数量 > 20 的分组
+            qualified_groups = {k: v for k, v in groups.items() if len(v) > 20}
+
+            print("📊 分组结果（仅保留 >20 个视频的分组）：")
+            for (w, h), vids in sorted(groups.items(), key=lambda kv: (kv[0][1], kv[0][0], -len(kv[1]))):
+                mark = "✅" if (w, h) in qualified_groups else "⏭️"
+                print(f"  - {w}x{h}: {len(vids)} 个视频 {mark}")
+
+            if not qualified_groups:
+                print("❌ 错误：没有分辨率分组达到 >20 个视频，结束。")
+                sys.exit(1)
+
+            # 按分组视频数量比例分配总输出数量
+            allocation = allocate_outputs_by_group_size(qualified_groups, args.outputs)
+            total_tasks = sum(n for _, n in allocation)
+            print("📦 分配结果（组分辨率 -> 输出数量）：")
+            for (w, h), n in allocation:
+                print(f"  - {w}x{h} -> {n}")
+            if total_tasks == 0:
+                print("❌ 错误：总输出数量为 0，结束。")
+                sys.exit(1)
+
+            # 并发执行所有任务（跨分组）
+            max_workers = min(args.threads, total_tasks)
+            print(f"🚀 并发任务数: {max_workers}，总任务: {total_tasks}")
+
+            results = []
+            failed = 0
+            try:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {}
+                    for (key, count_out) in allocation:
+                        vids = qualified_groups[key]
+                        for i in range(1, count_out + 1):
+                            task_args = (key, vids, i, bgm_input_path, temp_dir, output_spec,
+                                         default_output_dir, args.count, args.gpu, args.fps)
+                            fut = executor.submit(process_group_single_output, task_args)
+                            futures[fut] = (key, i)
+                    for fut in as_completed(futures):
+                        key, i = futures[fut]
+                        w, h = key
+                        try:
+                            ok, msg = fut.result()
+                            if ok:
+                                print(f"✅ [组 {w}x{h}] 输出{i} 完成: {msg}")
+                                results.append(msg)
+                            else:
+                                print(f"❌ [组 {w}x{h}] 输出{i} 失败: {msg}")
+                                failed += 1
+                        except Exception as e:
+                            print(f"❌ [组 {w}x{h}] 输出{i} 异常: {e}")
+                            failed += 1
+            except KeyboardInterrupt:
+                print("⚠️ 用户中断，停止分组处理…")
+                sys.exit(1)
+
+            print("\n📊 分组模式完成")
+            print(f"✅ 成功: {len(results)} 个输出, ❌ 失败: {failed} 个输出")
+            if results:
+                print("🎉 输出文件：")
+                for r in results:
+                    print(f"  - {r}")
+            return
+
+        # 决定是否使用并发处理（随机拼接模式）
         use_concurrent = args.outputs > 1 and args.threads > 1
         
         if use_concurrent:
