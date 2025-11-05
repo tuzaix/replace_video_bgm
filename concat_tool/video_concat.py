@@ -171,7 +171,7 @@ def process_group_single_output(args_tuple):
     返回 (success, msg)
     """
     (group_key, group_videos, out_index, bgm_input_path, temp_dir, output_spec,
-     default_output_dir, args_count, args_gpu, target_fps) = args_tuple
+     default_output_dir, args_count, args_gpu, target_fps, args_nvenc_cq, args_bitrate_mbps, args_x264_crf) = args_tuple
     try:
         w, h = group_key
         auto_seed = generate_auto_seed()
@@ -190,16 +190,16 @@ def process_group_single_output(args_tuple):
             out_spec = Path(output_spec)
             if out_spec.suffix.lower() == '.mp4':
                 out_dir = out_spec.parent
-                out_name = f"{out_spec.stem}_{w}x{h}_{out_index}{out_spec.suffix}"
+                out_name = f"{out_spec.stem}_{w}x{h}_{out_index}_{auto_seed}_{out_spec.suffix}"
             else:
                 out_dir = out_spec
-                out_name = f"concat_{args_count}videos_{w}x{h}_{out_index}.mp4"
+                out_name = f"concat_{args_count}videos_{w}x{h}_{out_index}_{auto_seed}.mp4"
         else:
             out_dir = default_output_dir
-            out_name = f"concat_{args_count}videos_{w}x{h}_{out_index}.mp4"
+            out_name = f"concat_{args_count}videos_{w}x{h}_{out_index}_{auto_seed}.mp4"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        temp_concat_output = temp_dir / f"temp_concat_{w}x{h}_{out_index}.mp4"
+        temp_concat_output = temp_dir / f"temp_concat_{w}x{h}_{out_index}_{auto_seed}.mp4"
         final_out = out_dir / out_name
 
         # 拼接（目标分辨率采用组分辨率，避免额外缩放）
@@ -212,6 +212,9 @@ def process_group_single_output(args_tuple):
             target_height=h,
             target_fps=target_fps,
             fill_mode='pad',
+            nvenc_cq=args_nvenc_cq,
+            bitrate_mbps=args_bitrate_mbps,
+            x264_crf=args_x264_crf,
         )
         if not ok:
             return False, f"组 {w}x{h} 输出{out_index} 拼接失败"
@@ -300,11 +303,15 @@ def concat_videos(
     target_height: int = 1080,
     target_fps: int = 24,
     fill_mode: str = 'pad',  # 'pad' 或 'crop'
+    nvenc_cq: int = 24,
+    bitrate_mbps: int = 6,
+    x264_crf: int = 22,
 ) -> bool:
     """使用FFmpeg concat demuxer拼接视频（无音频），支持NVENC加速编码。
     - 生成文件列表并通过 `-f concat -safe 0` 拼接。
     - 统一输出为指定分辨率/帧率/像素格式（可配置）。
     - 输出不包含音轨（-an），以便后续替换BGM时复制视频流避免重编码。
+    - 支持压缩参数：NVENC 使用 `cq` 与目标码率，x264 使用 `crf`。
     """
     try:
         print("🔗 使用FFmpeg进行视频拼接…")
@@ -380,11 +387,11 @@ def concat_videos(
                 '-preset', 'p4',
                 '-tune', 'hq',
                 '-rc', 'vbr',
-                # 提升质量：降低 cq，提升码率和缓冲
-                '-cq', '20',
-                '-b:v', '8M',
-                '-maxrate', '12M',
-                '-bufsize', '16M',
+                # 压缩参数（默认更小体积且保持观感）
+                '-cq', str(nvenc_cq),
+                '-b:v', f"{bitrate_mbps}M",
+                '-maxrate', f"{int(bitrate_mbps*1.5)}M",
+                '-bufsize', f"{int(bitrate_mbps*2)}M",
                 '-profile:v', 'high',
                 '-level', '4.1',
                 '-pix_fmt', 'yuv420p',
@@ -403,7 +410,7 @@ def concat_videos(
                 '-c:v', 'libx264',
                 # 提升质量：更慢预设与更低 CRF
                 '-preset', 'slow',
-                '-crf', '20',
+                '-crf', str(x264_crf),
                 '-tune', 'film',
                 '-profile:v', 'high',
                 '-level', '4.1',
@@ -496,7 +503,8 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
 def process_single_output(args_tuple):
     """处理单个输出的函数，用于并发执行"""
     (idx, all_videos, bgm_input_path, temp_dir, output_spec, default_output_dir, 
-     args_count, args_gpu, total_outputs, target_width, target_height, target_fps, fill_mode) = args_tuple
+     args_count, args_gpu, total_outputs, target_width, target_height, target_fps, fill_mode,
+     args_nvenc_cq, args_bitrate_mbps, args_x264_crf) = args_tuple
     
     try:
         print(f"\n=== 开始第 {idx}/{total_outputs} 个输出 ===")
@@ -519,8 +527,8 @@ def process_single_output(args_tuple):
             print(f"❌ [输出{idx}] BGM选择错误: {e}")
             return False, idx, f"BGM选择错误: {e}"
         
-        # 临时拼接文件（带序号避免覆盖）
-        temp_concat_output = temp_dir / f"temp_concat_{idx}.mp4"
+        # 临时拼接文件（带序号避免覆盖），增加随机数以避免冲突
+        temp_concat_output = temp_dir / f"temp_concat_{idx}_{auto_seed}.mp4"
 
         # 拼接视频
         print(f"🔄 [输出{idx}] 开始拼接视频...")
@@ -533,6 +541,9 @@ def process_single_output(args_tuple):
             target_height=target_height,
             target_fps=target_fps,
             fill_mode=fill_mode,
+            nvenc_cq=args_nvenc_cq,
+            bitrate_mbps=args_bitrate_mbps,
+            x264_crf=args_x264_crf,
         ):
             return False, idx, "视频拼接失败"
         
@@ -541,14 +552,14 @@ def process_single_output(args_tuple):
             if output_spec.suffix.lower() == '.mp4':
                 # 文件路径：多个输出时在文件名后加序号
                 out_dir = output_spec.parent
-                out_name = f"{output_spec.stem}_{idx}{output_spec.suffix}"
+                out_name = f"{output_spec.stem}_{idx}_{auto_seed}_{output_spec.suffix}"
             else:
                 # 目录路径：使用默认文件名模板
                 out_dir = output_spec
-                out_name = f"concat_{args_count}videos_with_bgm_{idx}.mp4"
+                out_name = f"concat_{args_count}videos_with_bgm_{idx}_{auto_seed}.mp4"
         else:
             out_dir = default_output_dir
-            out_name = f"concat_{args_count}videos_with_bgm_{idx}.mp4"
+            out_name = f"concat_{args_count}videos_with_bgm_{idx}_{auto_seed}.mp4"
         
         out_path = out_dir / out_name
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -581,12 +592,16 @@ def main():
     parser.add_argument('--threads', type=int, default=4, help='并发处理线程数（默认4，建议不超过CPU核心数）')
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
-    parser.add_argument('--fps', type=int, default=30, help='输出帧率（默认30）')
+    parser.add_argument('--fps', type=int, default=25, help='输出帧率（默认25）')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
     # 默认启用分辨率分组，使用 --no-group-res 可关闭
     parser.add_argument('--group-res', dest='group_res', action='store_true', default=True,
                         help='默认按分辨率分组拼接并输出（文件名追加分辨率后缀），使用 --no-group-res 关闭')
     parser.add_argument('--no-group-res', dest='group_res', action='store_false', help='关闭分辨率分组模式')
+    # 压缩参数：在不影响观感的前提下减小体积
+    parser.add_argument('--nvenc-cq', type=int, default=28, help='NVENC质量参数cq（默认26，值越大体积越小）')
+    parser.add_argument('--crf', type=int, default=26, help='x264 CRF（默认22，值越大体积越小）')
+    parser.add_argument('--bitrate', type=int, default=5, help='NVENC目标码率，单位Mbps（默认6）')
     
     args = parser.parse_args()
     
@@ -679,7 +694,8 @@ def main():
                         vids = qualified_groups[key]
                         for i in range(1, count_out + 1):
                             task_args = (key, vids, i, bgm_input_path, temp_dir, output_spec,
-                                         default_output_dir, args.count, args.gpu, args.fps)
+                                         default_output_dir, args.count, args.gpu, args.fps,
+                                         args.nvenc_cq, args.bitrate, args.crf)
                             fut = executor.submit(process_group_single_output, task_args)
                             futures[fut] = (key, i)
                     for fut in as_completed(futures):
@@ -723,6 +739,7 @@ def main():
                      idx, all_videos, bgm_input_path, temp_dir, output_spec,
                      default_output_dir, args.count, args.gpu, args.outputs,
                      args.width, args.height, args.fps, args.fill,
+                     args.nvenc_cq, args.bitrate, args.crf,
                  )
                 tasks.append(task_args)
             
@@ -802,6 +819,7 @@ def main():
                     use_gpu=args.gpu, temp_dir=temp_dir,
                     target_width=args.width, target_height=args.height,
                     target_fps=args.fps, fill_mode=args.fill,
+                    nvenc_cq=args.nvenc_cq, bitrate_mbps=args.bitrate, x264_crf=args.crf,
                 ):
                     print("❌ 视频拼接失败")
                     sys.exit(1)
@@ -834,13 +852,14 @@ def main():
         
     except Exception as e:
         print(f"❌ 程序执行失败: {e}")
-        return 
+        sys.exit(1)
 
     finally:
         # 清理临时文件（无论是否提前 return 都会执行）
         try:
-            shutil.rmtree(temp_dir)
-            print(f"🧹 已清理临时目录: {temp_dir}")
+            if 'temp_dir' in locals() and isinstance(temp_dir, Path) and temp_dir.exists():
+                shutil.rmtree(temp_dir)
+                print(f"🧹 已清理临时目录: {temp_dir}")
         except Exception as e:
             print(f"⚠️  清理临时目录失败: {e}")
     
