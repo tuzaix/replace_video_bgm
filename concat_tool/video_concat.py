@@ -574,13 +574,19 @@ def main():
     parser.add_argument('-n', '--count', type=int, default=5, help='每个输出随机选择的视频数量（默认5个）')
     parser.add_argument('-m', '--outputs', type=int, default=1, help='生成的随机拼接视频数量（默认1个）')
     parser.add_argument('-o', '--output', help='输出文件路径或目录（默认在视频目录同级创建_longvideo目录）')
-    parser.add_argument('--gpu', action='store_true', help='使用GPU加速编码（需ffmpeg支持h264_nvenc）')
+    # 默认启用 GPU，加 --no-gpu 可关闭
+    parser.add_argument('--gpu', dest='gpu', action='store_true', default=True,
+                        help='默认启用GPU加速（需ffmpeg支持h264_nvenc），使用 --no-gpu 关闭')
+    parser.add_argument('--no-gpu', dest='gpu', action='store_false', help='关闭GPU加速')
     parser.add_argument('--threads', type=int, default=4, help='并发处理线程数（默认4，建议不超过CPU核心数）')
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=30, help='输出帧率（默认30）')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
-    parser.add_argument('--group-res', action='store_true', help='按照分辨率分组拼接并输出（文件名追加分辨率后缀）')
+    # 默认启用分辨率分组，使用 --no-group-res 可关闭
+    parser.add_argument('--group-res', dest='group_res', action='store_true', default=True,
+                        help='默认按分辨率分组拼接并输出（文件名追加分辨率后缀），使用 --no-group-res 关闭')
+    parser.add_argument('--no-group-res', dest='group_res', action='store_false', help='关闭分辨率分组模式')
     
     args = parser.parse_args()
     
@@ -826,16 +832,19 @@ def main():
                 print(f"📄 输出文件: {out_path}")
                 print(f"📊 文件大小: {out_path.stat().st_size / (1024*1024):.1f} MB")
         
-        # 清理临时文件
+    except Exception as e:
+        print(f"❌ 程序执行失败: {e}")
+        return 
+
+    finally:
+        # 清理临时文件（无论是否提前 return 都会执行）
         try:
             shutil.rmtree(temp_dir)
             print(f"🧹 已清理临时目录: {temp_dir}")
         except Exception as e:
             print(f"⚠️  清理临时目录失败: {e}")
     
-    except Exception as e:
-        print(f"❌ 程序执行失败: {e}")
-        sys.exit(1)
+    
 
 
 if __name__ == '__main__':
