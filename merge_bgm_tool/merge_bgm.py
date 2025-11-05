@@ -387,7 +387,7 @@ def main():
     parser.add_argument('--copy-video', action='store_true', help='不重编码视频，直接替换合成BGM（速度最快，依赖容器/视频编码兼容性）')
     parser.add_argument('--max-compression', action='store_true', help='启用最大压缩模式，进一步减小文件体积（会增加编码时间）')
     parser.add_argument('--two-pass', action='store_true', help='启用两遍编码，获得更好的压缩效果（会显著增加编码时间）')
-    parser.add_argument('--target-reduction', type=float, default=0.5, help='目标体积压缩比例，例如0.5表示压缩到50%大小')
+    parser.add_argument('--target-reduction', type=float, default=0.7, help='目标体积压缩比例，例如0.5表示压缩到50%大小')
 
     args = parser.parse_args()
 
