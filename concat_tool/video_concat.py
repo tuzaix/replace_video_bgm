@@ -580,11 +580,11 @@ def process_single_output(args_tuple):
 
 def main():
     parser = argparse.ArgumentParser(description='视频拼接工具 - 随机选择视频拼接并替换BGM')
-    parser.add_argument('video_dir', help='视频目录路径')
+    parser.add_argument('video_dirs', nargs='+', help='视频目录路径（可多个）')
     parser.add_argument('bgm_path', help='BGM音频文件路径或音频目录路径（目录时随机选择）')
     parser.add_argument('-n', '--count', type=int, default=5, help='每个输出随机选择的视频数量（默认5个）')
     parser.add_argument('-m', '--outputs', type=int, default=1, help='生成的随机拼接视频数量（默认1个）')
-    parser.add_argument('-o', '--output', help='输出文件路径或目录（默认在视频目录同级创建_longvideo目录）')
+    parser.add_argument('-o', '--output', help='输出文件路径或目录（多目录输入时必须为目录；默认在第一个目录同级创建<name>_longvideo_combined）')
     # 默认启用 GPU，加 --no-gpu 可关闭
     parser.add_argument('--gpu', dest='gpu', action='store_true', default=True,
                         help='默认启用GPU加速（需ffmpeg支持h264_nvenc），使用 --no-gpu 关闭')
@@ -599,19 +599,20 @@ def main():
                         help='默认按分辨率分组拼接并输出（文件名追加分辨率后缀），使用 --no-group-res 关闭')
     parser.add_argument('--no-group-res', dest='group_res', action='store_false', help='关闭分辨率分组模式')
     # 压缩参数：在不影响观感的前提下减小体积
-    parser.add_argument('--nvenc-cq', type=int, default=28, help='NVENC质量参数cq（默认26，值越大体积越小）')
-    parser.add_argument('--crf', type=int, default=26, help='x264 CRF（默认22，值越大体积越小）')
-    parser.add_argument('--bitrate', type=int, default=5, help='NVENC目标码率，单位Mbps（默认6）')
+    parser.add_argument('--nvenc-cq', type=int, default=28, help='NVENC质量参数cq（默认28，值越大体积越小）')
+    parser.add_argument('--crf', type=int, default=26, help='x264 CRF（默认26，值越大体积越小）')
+    parser.add_argument('--bitrate', type=int, default=5, help='NVENC目标码率，单位Mbps（默认5）')
     
     args = parser.parse_args()
     
-    # 验证输入路径
-    video_dir = Path(args.video_dir)
+    # 验证输入路径（支持多个视频目录）
+    video_dirs = [Path(p) for p in args.video_dirs]
     bgm_input_path = Path(args.bgm_path)
     
-    if not video_dir.exists() or not video_dir.is_dir():
-        print(f"❌ 错误：视频目录不存在或不是目录: {video_dir}")
-        sys.exit(1)
+    for d in video_dirs:
+        if not d.exists() or not d.is_dir():
+            print(f"❌ 错误：视频目录不存在或不是目录: {d}")
+            sys.exit(1)
     
     if not bgm_input_path.exists():
         print(f"❌ 错误：BGM路径不存在: {bgm_input_path}")
@@ -629,25 +630,42 @@ def main():
         print("❌ 错误：fps 必须为正整数")
         sys.exit(1)
     
-    # 设置输出路径规范（支持多输出）：
-    # 如果提供的是文件路径且生成多个输出，则在文件名后加序号；
-    # 如果提供的是目录或未提供，则使用默认目录和文件名模板。
+    # 设置输出路径规范（支持多目录聚合）：
+    # - 如果提供的是文件路径且为多目录输入，则报错；
+    # - 如果提供的是目录或未提供，则使用默认目录和文件名模板。
     output_spec = Path(args.output) if args.output else None
-    default_output_dir = video_dir.parent / f"{video_dir.name}_longvideo"
+    if output_spec and output_spec.suffix.lower() == '.mp4' and len(video_dirs) > 1:
+        print("❌ 错误：多目录输入时请提供输出目录（不支持单文件路径）")
+        sys.exit(1)
+
+    # 计算默认输出目录
+    if len(video_dirs) == 1:
+        default_output_dir = video_dirs[0].parent / f"{video_dirs[0].name}_longvideo"
+    else:
+        base_parent = video_dirs[0].parent
+        default_output_dir = base_parent / f"{video_dirs[0].name}_longvideo_combined"
     
     try:
-        print(f"📁 扫描视频目录: {video_dir}")
+        print("📁 扫描视频目录:")
+        for d in video_dirs:
+            print(f"  - {d}")
         
-        # 查找所有视频文件
-        all_videos = find_videos(video_dir)
+        # 查找所有视频文件（跨多个目录聚合）
+        all_videos: List[Path] = []
+        for d in video_dirs:
+            all_videos.extend(find_videos(d))
         if not all_videos:
-            print("❌ 错误：未在目录中找到任何支持的视频文件")
+            print("❌ 错误：在输入目录中未找到任何支持的视频文件")
             sys.exit(1)
         
-        print(f"📹 找到 {len(all_videos)} 个视频文件")
+        print(f"📹 合计找到 {len(all_videos)} 个视频文件")
         
-        # 创建临时目录：视频目录名 + _temp
-        temp_dir = video_dir.parent / f"{video_dir.name}_temp"
+        # 创建临时目录：
+        # 单目录：<dir>_temp；多目录：<first>_temp_combined
+        if len(video_dirs) == 1:
+            temp_dir = video_dirs[0].parent / f"{video_dirs[0].name}_temp"
+        else:
+            temp_dir = video_dirs[0].parent / f"{video_dirs[0].name}_temp_combined"
         temp_dir.mkdir(parents=True, exist_ok=True)
         print(f"📁 临时目录: {temp_dir}")
         
