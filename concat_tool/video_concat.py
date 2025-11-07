@@ -225,9 +225,9 @@ def get_ts_output_path(video_path: Path, input_roots: List[Path]) -> Path:
     return ts_dir / (video_path.stem + '.ts')
 
 
-def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_tail_seconds: float) -> List[Path]:
+def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_head_seconds: float, trim_tail_seconds: float) -> List[Path]:
     """将源视频列表映射为可用的 TS 片段路径列表。
-    - 若目标 TS 缺失或为空，则即时进行无重编码转换，并在转换时裁剪尾部 `trim_tail_seconds`。
+    - 若目标 TS 缺失或为空，则即时进行无重编码转换，并在转换时裁剪开头 `trim_head_seconds` 与尾部 `trim_tail_seconds`。
     - 返回成功生成的 TS 路径列表；失败或过短的条目会被跳过。
     """
     ts_list: List[Path] = []
@@ -235,7 +235,7 @@ def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_tail_s
         ts_path = get_ts_output_path(src, input_roots)
         try:
             if not ts_path.exists() or ts_path.stat().st_size == 0:
-                ok = convert_video_to_ts(src, ts_path, trim_tail_seconds=trim_tail_seconds)
+                ok = convert_video_to_ts(src, ts_path, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds)
                 if not ok:
                     print(f"⏭️ TS不可用，跳过片段: {src.name}")
                     continue
@@ -245,12 +245,11 @@ def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_tail_s
     return ts_list
 
 
-def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_tail_seconds: float = 1.0) -> bool:
-    """将单个视频无重编码地转换为 MPEG-TS 容器，避免拼接卡顿。
-    - 默认使用 `-c copy`，根据源编码选择对应的 bitstream filter：
-      h264 -> h264_mp4toannexb，hevc -> hevc_mp4toannexb，其它省略 bsf。
-    - 不存在父目录时自动创建。
-    - 支持在转换阶段直接裁剪尾部时长（`trim_tail_seconds`），减少后续拼接卡顿。
+def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds: float = 0.0, trim_tail_seconds: float = 1.0) -> bool:
+    """将视频无重编码地转换为 MPEG-TS，支持裁剪开头与尾部。
+    - 使用 `-c copy`，按源编码选择 bsf：h264 -> h264_mp4toannexb，hevc -> hevc_mp4toannexb。
+    - 允许在转换阶段裁剪开头(`trim_head_seconds`)与尾部(`trim_tail_seconds`)以减少拼接卡顿。
+    - 当裁剪后长度不足阈值时跳过该片段。
     返回 True/False 表示成功与否。
     """
     try:
@@ -269,21 +268,29 @@ def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_tail_seconds
         output_ts.parent.mkdir(parents=True, exist_ok=True)
 
         codec = probe_video_codec_ffprobe(input_video) or ''
-        # 计算裁剪后的时长（如配置了尾部裁剪）
+        # 计算裁剪参数与输出时长
         out_duration = None
         try:
-            if trim_tail_seconds and float(trim_tail_seconds) > 0:
-                dur = probe_duration_ffprobe(input_video)
-                if dur is not None:
-                    out_duration = max(0.0, dur - float(trim_tail_seconds))
-                    if out_duration <= 0.05:
-                        print(f"⏭️ 片段过短，跳过 TS 转换: {input_video.name} (时长 {dur:.2f}s, 裁剪 {trim_tail_seconds}s)")
-                        return False
+            dur = probe_duration_ffprobe(input_video)
+            head = max(0.0, float(trim_head_seconds or 0.0))
+            tail = max(0.0, float(trim_tail_seconds or 0.0))
+            if dur is not None:
+                out_duration = max(0.0, dur - head - tail)
+                if out_duration <= 0.05:
+                    print(f"⏭️ 片段过短，跳过 TS 转换: {input_video.name} (时长 {dur:.2f}s, 头裁剪 {head:.2f}s, 尾裁剪 {tail:.2f}s)")
+                    return False
         except Exception:
             # 若获取时长失败，则继续无裁剪转换
             out_duration = None
 
-        cmd = [ffmpeg_bin, '-y', '-i', str(input_video), '-c', 'copy']
+        cmd = [ffmpeg_bin, '-y']
+        # 开头裁剪：输入级快速seek，结合流复制以提升效率
+        try:
+            if trim_head_seconds and float(trim_head_seconds) > 0:
+                cmd += ['-ss', f'{max(0.0, float(trim_head_seconds)):.3f}']
+        except Exception:
+            pass
+        cmd += ['-i', str(input_video), '-c', 'copy']
         if codec.lower() == 'h264':
             cmd += ['-bsf:v', 'h264_mp4toannexb']
         elif codec.lower() == 'hevc':
@@ -315,7 +322,7 @@ def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_tail_seconds
         return False
 
 
-def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int, *, trim_tail_seconds: float = 1.0) -> None:
+def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int, *, trim_head_seconds: float = 0.0, trim_tail_seconds: float = 1.0) -> None:
     """并发将输入目录中的所有视频转换为 TS 并写入各自根目录的 _temp/video_ts。
     - 线程数复用 `threads` 参数。
     - 已有且非空的 TS 文件会跳过。
@@ -329,7 +336,7 @@ def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int,
             futures = {}
             for v in videos:
                 out_ts = get_ts_output_path(v, input_roots)
-                fut = executor.submit(convert_video_to_ts, v, out_ts, trim_tail_seconds=trim_tail_seconds)
+                fut = executor.submit(convert_video_to_ts, v, out_ts, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds)
                 futures[fut] = (v, out_ts)
             for fut in as_completed(futures):
                 v, out_ts = futures[fut]
@@ -401,7 +408,7 @@ def process_group_single_output(args_tuple):
     返回 (success, msg)
     """
     (group_key, group_videos, out_index, bgm_input_path, temp_dir, output_spec,
-     default_output_dir, args_count, args_gpu, target_fps, args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_tail, input_roots) = args_tuple
+     default_output_dir, args_count, args_gpu, target_fps, args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_head, args_trim_tail, input_roots) = args_tuple
     try:
         w, h = group_key
         auto_seed = generate_auto_seed()
@@ -416,7 +423,7 @@ def process_group_single_output(args_tuple):
         print(f"🔄 [组 {w}x{h}] 输出{out_index} 选择了 {len(selected)} 个视频片段…")
 
         # 将所选视频映射为 TS 文件路径；若不存在则尝试即时转换（统一辅助函数）
-        selected_ts = ensure_ts_segments(selected, input_roots, args_trim_tail)
+        selected_ts = ensure_ts_segments(selected, input_roots, args_trim_head, args_trim_tail)
         if not selected_ts:
             return False, f"组 {w}x{h} 输出{out_index} 无可用TS片段"
 
@@ -542,6 +549,240 @@ def write_concat_list_file(videos: List[Path], list_file: Path) -> int:
     with open(list_file, 'w', encoding='utf-8') as f:
         f.writelines(lines)
     return len(lines)
+
+
+def validate_and_prepare(args: argparse.Namespace):
+    """校验参数并准备关键路径对象。
+    返回 (video_dirs, bgm_input_path, output_spec, default_output_dir)。
+    """
+    video_dirs = [Path(p) for p in args.video_dirs]
+    bgm_input_path = Path(args.bgm_path)
+    for d in video_dirs:
+        if not d.exists() or not d.is_dir():
+            print(f"❌ 错误：视频目录不存在或不是目录: {d}")
+            sys.exit(1)
+    if not bgm_input_path.exists():
+        print(f"❌ 错误：BGM路径不存在: {bgm_input_path}")
+        sys.exit(1)
+    if args.threads < 1:
+        print(f"❌ 错误：线程数必须大于0")
+        sys.exit(1)
+    if args.width <= 0 or args.height <= 0:
+        print("❌ 错误：width/height 必须为正整数")
+        sys.exit(1)
+    if args.fps <= 0:
+        print("❌ 错误：fps 必须为正整数")
+        sys.exit(1)
+    output_spec = Path(args.output) if args.output else None
+    if output_spec and output_spec.suffix.lower() == '.mp4' and len(video_dirs) > 1:
+        print("❌ 错误：多目录输入时请提供输出目录（不支持单文件路径）")
+        sys.exit(1)
+    if len(video_dirs) == 1:
+        default_output_dir = video_dirs[0].parent / f"{video_dirs[0].name}_longvideo"
+    else:
+        base_parent = video_dirs[0].parent
+        default_output_dir = base_parent / f"{video_dirs[0].name}_longvideo_combined"
+    return video_dirs, bgm_input_path, output_spec, default_output_dir
+
+
+def discover_all_videos(video_dirs: List[Path]) -> List[Path]:
+    """扫描所有视频目录并聚合支持的视频文件列表。"""
+    print("📁 扫描视频目录:")
+    for d in video_dirs:
+        print(f"  - {d}")
+    all_videos: List[Path] = []
+    for d in video_dirs:
+        all_videos.extend(find_videos(d))
+    if not all_videos:
+        print("❌ 错误：在输入目录中未找到任何支持的视频文件")
+        sys.exit(1)
+    print(f"📹 合计找到 {len(all_videos)} 个视频文件")
+    return all_videos
+
+
+def create_temp_dir(video_dirs: List[Path]) -> Path:
+    """创建并返回临时目录路径（单目录与多目录命名不同）。"""
+    if len(video_dirs) == 1:
+        temp_dir = video_dirs[0].parent / f"{video_dirs[0].name}_temp"
+    else:
+        temp_dir = video_dirs[0].parent / f"{video_dirs[0].name}_temp_combined"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 临时目录: {temp_dir}")
+    return temp_dir
+
+
+def run_grouped_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_input_path: Path,
+                        temp_dir: Path, output_spec: Optional[Path], default_output_dir: Path,
+                        input_roots: List[Path]) -> None:
+    """执行分辨率分组模式，按分配并发生成多个输出。"""
+    print("📐 开启分辨率分组模式：将按分辨率分别拼接输出")
+    groups = group_videos_by_resolution(all_videos)
+    if not groups:
+        print("❌ 错误：无法按分辨率分组（可能没有有效视频）")
+        sys.exit(1)
+    qualified_groups = {k: v for k, v in groups.items() if len(v) > 20}
+    print("📊 分组结果（仅保留 >20 个视频的分组）：")
+    for (w, h), vids in sorted(groups.items(), key=lambda kv: (kv[0][1], kv[0][0], -len(kv[1]))):
+        mark = "✅" if (w, h) in qualified_groups else "⏭️"
+        print(f"  - {w}x{h}: {len(vids)} 个视频 {mark}")
+    if not qualified_groups:
+        print("❌ 错误：没有分辨率分组达到 >20 个视频，结束。")
+        sys.exit(1)
+    allocation = allocate_outputs_by_group_size(qualified_groups, args.outputs)
+    total_tasks = sum(n for _, n in allocation)
+    print("📦 分配结果（组分辨率 -> 输出数量）：")
+    for (w, h), n in allocation:
+        print(f"  - {w}x{h} -> {n}")
+    if total_tasks == 0:
+        print("❌ 错误：总输出数量为 0，结束。")
+        sys.exit(1)
+    max_workers = min(args.threads, total_tasks)
+    print(f"🚀 并发任务数: {max_workers}，总任务: {total_tasks}")
+    results = []
+    failed = 0
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for (key, count_out) in allocation:
+                vids = qualified_groups[key]
+                for i in range(1, count_out + 1):
+                    task_args = (key, vids, i, bgm_input_path, temp_dir, output_spec,
+                                 default_output_dir, args.count, args.gpu, args.fps,
+                                 args.nvenc_cq, args.bitrate, args.crf, args.trim_head, args.trim_tail, input_roots)
+                    fut = executor.submit(process_group_single_output, task_args)
+                    futures[fut] = (key, i)
+            for fut in as_completed(futures):
+                key, i = futures[fut]
+                w, h = key
+                try:
+                    ok, msg = fut.result()
+                    if ok:
+                        print(f"✅ [组 {w}x{h}] 输出{i} 完成: {msg}")
+                        results.append(msg)
+                    else:
+                        print(f"❌ [组 {w}x{h}] 输出{i} 失败: {msg}")
+                        failed += 1
+                except Exception as e:
+                    print(f"❌ [组 {w}x{h}] 输出{i} 异常: {e}")
+                    failed += 1
+    except KeyboardInterrupt:
+        print("⚠️ 用户中断，停止分组处理…")
+        sys.exit(1)
+    print("\n📊 分组模式完成")
+    print(f"✅ 成功: {len(results)} 个输出, ❌ 失败: {failed} 个输出")
+    if results:
+        print("🎉 输出文件：")
+        for r in results:
+            print(f"  - {r}")
+
+
+def run_random_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_input_path: Path,
+                       temp_dir: Path, output_spec: Optional[Path], default_output_dir: Path,
+                       input_roots: List[Path]) -> None:
+    """执行随机拼接模式，根据输出数与线程决定并发或串行。"""
+    use_concurrent = args.outputs > 1 and args.threads > 1
+    if use_concurrent:
+        max_workers = min(args.threads, args.outputs)
+        print(f"🚀 启用并发处理，使用 {max_workers} 个线程")
+        tasks = []
+        for idx in range(1, args.outputs + 1):
+            task_args = (
+                 idx, all_videos, bgm_input_path, temp_dir, output_spec,
+                 default_output_dir, args.count, args.gpu, args.outputs,
+                 args.width, args.height, args.fps, args.fill,
+                 args.nvenc_cq, args.bitrate, args.crf, args.trim_head, args.trim_tail, input_roots,
+             )
+            tasks.append(task_args)
+        results = []
+        failed_count = 0
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_idx = {executor.submit(process_single_output, task): task[0] for task in tasks}
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        success, result_idx, message = future.result()
+                        if success:
+                            results.append((result_idx, message))
+                            print(f"✅ 任务 {result_idx} 完成")
+                        else:
+                            failed_count += 1
+                            print(f"❌ 任务 {result_idx} 失败: {message}")
+                    except Exception as e:
+                        failed_count += 1
+                        print(f"❌ 任务 {idx} 异常: {e}")
+            print(f"\n📊 并发处理完成:")
+            print(f"✅ 成功: {len(results)} 个")
+            print(f"❌ 失败: {failed_count} 个")
+            if results:
+                print(f"\n🎉 成功生成的文件:")
+                for idx, file_path in sorted(results):
+                    file_size = Path(file_path).stat().st_size / (1024*1024)
+                    print(f"  {idx}. {file_path} ({file_size:.1f} MB)")
+        except KeyboardInterrupt:
+            print(f"\n⚠️ 用户中断，正在停止所有任务...")
+            sys.exit(1)
+        return
+    # 串行处理
+    if args.outputs == 1:
+        print("🔄 单个输出，使用串行处理")
+    else:
+        print("🔄 使用串行处理（threads=1 或 outputs=1）")
+    for idx in range(1, args.outputs + 1):
+        print(f"\n=== 开始第 {idx}/{args.outputs} 个输出 ===")
+        auto_seed = generate_auto_seed()
+        print(f"🎲 使用随机种子: {auto_seed}")
+        selected_videos = select_random_videos(all_videos, args.count, auto_seed)
+        print(f"🎲 随机选择了 {len(selected_videos)} 个视频:")
+        for i, video in enumerate(selected_videos, 1):
+            print(f"  {i}. {video.name}")
+        selected_ts = ensure_ts_segments(selected_videos, input_roots, args.trim_head, args.trim_tail)
+        if not selected_ts:
+            print("❌ 无可用TS片段，结束。")
+            sys.exit(1)
+        try:
+            bgm_path = select_bgm_file(bgm_input_path, auto_seed)
+            print(f"🎵 使用BGM: {bgm_path.name}")
+        except ValueError as e:
+            print(f"❌ BGM选择错误: {e}")
+            sys.exit(1)
+        temp_concat_output = temp_dir / f"temp_concat_{idx}.mp4"
+        if not concat_videos(
+            selected_ts, temp_concat_output,
+            use_gpu=args.gpu, temp_dir=temp_dir,
+            target_width=args.width, target_height=args.height,
+            target_fps=args.fps, fill_mode=args.fill,
+            nvenc_cq=args.nvenc_cq, bitrate_mbps=args.bitrate, x264_crf=args.crf,
+            trim_tail_seconds=args.trim_tail,
+        ):
+            print("❌ 视频拼接失败")
+            sys.exit(1)
+        if output_spec:
+            if output_spec.suffix.lower() == '.mp4':
+                out_dir = output_spec.parent
+                out_name = f"{output_spec.stem}_{idx}{output_spec.suffix}"
+            else:
+                out_dir = output_spec
+                out_name = f"concat_{args.count}videos_with_bgm_{idx}.mp4"
+        else:
+            out_dir = default_output_dir
+            out_name = f"concat_{args.count}videos_with_bgm_{idx}.mp4"
+        out_path = out_dir / out_name
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if not replace_audio_with_bgm(temp_concat_output, bgm_path, out_path, use_gpu=args.gpu):
+            print("❌ BGM替换失败")
+            sys.exit(1)
+        print(f"\n🎉 第 {idx} 个输出完成！")
+        print(f"📄 输出文件: {out_path}")
+        print(f"📊 文件大小: {out_path.stat().st_size / (1024*1024):.1f} MB")
+
+
+def preconvert_all_ts(all_videos: List[Path], input_roots: List[Path], threads: int, trim_head_seconds: float, trim_tail_seconds: float) -> None:
+    """对所有输入视频进行TS预转换，统一裁剪开头/尾部时长，提升拼接稳定性。"""
+    try:
+        convert_all_to_ts(all_videos, input_roots, threads, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds)
+    except KeyboardInterrupt:
+        sys.exit(1)
 
 
 def concat_videos(
@@ -783,7 +1024,7 @@ def process_single_output(args_tuple):
     """处理单个输出的函数，用于并发执行"""
     (idx, all_videos, bgm_input_path, temp_dir, output_spec, default_output_dir, 
      args_count, args_gpu, total_outputs, target_width, target_height, target_fps, fill_mode,
-     args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_tail, input_roots) = args_tuple
+     args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_head, args_trim_tail, input_roots) = args_tuple
     
     try:
         print(f"\n=== 开始第 {idx}/{total_outputs} 个输出 ===")
@@ -799,7 +1040,7 @@ def process_single_output(args_tuple):
             print(f"  {i}. {video.name}")
 
         # 映射为 TS 文件；如缺失则即时转换（统一辅助函数）
-        selected_ts = ensure_ts_segments(selected_videos, input_roots, args_trim_tail)
+        selected_ts = ensure_ts_segments(selected_videos, input_roots, args_trim_head, args_trim_tail)
         if not selected_ts:
             return False, idx, "无可用TS片段"
         
@@ -878,7 +1119,8 @@ def main():
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=25, help='输出帧率（默认25）')
-    parser.add_argument('--trim-tail', type=float, default=3.0, help='在转换为TS时裁剪每段视频结尾N秒（默认3.0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--trim-head', type=float, default=1.0, help='在转换为TS时裁剪每段视频开头N秒（默认0.0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--trim-tail', type=float, default=2.0, help='在转换为TS时裁剪每段视频结尾N秒（默认3.0秒）；拼接阶段不再逐段裁剪')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
     # 默认启用分辨率分组，使用 --no-group-res 可关闭
     parser.add_argument('--group-res', dest='group_res', action='store_true', default=True,
@@ -891,281 +1133,27 @@ def main():
     
     args = parser.parse_args()
     
-    # 验证输入路径（支持多个视频目录）
-    video_dirs = [Path(p) for p in args.video_dirs]
-    bgm_input_path = Path(args.bgm_path)
-    
-    for d in video_dirs:
-        if not d.exists() or not d.is_dir():
-            print(f"❌ 错误：视频目录不存在或不是目录: {d}")
-            sys.exit(1)
-    
-    if not bgm_input_path.exists():
-        print(f"❌ 错误：BGM路径不存在: {bgm_input_path}")
-        sys.exit(1)
-    
-    # 验证线程数
-    if args.threads < 1:
-        print(f"❌ 错误：线程数必须大于0")
-        sys.exit(1)
-    # 验证输出规格
-    if args.width <= 0 or args.height <= 0:
-        print("❌ 错误：width/height 必须为正整数")
-        sys.exit(1)
-    if args.fps <= 0:
-        print("❌ 错误：fps 必须为正整数")
-        sys.exit(1)
-    
-    # 设置输出路径规范（支持多目录聚合）：
-    # - 如果提供的是文件路径且为多目录输入，则报错；
-    # - 如果提供的是目录或未提供，则使用默认目录和文件名模板。
-    output_spec = Path(args.output) if args.output else None
-    if output_spec and output_spec.suffix.lower() == '.mp4' and len(video_dirs) > 1:
-        print("❌ 错误：多目录输入时请提供输出目录（不支持单文件路径）")
-        sys.exit(1)
-
-    # 计算默认输出目录
-    if len(video_dirs) == 1:
-        default_output_dir = video_dirs[0].parent / f"{video_dirs[0].name}_longvideo"
-    else:
-        base_parent = video_dirs[0].parent
-        default_output_dir = base_parent / f"{video_dirs[0].name}_longvideo_combined"
+    # 参数校验与路径准备
+    video_dirs, bgm_input_path, output_spec, default_output_dir = validate_and_prepare(args)
     
     try:
-        print("📁 扫描视频目录:")
-        for d in video_dirs:
-            print(f"  - {d}")
-        
-        # 查找所有视频文件（跨多个目录聚合）
-        all_videos: List[Path] = []
-        for d in video_dirs:
-            all_videos.extend(find_videos(d))
-        if not all_videos:
-            print("❌ 错误：在输入目录中未找到任何支持的视频文件")
-            sys.exit(1)
-        
-        print(f"📹 合计找到 {len(all_videos)} 个视频文件")
+        # 扫描并聚合所有视频
+        all_videos = discover_all_videos(video_dirs)
         
         # 预转换：将所有输入视频转换为 TS，提升后续拼接稳定性
-        try:
-            convert_all_to_ts(all_videos, video_dirs, args.threads, trim_tail_seconds=args.trim_tail)
-        except KeyboardInterrupt:
-            sys.exit(1)
+        preconvert_all_ts(all_videos, video_dirs, args.threads, trim_head_seconds=args.trim_head, trim_tail_seconds=args.trim_tail)
         
-        # 创建临时目录：
-        # 单目录：<dir>_temp；多目录：<first>_temp_combined
-        if len(video_dirs) == 1:
-            temp_dir = video_dirs[0].parent / f"{video_dirs[0].name}_temp"
-        else:
-            temp_dir = video_dirs[0].parent / f"{video_dirs[0].name}_temp_combined"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        print(f"📁 临时目录: {temp_dir}")
+        # 创建临时目录
+        temp_dir = create_temp_dir(video_dirs)
         
         # 决定是否使用分辨率分组模式
         if args.group_res:
-            print("📐 开启分辨率分组模式：将按分辨率分别拼接输出")
-            groups = group_videos_by_resolution(all_videos)
-            if not groups:
-                print("❌ 错误：无法按分辨率分组（可能没有有效视频）")
-                sys.exit(1)
-
-            # 仅保留视频数量 > 20 的分组
-            qualified_groups = {k: v for k, v in groups.items() if len(v) > 20}
-
-            print("📊 分组结果（仅保留 >20 个视频的分组）：")
-            for (w, h), vids in sorted(groups.items(), key=lambda kv: (kv[0][1], kv[0][0], -len(kv[1]))):
-                mark = "✅" if (w, h) in qualified_groups else "⏭️"
-                print(f"  - {w}x{h}: {len(vids)} 个视频 {mark}")
-
-            if not qualified_groups:
-                print("❌ 错误：没有分辨率分组达到 >20 个视频，结束。")
-                sys.exit(1)
-
-            # 按分组视频数量比例分配总输出数量
-            allocation = allocate_outputs_by_group_size(qualified_groups, args.outputs)
-            total_tasks = sum(n for _, n in allocation)
-            print("📦 分配结果（组分辨率 -> 输出数量）：")
-            for (w, h), n in allocation:
-                print(f"  - {w}x{h} -> {n}")
-            if total_tasks == 0:
-                print("❌ 错误：总输出数量为 0，结束。")
-                sys.exit(1)
-
-            # 并发执行所有任务（跨分组）
-            max_workers = min(args.threads, total_tasks)
-            print(f"🚀 并发任务数: {max_workers}，总任务: {total_tasks}")
-
-            results = []
-            failed = 0
-            try:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {}
-                    for (key, count_out) in allocation:
-                        vids = qualified_groups[key]
-                        for i in range(1, count_out + 1):
-                            task_args = (key, vids, i, bgm_input_path, temp_dir, output_spec,
-                                         default_output_dir, args.count, args.gpu, args.fps,
-                                         args.nvenc_cq, args.bitrate, args.crf, args.trim_tail, video_dirs)
-                            fut = executor.submit(process_group_single_output, task_args)
-                            futures[fut] = (key, i)
-                    for fut in as_completed(futures):
-                        key, i = futures[fut]
-                        w, h = key
-                        try:
-                            ok, msg = fut.result()
-                            if ok:
-                                print(f"✅ [组 {w}x{h}] 输出{i} 完成: {msg}")
-                                results.append(msg)
-                            else:
-                                print(f"❌ [组 {w}x{h}] 输出{i} 失败: {msg}")
-                                failed += 1
-                        except Exception as e:
-                            print(f"❌ [组 {w}x{h}] 输出{i} 异常: {e}")
-                            failed += 1
-            except KeyboardInterrupt:
-                print("⚠️ 用户中断，停止分组处理…")
-                sys.exit(1)
-
-            print("\n📊 分组模式完成")
-            print(f"✅ 成功: {len(results)} 个输出, ❌ 失败: {failed} 个输出")
-            if results:
-                print("🎉 输出文件：")
-                for r in results:
-                    print(f"  - {r}")
+            run_grouped_outputs(args, all_videos, bgm_input_path, temp_dir, output_spec, default_output_dir, video_dirs)
             return
 
         # 决定是否使用并发处理（随机拼接模式）
-        use_concurrent = args.outputs > 1 and args.threads > 1
-        
-        if use_concurrent:
-            # 限制线程数不超过输出数量
-            max_workers = min(args.threads, args.outputs)
-            print(f"🚀 启用并发处理，使用 {max_workers} 个线程")
-            
-            # 准备任务参数
-            tasks = []
-            for idx in range(1, args.outputs + 1):
-                task_args = (
-                     idx, all_videos, bgm_input_path, temp_dir, output_spec,
-                     default_output_dir, args.count, args.gpu, args.outputs,
-                     args.width, args.height, args.fps, args.fill,
-                     args.nvenc_cq, args.bitrate, args.crf, args.trim_tail, video_dirs,
-                 )
-                tasks.append(task_args)
-            
-            # 并发执行
-            results = []
-            failed_count = 0
-            
-            try:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    # 提交所有任务
-                    future_to_idx = {executor.submit(process_single_output, task): task[0] for task in tasks}
-                    
-                    # 收集结果
-                    for future in as_completed(future_to_idx):
-                        idx = future_to_idx[future]
-                        try:
-                            success, result_idx, message = future.result()
-                            if success:
-                                results.append((result_idx, message))
-                                print(f"✅ 任务 {result_idx} 完成")
-                            else:
-                                failed_count += 1
-                                print(f"❌ 任务 {result_idx} 失败: {message}")
-                        except Exception as e:
-                            failed_count += 1
-                            print(f"❌ 任务 {idx} 异常: {e}")
-                
-                # 输出汇总结果
-                print(f"\n📊 并发处理完成:")
-                print(f"✅ 成功: {len(results)} 个")
-                print(f"❌ 失败: {failed_count} 个")
-                
-                if results:
-                    print(f"\n🎉 成功生成的文件:")
-                    for idx, file_path in sorted(results):
-                        file_size = Path(file_path).stat().st_size / (1024*1024)
-                        print(f"  {idx}. {file_path} ({file_size:.1f} MB)")
-                
-            except KeyboardInterrupt:
-                print(f"\n⚠️ 用户中断，正在停止所有任务...")
-                sys.exit(1)
-                
-        else:
-            # 串行处理（原有逻辑）
-            if args.outputs == 1:
-                print("🔄 单个输出，使用串行处理")
-            else:
-                print("🔄 使用串行处理（threads=1 或 outputs=1）")
-            
-            for idx in range(1, args.outputs + 1):
-                print(f"\n=== 开始第 {idx}/{args.outputs} 个输出 ===")
-                
-                # 自动生成随机种子
-                auto_seed = generate_auto_seed()
-                print(f"🎲 使用随机种子: {auto_seed}")
-                
-                # 随机选择视频
-                selected_videos = select_random_videos(all_videos, args.count, auto_seed)
-                print(f"🎲 随机选择了 {len(selected_videos)} 个视频:")
-                for i, video in enumerate(selected_videos, 1):
-                    print(f"  {i}. {video.name}")
-
-                # 使用已转换的 TS 文件；如缺失则即时转换（统一辅助函数）
-                selected_ts = ensure_ts_segments(selected_videos, video_dirs, args.trim_tail)
-                if not selected_ts:
-                    print("❌ 无可用TS片段，结束。")
-                    sys.exit(1)
-                
-                # 选择BGM文件
-                try:
-                    bgm_path = select_bgm_file(bgm_input_path, auto_seed)
-                    print(f"🎵 使用BGM: {bgm_path.name}")
-                except ValueError as e:
-                    print(f"❌ BGM选择错误: {e}")
-                    sys.exit(1)
-                
-                # 临时拼接文件（带序号避免覆盖）
-                temp_concat_output = temp_dir / f"temp_concat_{idx}.mp4"
-
-                # 拼接视频
-                if not concat_videos(
-                    selected_ts, temp_concat_output,
-                    use_gpu=args.gpu, temp_dir=temp_dir,
-                    target_width=args.width, target_height=args.height,
-                    target_fps=args.fps, fill_mode=args.fill,
-                    nvenc_cq=args.nvenc_cq, bitrate_mbps=args.bitrate, x264_crf=args.crf,
-                    trim_tail_seconds=args.trim_tail,
-                ):
-                    print("❌ 视频拼接失败")
-                    sys.exit(1)
-                
-                # 计算输出路径
-                if output_spec:
-                    if output_spec.suffix.lower() == '.mp4':
-                        # 文件路径：多个输出时在文件名后加序号
-                        out_dir = output_spec.parent
-                        out_name = f"{output_spec.stem}_{idx}{output_spec.suffix}"
-                    else:
-                        # 目录路径：使用默认文件名模板
-                        out_dir = output_spec
-                        out_name = f"concat_{args.count}videos_with_bgm_{idx}.mp4"
-                else:
-                    out_dir = default_output_dir
-                    out_name = f"concat_{args.count}videos_with_bgm_{idx}.mp4"
-                
-                out_path = out_dir / out_name
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # 替换BGM（循环或截断到视频长度）
-                if not replace_audio_with_bgm(temp_concat_output, bgm_path, out_path, use_gpu=args.gpu):
-                    print("❌ BGM替换失败")
-                    sys.exit(1)
-                
-                print(f"\n🎉 第 {idx} 个输出完成！")
-                print(f"📄 输出文件: {out_path}")
-                print(f"📊 文件大小: {out_path.stat().st_size / (1024*1024):.1f} MB")
+        # 随机拼接执行（并发或串行）
+        run_random_outputs(args, all_videos, bgm_input_path, temp_dir, output_spec, default_output_dir, video_dirs)
         
     except Exception as e:
         print(f"❌ 程序执行失败: {e}")
@@ -1175,7 +1163,7 @@ def main():
         # 清理临时文件（无论是否提前 return 都会执行）
         try:
             if 'temp_dir' in locals() and isinstance(temp_dir, Path) and temp_dir.exists():
-                shutil.rmtree(temp_dir)
+                # shutil.rmtree(temp_dir)
                 print(f"🧹 已清理临时目录: {temp_dir}")
         except Exception as e:
             print(f"⚠️  清理临时目录失败: {e}")
