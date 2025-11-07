@@ -1123,8 +1123,8 @@ def main():
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=25, help='输出帧率（默认25）')
-    parser.add_argument('--trim-head', type=float, default=1.0, help='在转换为TS时裁剪每段视频开头N秒（默认1.0秒）；拼接阶段不再逐段裁剪')
-    parser.add_argument('--trim-tail', type=float, default=1.0, help='在转换为TS时裁剪每段视频结尾N秒（默认2.0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--trim-head', type=float, default=0.0, help='在转换为TS时裁剪每段视频开头N秒（默认0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--trim-tail', type=float, default=1.0, help='在转换为TS时裁剪每段视频结尾N秒（默认1.0秒）；拼接阶段不再逐段裁剪')
     parser.add_argument('--clear-mismatched-cache', dest='clear_mismatched_cache', action='store_true', default=False,
                         help='预处理前清理与当前裁剪参数不匹配的TS缓存（含旧命名）；默认不清理')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
