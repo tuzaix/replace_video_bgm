@@ -118,6 +118,45 @@ def probe_resolution_ffprobe(video_path: Path) -> Optional[tuple]:
     return None
 
 
+def probe_duration_ffprobe(video_path: Path) -> Optional[float]:
+    """使用 ffprobe 获取视频时长（秒）。优先 ffprobe，失败时回退 MoviePy。
+    返回浮点秒或 None。"""
+    ffprobe_bin = shutil.which('ffprobe')
+    if ffprobe_bin:
+        try:
+            cmd = [
+                ffprobe_bin,
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(video_path)
+            ]
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode == 0:
+                text = ''
+                try:
+                    text = (res.stdout or b'').decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    try:
+                        text = (res.stdout or b'').decode('mbcs', errors='ignore').strip()
+                    except Exception:
+                        text = ''
+                try:
+                    dur = float(text)
+                    if dur > 0:
+                        return dur
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    # 回退到 MoviePy
+    info = get_video_info(video_path)
+    dur = info.get('duration')
+    if isinstance(dur, (int, float)) and dur > 0:
+        return float(dur)
+    return None
+
+
 def group_videos_by_resolution(videos: List[Path]) -> dict:
     """按分辨率分组视频，返回 dict: {(width, height): [Path, ...]}"""
     groups = {}
@@ -171,7 +210,7 @@ def process_group_single_output(args_tuple):
     返回 (success, msg)
     """
     (group_key, group_videos, out_index, bgm_input_path, temp_dir, output_spec,
-     default_output_dir, args_count, args_gpu, target_fps, args_nvenc_cq, args_bitrate_mbps, args_x264_crf) = args_tuple
+     default_output_dir, args_count, args_gpu, target_fps, args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_tail) = args_tuple
     try:
         w, h = group_key
         auto_seed = generate_auto_seed()
@@ -215,6 +254,7 @@ def process_group_single_output(args_tuple):
             nvenc_cq=args_nvenc_cq,
             bitrate_mbps=args_bitrate_mbps,
             x264_crf=args_x264_crf,
+            trim_tail_seconds=args_trim_tail,
         )
         if not ok:
             return False, f"组 {w}x{h} 输出{out_index} 拼接失败"
@@ -306,12 +346,14 @@ def concat_videos(
     nvenc_cq: int = 24,
     bitrate_mbps: int = 6,
     x264_crf: int = 22,
+    trim_tail_seconds: float = 1.0,
 ) -> bool:
     """使用FFmpeg concat demuxer拼接视频（无音频），支持NVENC加速编码。
     - 生成文件列表并通过 `-f concat -safe 0` 拼接。
     - 统一输出为指定分辨率/帧率/像素格式（可配置）。
     - 输出不包含音轨（-an），以便后续替换BGM时复制视频流避免重编码。
     - 支持压缩参数：NVENC 使用 `cq` 与目标码率，x264 使用 `crf`。
+    - 在拼接前为每段视频去掉最后 `trim_tail_seconds` 秒（默认1秒），避免结尾黑帧/LOGO。
     """
     try:
         print("🔗 使用FFmpeg进行视频拼接…")
@@ -336,11 +378,30 @@ def concat_videos(
 
         try:
             lines = []
+            skipped = 0
             for v in videos:
+                dur = probe_duration_ffprobe(v)
+                if dur is None:
+                    print(f"⚠️ 无法获取时长，跳过: {v.name}")
+                    skipped += 1
+                    continue
+                outpoint = dur - float(trim_tail_seconds)
+                # 跳过过短视频
+                if outpoint <= 0.05:
+                    print(f"⏭️ 片段过短（{dur:.2f}s），跳过: {v.name}")
+                    skipped += 1
+                    continue
                 p = str(v)
                 # 仅转义单引号，保持反斜杠原样；始终使用引号以兼容空格和非ASCII。
                 p_escaped = p.replace("'", r"'\''")
                 lines.append(f"file '{p_escaped}'\n")
+                lines.append(f"inpoint 0\n")
+                lines.append(f"outpoint {outpoint:.3f}\n")
+            if not lines:
+                print("❌ 所有片段均被跳过（无法获取时长或过短）")
+                return False
+            if skipped:
+                print(f"ℹ️ 已跳过 {skipped} 个片段（过短或无时长）")
             with open(list_file, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
         except Exception as e:
@@ -504,7 +565,7 @@ def process_single_output(args_tuple):
     """处理单个输出的函数，用于并发执行"""
     (idx, all_videos, bgm_input_path, temp_dir, output_spec, default_output_dir, 
      args_count, args_gpu, total_outputs, target_width, target_height, target_fps, fill_mode,
-     args_nvenc_cq, args_bitrate_mbps, args_x264_crf) = args_tuple
+     args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_tail) = args_tuple
     
     try:
         print(f"\n=== 开始第 {idx}/{total_outputs} 个输出 ===")
@@ -544,6 +605,7 @@ def process_single_output(args_tuple):
             nvenc_cq=args_nvenc_cq,
             bitrate_mbps=args_bitrate_mbps,
             x264_crf=args_x264_crf,
+            trim_tail_seconds=args_trim_tail,
         ):
             return False, idx, "视频拼接失败"
         
@@ -593,6 +655,7 @@ def main():
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=25, help='输出帧率（默认25）')
+    parser.add_argument('--trim-tail', type=float, default=1.0, help='为每段视频去掉结尾N秒后再拼接（默认1.0秒）')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
     # 默认启用分辨率分组，使用 --no-group-res 可关闭
     parser.add_argument('--group-res', dest='group_res', action='store_true', default=True,
@@ -713,7 +776,7 @@ def main():
                         for i in range(1, count_out + 1):
                             task_args = (key, vids, i, bgm_input_path, temp_dir, output_spec,
                                          default_output_dir, args.count, args.gpu, args.fps,
-                                         args.nvenc_cq, args.bitrate, args.crf)
+                                         args.nvenc_cq, args.bitrate, args.crf, args.trim_tail)
                             fut = executor.submit(process_group_single_output, task_args)
                             futures[fut] = (key, i)
                     for fut in as_completed(futures):
@@ -757,7 +820,7 @@ def main():
                      idx, all_videos, bgm_input_path, temp_dir, output_spec,
                      default_output_dir, args.count, args.gpu, args.outputs,
                      args.width, args.height, args.fps, args.fill,
-                     args.nvenc_cq, args.bitrate, args.crf,
+                     args.nvenc_cq, args.bitrate, args.crf, args.trim_tail,
                  )
                 tasks.append(task_args)
             
@@ -838,6 +901,7 @@ def main():
                     target_width=args.width, target_height=args.height,
                     target_fps=args.fps, fill_mode=args.fill,
                     nvenc_cq=args.nvenc_cq, bitrate_mbps=args.bitrate, x264_crf=args.crf,
+                    trim_tail_seconds=args.trim_tail,
                 ):
                     print("❌ 视频拼接失败")
                     sys.exit(1)
