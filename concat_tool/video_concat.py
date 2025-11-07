@@ -157,6 +157,177 @@ def probe_duration_ffprobe(video_path: Path) -> Optional[float]:
     return None
 
 
+def probe_video_codec_ffprobe(video_path: Path) -> Optional[str]:
+    """使用 ffprobe 获取首个视频流的编码器名（如 'h264', 'hevc', 'vp9'）。
+    返回字符串或 None。
+    """
+    ffprobe_bin = shutil.which('ffprobe')
+    if not ffprobe_bin:
+        return None
+    try:
+        cmd = [
+            ffprobe_bin,
+            '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=codec_name',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(video_path)
+        ]
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode == 0:
+            try:
+                text = (res.stdout or b'').decode('utf-8', errors='ignore').strip()
+            except Exception:
+                try:
+                    text = (res.stdout or b'').decode('mbcs', errors='ignore').strip()
+                except Exception:
+                    text = ''
+            return text or None
+    except Exception:
+        return None
+    return None
+
+
+def _is_relative_to(path: Path, base: Path) -> bool:
+    """兼容旧版Python：判断 path 是否在 base 之内。"""
+    try:
+        path.resolve().relative_to(base.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def resolve_input_root(video_path: Path, input_roots: List[Path]) -> Optional[Path]:
+    """从多个输入根目录中找到包含该视频的根目录。找不到则返回 None。"""
+    for root in input_roots:
+        if _is_relative_to(video_path, root):
+            return root
+    return None
+
+
+def get_ts_cache_dir(root_dir: Path) -> Path:
+    """获取某个输入根目录对应的 TS 缓存目录：<root>_temp/video_ts"""
+    return root_dir.parent / f"{root_dir.name}_temp" / "video_ts"
+
+
+def get_ts_output_path(video_path: Path, input_roots: List[Path]) -> Path:
+    """为视频生成对应的 TS 输出路径，目录结构镜像保留相对路径，扩展名改为 .ts。
+    例如：<root>/<subdir>/a.mp4 -> <root>_temp/video_ts/<subdir>/a.ts
+    如果找不到所属根目录，则退回到视频同级的 <parent>_temp/video_ts/a.ts。
+    """
+    root = resolve_input_root(video_path, input_roots)
+    if root is None:
+        # 退回方案：使用视频所在目录旁的 _temp/video_ts
+        fallback_dir = video_path.parent.parent / f"{video_path.parent.name}_temp" / "video_ts"
+        return fallback_dir / (video_path.stem + '.ts')
+    rel = video_path.resolve().relative_to(root.resolve())
+    ts_dir = get_ts_cache_dir(root) / rel.parent
+    return ts_dir / (video_path.stem + '.ts')
+
+
+def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_tail_seconds: float = 1.0) -> bool:
+    """将单个视频无重编码地转换为 MPEG-TS 容器，避免拼接卡顿。
+    - 默认使用 `-c copy`，根据源编码选择对应的 bitstream filter：
+      h264 -> h264_mp4toannexb，hevc -> hevc_mp4toannexb，其它省略 bsf。
+    - 不存在父目录时自动创建。
+    - 支持在转换阶段直接裁剪尾部时长（`trim_tail_seconds`），减少后续拼接卡顿。
+    返回 True/False 表示成功与否。
+    """
+    try:
+        ffmpeg_bin = shutil.which('ffmpeg')
+        if not ffmpeg_bin:
+            print("❌ 未找到 ffmpeg，请确保已安装并配置到 PATH")
+            return False
+
+        # 已存在且非空则跳过
+        try:
+            if output_ts.exists() and output_ts.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+
+        output_ts.parent.mkdir(parents=True, exist_ok=True)
+
+        codec = probe_video_codec_ffprobe(input_video) or ''
+        # 计算裁剪后的时长（如配置了尾部裁剪）
+        out_duration = None
+        try:
+            if trim_tail_seconds and float(trim_tail_seconds) > 0:
+                dur = probe_duration_ffprobe(input_video)
+                if dur is not None:
+                    out_duration = max(0.0, dur - float(trim_tail_seconds))
+                    if out_duration <= 0.05:
+                        print(f"⏭️ 片段过短，跳过 TS 转换: {input_video.name} (时长 {dur:.2f}s, 裁剪 {trim_tail_seconds}s)")
+                        return False
+        except Exception:
+            # 若获取时长失败，则继续无裁剪转换
+            out_duration = None
+
+        cmd = [ffmpeg_bin, '-y', '-i', str(input_video), '-c', 'copy']
+        if codec.lower() == 'h264':
+            cmd += ['-bsf:v', 'h264_mp4toannexb']
+        elif codec.lower() == 'hevc':
+            cmd += ['-bsf:v', 'hevc_mp4toannexb']
+        else:
+            # 非 H.264/HEVC 源，省略 bsf，仍使用 mpegts 容器
+            pass
+        # 尾部裁剪：使用 -t 限制输出时长（流复制，关键帧对齐）
+        if out_duration is not None:
+            cmd += ['-t', f'{out_duration:.3f}']
+        cmd += ['-f', 'mpegts', str(output_ts)]
+
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode == 0:
+            return True
+        else:
+            stderr_text = ''
+            try:
+                stderr_text = (res.stderr or b'').decode('utf-8', errors='ignore')
+            except Exception:
+                try:
+                    stderr_text = (res.stderr or b'').decode('mbcs', errors='ignore')
+                except Exception:
+                    stderr_text = ''
+            print(f"⚠️ TS转换失败: {input_video.name} -> {output_ts.name}\n{stderr_text[-600:]}")
+            return False
+    except Exception as e:
+        print(f"❌ TS转换异常: {e}")
+        return False
+
+
+def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int, *, trim_tail_seconds: float = 1.0) -> None:
+    """并发将输入目录中的所有视频转换为 TS 并写入各自根目录的 _temp/video_ts。
+    - 线程数复用 `threads` 参数。
+    - 已有且非空的 TS 文件会跳过。
+    """
+    print("🚧 正在预转换视频为 TS 以优化拼接…")
+    total = len(videos)
+    succeeded = 0
+    failed = 0
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, threads)) as executor:
+            futures = {}
+            for v in videos:
+                out_ts = get_ts_output_path(v, input_roots)
+                fut = executor.submit(convert_video_to_ts, v, out_ts, trim_tail_seconds=trim_tail_seconds)
+                futures[fut] = (v, out_ts)
+            for fut in as_completed(futures):
+                v, out_ts = futures[fut]
+                try:
+                    ok = fut.result()
+                    if ok:
+                        succeeded += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    print(f"❌ TS转换任务异常: {v.name} -> {e}")
+                    failed += 1
+    except KeyboardInterrupt:
+        print("⚠️ 用户中断，停止 TS 预转换…")
+        raise
+    print(f"📦 TS预转换完成：✅ {succeeded}/{total} 成功，❌ {failed} 失败")
+
+
 def group_videos_by_resolution(videos: List[Path]) -> dict:
     """按分辨率分组视频，返回 dict: {(width, height): [Path, ...]}"""
     groups = {}
@@ -210,7 +381,7 @@ def process_group_single_output(args_tuple):
     返回 (success, msg)
     """
     (group_key, group_videos, out_index, bgm_input_path, temp_dir, output_spec,
-     default_output_dir, args_count, args_gpu, target_fps, args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_tail) = args_tuple
+     default_output_dir, args_count, args_gpu, target_fps, args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_tail, input_roots) = args_tuple
     try:
         w, h = group_key
         auto_seed = generate_auto_seed()
@@ -223,6 +394,19 @@ def process_group_single_output(args_tuple):
             selected = random.choices(group_videos, k=args_count)
 
         print(f"🔄 [组 {w}x{h}] 输出{out_index} 选择了 {len(selected)} 个视频片段…")
+
+        # 将所选视频映射为 TS 文件路径；若不存在则尝试即时转换
+        selected_ts = []
+        for src in selected:
+            ts_path = get_ts_output_path(src, input_roots)
+            if not ts_path.exists() or ts_path.stat().st_size == 0:
+                ok_conv = convert_video_to_ts(src, ts_path, trim_tail_seconds=args_trim_tail)
+                if not ok_conv:
+                    print(f"⏭️ TS不可用，跳过片段: {src.name}")
+                    continue
+            selected_ts.append(ts_path)
+        if not selected_ts:
+            return False, f"组 {w}x{h} 输出{out_index} 无可用TS片段"
 
         # 输出路径与临时文件
         if output_spec:
@@ -243,7 +427,7 @@ def process_group_single_output(args_tuple):
 
         # 拼接（目标分辨率采用组分辨率，避免额外缩放）
         ok = concat_videos(
-            selected,
+            selected_ts,
             temp_concat_output,
             use_gpu=args_gpu,
             temp_dir=temp_dir,
@@ -353,10 +537,11 @@ def concat_videos(
     - 统一输出为指定分辨率/帧率/像素格式（可配置）。
     - 输出不包含音轨（-an），以便后续替换BGM时复制视频流避免重编码。
     - 支持压缩参数：NVENC 使用 `cq` 与目标码率，x264 使用 `crf`。
-    - 在拼接前为每段视频去掉最后 `trim_tail_seconds` 秒（默认1秒），避免结尾黑帧/LOGO。
+    - 支持直接传入已预转换的 TS 片段列表（推荐），以减少拼接卡顿风险。
+    - 尾部裁剪仅在 TS 转换阶段进行；拼接阶段不再对列表逐段裁剪。
     """
     try:
-        print("🔗 使用FFmpeg进行视频拼接…")
+        print("🔗 使用FFmpeg进行视频拼接（TS预合并 → 编码）…")
 
         if not videos:
             print("❌ 没有可用的视频片段")
@@ -378,30 +563,14 @@ def concat_videos(
 
         try:
             lines = []
-            skipped = 0
             for v in videos:
-                dur = probe_duration_ffprobe(v)
-                if dur is None:
-                    print(f"⚠️ 无法获取时长，跳过: {v.name}")
-                    skipped += 1
-                    continue
-                outpoint = dur - float(trim_tail_seconds)
-                # 跳过过短视频
-                if outpoint <= 0.05:
-                    print(f"⏭️ 片段过短（{dur:.2f}s），跳过: {v.name}")
-                    skipped += 1
-                    continue
+                # 拼接阶段不再进行逐段裁剪，直接写入文件条目
                 p = str(v)
-                # 仅转义单引号，保持反斜杠原样；始终使用引号以兼容空格和非ASCII。
                 p_escaped = p.replace("'", r"'\''")
                 lines.append(f"file '{p_escaped}'\n")
-                lines.append(f"inpoint 0\n")
-                lines.append(f"outpoint {outpoint:.3f}\n")
             if not lines:
-                print("❌ 所有片段均被跳过（无法获取时长或过短）")
+                print("❌ 没有可用的片段用于拼接")
                 return False
-            if skipped:
-                print(f"ℹ️ 已跳过 {skipped} 个片段（过短或无时长）")
             with open(list_file, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
         except Exception as e:
@@ -416,7 +585,33 @@ def concat_videos(
             if use_gpu:
                 print("⚠️ 未检测到 h264_nvenc，回退到 libx264")
 
-        # 构建 FFmpeg 命令（统一输出规格，可配置）
+        # 第一步：将 TS 片段使用 concat demuxer 合并为一个临时 TS（不重编码）
+        merged_ts = (temp_dir or output_path.parent) / f"merged_temp_{ts_suffix}_{random_suffix}.ts"
+        copy_merge_cmd = [
+            ffmpeg_bin, '-y',
+            '-f', 'concat', '-safe', '0',
+            '-i', str(list_file),
+            '-c', 'copy',
+            '-bsf:a', 'aac_adtstoasc',
+            str(merged_ts)
+        ]
+
+        print(f"🔧 预合并TS命令: {' '.join(copy_merge_cmd)}")
+        res_merge = subprocess.run(copy_merge_cmd, capture_output=True)
+        if res_merge.returncode != 0:
+            print("❌ TS预合并失败")
+            stderr_text = ''
+            try:
+                stderr_text = (res_merge.stderr or b'').decode('utf-8', errors='ignore')
+            except Exception:
+                try:
+                    stderr_text = (res_merge.stderr or b'').decode('mbcs', errors='ignore')
+                except Exception:
+                    stderr_text = ''
+            print(stderr_text[-1000:])
+            return False
+
+        # 构建 FFmpeg 编码命令（统一输出规格，可配置）
         if fill_mode == 'crop':
             # 等比放大填满，超出部分裁剪，使用高质量 Lanczos 缩放以降低锯齿
             filter_vf = (
@@ -433,9 +628,7 @@ def concat_videos(
             )
         cmd = [
             ffmpeg_bin, '-y',
-            '-f', 'concat', '-safe', '0',
-            '-i', str(list_file),
-            '-fflags', '+genpts',
+            '-i', str(merged_ts),
             '-avoid_negative_ts', 'make_zero',
             '-fps_mode', 'cfr',
             # 提升缩放质量（全局 sws flags，部分播放器/构建更稳定）
@@ -484,7 +677,7 @@ def concat_videos(
 
         cmd += [str(output_path)]
 
-        print(f"🔧 执行命令: {' '.join(cmd)}")
+        print(f"🔧 编码命令: {' '.join(cmd)}")
         
         # 执行 FFmpeg
         result = subprocess.run(cmd, capture_output=True)
@@ -513,6 +706,12 @@ def concat_videos(
         try:
             if 'list_file' in locals() and Path(list_file).exists():
                 Path(list_file).unlink(missing_ok=True)
+        except Exception:
+            pass
+        # 清理临时合并的TS文件
+        try:
+            if 'merged_ts' in locals() and Path(merged_ts).exists():
+                Path(merged_ts).unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -565,7 +764,7 @@ def process_single_output(args_tuple):
     """处理单个输出的函数，用于并发执行"""
     (idx, all_videos, bgm_input_path, temp_dir, output_spec, default_output_dir, 
      args_count, args_gpu, total_outputs, target_width, target_height, target_fps, fill_mode,
-     args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_tail) = args_tuple
+     args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_tail, input_roots) = args_tuple
     
     try:
         print(f"\n=== 开始第 {idx}/{total_outputs} 个输出 ===")
@@ -579,6 +778,19 @@ def process_single_output(args_tuple):
         print(f"🎲 [输出{idx}] 随机选择了 {len(selected_videos)} 个视频:")
         for i, video in enumerate(selected_videos, 1):
             print(f"  {i}. {video.name}")
+
+        # 映射为 TS 文件；如缺失则即时转换
+        selected_ts = []
+        for src in selected_videos:
+            ts_path = get_ts_output_path(src, input_roots)
+            if not ts_path.exists() or ts_path.stat().st_size == 0:
+                ok_conv = convert_video_to_ts(src, ts_path, trim_tail_seconds=args_trim_tail)
+                if not ok_conv:
+                    print(f"⏭️ TS不可用，跳过片段: {src.name}")
+                    continue
+            selected_ts.append(ts_path)
+        if not selected_ts:
+            return False, idx, "无可用TS片段"
         
         # 选择BGM文件
         try:
@@ -594,7 +806,7 @@ def process_single_output(args_tuple):
         # 拼接视频
         print(f"🔄 [输出{idx}] 开始拼接视频...")
         if not concat_videos(
-            selected_videos,
+            selected_ts,
             temp_concat_output,
             use_gpu=args_gpu,
             temp_dir=temp_dir,
@@ -655,7 +867,7 @@ def main():
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=25, help='输出帧率（默认25）')
-    parser.add_argument('--trim-tail', type=float, default=1.0, help='为每段视频去掉结尾N秒后再拼接（默认1.0秒）')
+    parser.add_argument('--trim-tail', type=float, default=2.0, help='在转换为TS时裁剪每段视频结尾N秒（默认1.0秒）；拼接阶段不再逐段裁剪')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
     # 默认启用分辨率分组，使用 --no-group-res 可关闭
     parser.add_argument('--group-res', dest='group_res', action='store_true', default=True,
@@ -723,6 +935,12 @@ def main():
         
         print(f"📹 合计找到 {len(all_videos)} 个视频文件")
         
+        # 预转换：将所有输入视频转换为 TS，提升后续拼接稳定性
+        try:
+            convert_all_to_ts(all_videos, video_dirs, args.threads, trim_tail_seconds=args.trim_tail)
+        except KeyboardInterrupt:
+            sys.exit(1)
+        
         # 创建临时目录：
         # 单目录：<dir>_temp；多目录：<first>_temp_combined
         if len(video_dirs) == 1:
@@ -776,7 +994,7 @@ def main():
                         for i in range(1, count_out + 1):
                             task_args = (key, vids, i, bgm_input_path, temp_dir, output_spec,
                                          default_output_dir, args.count, args.gpu, args.fps,
-                                         args.nvenc_cq, args.bitrate, args.crf, args.trim_tail)
+                                         args.nvenc_cq, args.bitrate, args.crf, args.trim_tail, video_dirs)
                             fut = executor.submit(process_group_single_output, task_args)
                             futures[fut] = (key, i)
                     for fut in as_completed(futures):
@@ -820,7 +1038,7 @@ def main():
                      idx, all_videos, bgm_input_path, temp_dir, output_spec,
                      default_output_dir, args.count, args.gpu, args.outputs,
                      args.width, args.height, args.fps, args.fill,
-                     args.nvenc_cq, args.bitrate, args.crf, args.trim_tail,
+                     args.nvenc_cq, args.bitrate, args.crf, args.trim_tail, video_dirs,
                  )
                 tasks.append(task_args)
             
@@ -882,6 +1100,20 @@ def main():
                 print(f"🎲 随机选择了 {len(selected_videos)} 个视频:")
                 for i, video in enumerate(selected_videos, 1):
                     print(f"  {i}. {video.name}")
+
+                # 使用已转换的 TS 文件；如缺失则即时转换
+                selected_ts = []
+                for src in selected_videos:
+                    ts_path = get_ts_output_path(src, video_dirs)
+                    if not ts_path.exists() or ts_path.stat().st_size == 0:
+                        ok_conv = convert_video_to_ts(src, ts_path, trim_tail_seconds=args.trim_tail)
+                        if not ok_conv:
+                            print(f"⏭️ TS不可用，跳过片段: {src.name}")
+                            continue
+                    selected_ts.append(ts_path)
+                if not selected_ts:
+                    print("❌ 无可用TS片段，结束。")
+                    sys.exit(1)
                 
                 # 选择BGM文件
                 try:
@@ -896,7 +1128,7 @@ def main():
 
                 # 拼接视频
                 if not concat_videos(
-                    selected_videos, temp_concat_output,
+                    selected_ts, temp_concat_output,
                     use_gpu=args.gpu, temp_dir=temp_dir,
                     target_width=args.width, target_height=args.height,
                     target_fps=args.fps, fill_mode=args.fill,
