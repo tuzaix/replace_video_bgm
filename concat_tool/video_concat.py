@@ -225,6 +225,60 @@ def get_ts_output_path(video_path: Path, input_roots: List[Path]) -> Path:
     return ts_dir / (video_path.stem + '.ts')
 
 
+def _format_trim_value(val: float) -> str:
+    """格式化裁剪秒数用于文件名：整数显示为不带小数，非整数保留一位小数。"""
+    try:
+        v = float(val)
+        if abs(v - round(v)) < 1e-9:
+            return str(int(round(v)))
+        return f"{v:.1f}"
+    except Exception:
+        return str(val)
+
+
+def get_ts_output_path_with_trim(video_path: Path, input_roots: List[Path], trim_head_seconds: float, trim_tail_seconds: float) -> Path:
+    """为视频生成带裁剪标识的 TS 输出路径，避免不同裁剪策略复用旧缓存。
+    文件名形如：`<stem>_headX_tailY.ts`，其中 X/Y 为格式化秒数（整数无小数，非整数保留一位）。
+    目录结构与 `get_ts_output_path` 一致。
+    """
+    root = resolve_input_root(video_path, input_roots)
+    head_tag = _format_trim_value(trim_head_seconds)
+    tail_tag = _format_trim_value(trim_tail_seconds)
+    filename = f"{video_path.stem}_head{head_tag}_tail{tail_tag}.ts"
+    if root is None:
+        fallback_dir = video_path.parent.parent / f"{video_path.parent.name}_temp" / "video_ts"
+        return fallback_dir / filename
+    rel = video_path.resolve().relative_to(root.resolve())
+    ts_dir = get_ts_cache_dir(root) / rel.parent
+    return ts_dir / filename
+
+
+def clear_mismatched_ts_cache(input_roots: List[Path], trim_head_seconds: float, trim_tail_seconds: float) -> int:
+    """清理与当前裁剪参数不匹配的 TS 缓存文件。
+    - 删除所有不以 `_head{H}_tail{T}.ts` 结尾的 TS 文件（视为旧命名或不同策略）。
+    - 保留与当前参数完全匹配的缓存文件。
+    返回删除的文件数量。
+    """
+    head_tag = _format_trim_value(trim_head_seconds)
+    tail_tag = _format_trim_value(trim_tail_seconds)
+    keep_suffix = f"_head{head_tag}_tail{tail_tag}.ts"
+    removed = 0
+    for root in input_roots:
+        cache_dir = get_ts_cache_dir(root)
+        if not cache_dir.exists():
+            continue
+        for ts_file in cache_dir.rglob('*.ts'):
+            name = ts_file.name
+            if not name.endswith(keep_suffix):
+                try:
+                    ts_file.unlink(missing_ok=True)
+                    removed += 1
+                except Exception as e:
+                    print(f"⚠️ 删除缓存失败: {ts_file} -> {e}")
+    print(f"🧹 已清理与当前裁剪参数不匹配的 TS 缓存: {removed} 个")
+    return removed
+
+
 def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_head_seconds: float, trim_tail_seconds: float) -> List[Path]:
     """将源视频列表映射为可用的 TS 片段路径列表。
     - 若目标 TS 缺失或为空，则即时进行无重编码转换，并在转换时裁剪开头 `trim_head_seconds` 与尾部 `trim_tail_seconds`。
@@ -232,7 +286,7 @@ def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_head_s
     """
     ts_list: List[Path] = []
     for src in sources:
-        ts_path = get_ts_output_path(src, input_roots)
+        ts_path = get_ts_output_path_with_trim(src, input_roots, trim_head_seconds, trim_tail_seconds)
         try:
             if not ts_path.exists() or ts_path.stat().st_size == 0:
                 ok = convert_video_to_ts(src, ts_path, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds)
@@ -335,7 +389,7 @@ def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int,
         with ThreadPoolExecutor(max_workers=max(1, threads)) as executor:
             futures = {}
             for v in videos:
-                out_ts = get_ts_output_path(v, input_roots)
+                out_ts = get_ts_output_path_with_trim(v, input_roots, trim_head_seconds, trim_tail_seconds)
                 fut = executor.submit(convert_video_to_ts, v, out_ts, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds)
                 futures[fut] = (v, out_ts)
             for fut in as_completed(futures):
@@ -1119,8 +1173,10 @@ def main():
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=25, help='输出帧率（默认25）')
-    parser.add_argument('--trim-head', type=float, default=1.0, help='在转换为TS时裁剪每段视频开头N秒（默认0.0秒）；拼接阶段不再逐段裁剪')
-    parser.add_argument('--trim-tail', type=float, default=2.0, help='在转换为TS时裁剪每段视频结尾N秒（默认3.0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--trim-head', type=float, default=1.0, help='在转换为TS时裁剪每段视频开头N秒（默认1.0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--trim-tail', type=float, default=2.0, help='在转换为TS时裁剪每段视频结尾N秒（默认2.0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--clear-mismatched-cache', dest='clear_mismatched_cache', action='store_true', default=False,
+                        help='预处理前清理与当前裁剪参数不匹配的TS缓存（含旧命名）；默认不清理')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
     # 默认启用分辨率分组，使用 --no-group-res 可关闭
     parser.add_argument('--group-res', dest='group_res', action='store_true', default=True,
@@ -1141,6 +1197,9 @@ def main():
         all_videos = discover_all_videos(video_dirs)
         
         # 预转换：将所有输入视频转换为 TS，提升后续拼接稳定性
+        # 按需清理与当前裁剪参数不匹配的 TS 缓存
+        if args.clear_mismatched_cache:
+            clear_mismatched_ts_cache(video_dirs, args.trim_head, args.trim_tail)
         preconvert_all_ts(all_videos, video_dirs, args.threads, trim_head_seconds=args.trim_head, trim_tail_seconds=args.trim_tail)
         
         # 创建临时目录
