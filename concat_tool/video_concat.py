@@ -344,7 +344,8 @@ def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds
                 cmd += ['-ss', f'{max(0.0, float(trim_head_seconds)):.3f}']
         except Exception:
             pass
-        cmd += ['-i', str(input_video), '-c', 'copy']
+        # 生成缺失的 PTS 并将时间戳重置，减少拼接后时序不稳的风险
+        cmd += ['-fflags', '+genpts', '-i', str(input_video), '-c', 'copy', '-reset_timestamps', '1', '-an']
         if codec.lower() == 'h264':
             cmd += ['-bsf:v', 'h264_mp4toannexb']
         elif codec.lower() == 'hevc':
@@ -873,24 +874,6 @@ def concat_videos(
             print("❌ 未找到 ffmpeg，请确保已安装并配置到 PATH")
             return False
 
-        # 创建临时文件列表
-        ts_suffix = int(time.time() * 1000)
-        # 随机数种子，确保每次运行时生成不同的文件名
-        random.seed(ts_suffix)
-        # 随机数，确保每次运行时生成不同的文件名
-        random_suffix = random.randint(10000, 999999)
-        
-        list_file = (temp_dir or output_path.parent) / f"temp_video_list_{ts_suffix}_{random_suffix}.txt"
-
-        try:
-            count = write_concat_list_file(videos, list_file)
-            if count <= 0:
-                print("❌ 没有可用的片段用于拼接")
-                return False
-        except Exception as e:
-            print(f"❌ 无法写入拼接列表文件: {e}")
-            return False
-
         # 检测编码器
         nvenc_ok = use_gpu and is_nvenc_available()
         if nvenc_ok:
@@ -898,54 +881,34 @@ def concat_videos(
         else:
             if use_gpu:
                 print("⚠️ 未检测到 h264_nvenc，回退到 libx264")
-
-        # 第一步：将 TS 片段使用 concat demuxer 合并为一个临时 TS（不重编码）
-        merged_ts = (temp_dir or output_path.parent) / f"merged_temp_{ts_suffix}_{random_suffix}.ts"
-        copy_merge_cmd = [
-            ffmpeg_bin, '-y',
-            '-f', 'concat', '-safe', '0',
-            '-i', str(list_file),
-            '-c', 'copy',
-            '-bsf:a', 'aac_adtstoasc',
-            str(merged_ts)
-        ]
-
-        print(f"🔧 预合并TS命令: {' '.join(copy_merge_cmd)}")
-        res_merge = subprocess.run(copy_merge_cmd, capture_output=True)
-        if res_merge.returncode != 0:
-            print("❌ TS预合并失败")
-            stderr_text = ''
-            try:
-                stderr_text = (res_merge.stderr or b'').decode('utf-8', errors='ignore')
-            except Exception:
-                try:
-                    stderr_text = (res_merge.stderr or b'').decode('mbcs', errors='ignore')
-                except Exception:
-                    stderr_text = ''
-            print(stderr_text[-1000:])
-            return False
-
         # 构建 FFmpeg 编码命令（统一输出规格，可配置）
         if fill_mode == 'crop':
             # 等比放大填满，超出部分裁剪，使用高质量 Lanczos 缩放以降低锯齿
-            filter_vf = (
+            post_vf = (
                 f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop={target_width}:{target_height},"
                 f"fps={target_fps},format=yuv420p"
             )
         else:
             # 默认：保持比例缩放，居中黑边填充，使用高质量 Lanczos 缩放以降低锯齿
-            filter_vf = (
+            post_vf = (
                 f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
                 f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black,"
                 f"fps={target_fps},format=yuv420p"
             )
-        cmd = [
-            ffmpeg_bin, '-y',
-            '-i', str(merged_ts),
+
+        # 使用 filter_complex 基于解码的级联拼接，避免不同编码/时间戳导致的卡帧
+        cmd = [ffmpeg_bin, '-y', '-fflags', '+genpts']
+        for v in videos:
+            cmd += ['-i', str(v)]
+        # 构造 concat 过滤器，将所有输入的视频流串接，随后统一缩放/填充
+        concat_inputs = ''.join([f'[{i}:v]' for i in range(len(videos))])
+        filter_complex = f"{concat_inputs}concat=n={len(videos)}:v=1:a=0,{post_vf}[vout]"
+        cmd += [
+            '-filter_complex', filter_complex,
+            '-map', '[vout]',
             '-avoid_negative_ts', 'make_zero',
             '-fps_mode', 'cfr',
-            # 提升缩放质量（全局 sws flags，部分播放器/构建更稳定）
             '-sws_flags', 'lanczos+accurate_rnd+full_chroma_int',
         ]
 
@@ -963,7 +926,7 @@ def concat_videos(
                 '-profile:v', 'high',
                 '-level', '4.1',
                 '-pix_fmt', 'yuv420p',
-                '-vf', filter_vf,
+                # 缩放等后处理已在 filter_complex 中完成
                 '-gpu', '0',
                 '-r', str(target_fps),
                 '-movflags', '+faststart',
@@ -983,7 +946,7 @@ def concat_videos(
                 '-profile:v', 'high',
                 '-level', '4.1',
                 '-pix_fmt', 'yuv420p',
-                '-vf', filter_vf,
+                # 缩放等后处理已在 filter_complex 中完成
                 '-r', str(target_fps),
                 '-movflags', '+faststart',
                 '-an',
@@ -1015,19 +978,6 @@ def concat_videos(
     except Exception as e:
         print(f"❌ 拼接过程异常: {e}")
         return False
-    finally:
-        # 清理临时列表文件
-        try:
-            if 'list_file' in locals() and Path(list_file).exists():
-                Path(list_file).unlink(missing_ok=True)
-        except Exception:
-            pass
-        # 清理临时合并的TS文件
-        try:
-            if 'merged_ts' in locals() and Path(merged_ts).exists():
-                Path(merged_ts).unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, use_gpu: bool = False) -> bool:
@@ -1174,7 +1124,7 @@ def main():
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=25, help='输出帧率（默认25）')
     parser.add_argument('--trim-head', type=float, default=1.0, help='在转换为TS时裁剪每段视频开头N秒（默认1.0秒）；拼接阶段不再逐段裁剪')
-    parser.add_argument('--trim-tail', type=float, default=2.0, help='在转换为TS时裁剪每段视频结尾N秒（默认2.0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--trim-tail', type=float, default=1.0, help='在转换为TS时裁剪每段视频结尾N秒（默认2.0秒）；拼接阶段不再逐段裁剪')
     parser.add_argument('--clear-mismatched-cache', dest='clear_mismatched_cache', action='store_true', default=False,
                         help='预处理前清理与当前裁剪参数不匹配的TS缓存（含旧命名）；默认不清理')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
