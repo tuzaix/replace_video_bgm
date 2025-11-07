@@ -225,6 +225,26 @@ def get_ts_output_path(video_path: Path, input_roots: List[Path]) -> Path:
     return ts_dir / (video_path.stem + '.ts')
 
 
+def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_tail_seconds: float) -> List[Path]:
+    """将源视频列表映射为可用的 TS 片段路径列表。
+    - 若目标 TS 缺失或为空，则即时进行无重编码转换，并在转换时裁剪尾部 `trim_tail_seconds`。
+    - 返回成功生成的 TS 路径列表；失败或过短的条目会被跳过。
+    """
+    ts_list: List[Path] = []
+    for src in sources:
+        ts_path = get_ts_output_path(src, input_roots)
+        try:
+            if not ts_path.exists() or ts_path.stat().st_size == 0:
+                ok = convert_video_to_ts(src, ts_path, trim_tail_seconds=trim_tail_seconds)
+                if not ok:
+                    print(f"⏭️ TS不可用，跳过片段: {src.name}")
+                    continue
+            ts_list.append(ts_path)
+        except Exception as e:
+            print(f"⚠️ TS检查/生成异常，跳过: {src.name} -> {e}")
+    return ts_list
+
+
 def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_tail_seconds: float = 1.0) -> bool:
     """将单个视频无重编码地转换为 MPEG-TS 容器，避免拼接卡顿。
     - 默认使用 `-c copy`，根据源编码选择对应的 bitstream filter：
@@ -395,16 +415,8 @@ def process_group_single_output(args_tuple):
 
         print(f"🔄 [组 {w}x{h}] 输出{out_index} 选择了 {len(selected)} 个视频片段…")
 
-        # 将所选视频映射为 TS 文件路径；若不存在则尝试即时转换
-        selected_ts = []
-        for src in selected:
-            ts_path = get_ts_output_path(src, input_roots)
-            if not ts_path.exists() or ts_path.stat().st_size == 0:
-                ok_conv = convert_video_to_ts(src, ts_path, trim_tail_seconds=args_trim_tail)
-                if not ok_conv:
-                    print(f"⏭️ TS不可用，跳过片段: {src.name}")
-                    continue
-            selected_ts.append(ts_path)
+        # 将所选视频映射为 TS 文件路径；若不存在则尝试即时转换（统一辅助函数）
+        selected_ts = ensure_ts_segments(selected, input_roots, args_trim_tail)
         if not selected_ts:
             return False, f"组 {w}x{h} 输出{out_index} 无可用TS片段"
 
@@ -513,9 +525,23 @@ def select_bgm_file(bgm_path: Path, seed: Optional[int] = None) -> Path:
         selected_bgm = random.choice(audio_files)
         print(f"🎵 从BGM目录随机选择: {selected_bgm.name}")
         return selected_bgm
-    
+
     else:
         raise ValueError(f"BGM路径不存在: {bgm_path}")
+
+
+def write_concat_list_file(videos: List[Path], list_file: Path) -> int:
+    """写入 concat demuxer 所需的列表文件，返回写入的条目数。
+    拼接阶段不再进行逐段裁剪，直接写入 `file '<path>'` 行。
+    """
+    lines = []
+    for v in videos:
+        p = str(v)
+        p_escaped = p.replace("'", r"'\''")
+        lines.append(f"file '{p_escaped}'\n")
+    with open(list_file, 'w', encoding='utf-8') as f:
+        f.writelines(lines)
+    return len(lines)
 
 
 def concat_videos(
@@ -562,17 +588,10 @@ def concat_videos(
         list_file = (temp_dir or output_path.parent) / f"temp_video_list_{ts_suffix}_{random_suffix}.txt"
 
         try:
-            lines = []
-            for v in videos:
-                # 拼接阶段不再进行逐段裁剪，直接写入文件条目
-                p = str(v)
-                p_escaped = p.replace("'", r"'\''")
-                lines.append(f"file '{p_escaped}'\n")
-            if not lines:
+            count = write_concat_list_file(videos, list_file)
+            if count <= 0:
                 print("❌ 没有可用的片段用于拼接")
                 return False
-            with open(list_file, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
         except Exception as e:
             print(f"❌ 无法写入拼接列表文件: {e}")
             return False
@@ -779,16 +798,8 @@ def process_single_output(args_tuple):
         for i, video in enumerate(selected_videos, 1):
             print(f"  {i}. {video.name}")
 
-        # 映射为 TS 文件；如缺失则即时转换
-        selected_ts = []
-        for src in selected_videos:
-            ts_path = get_ts_output_path(src, input_roots)
-            if not ts_path.exists() or ts_path.stat().st_size == 0:
-                ok_conv = convert_video_to_ts(src, ts_path, trim_tail_seconds=args_trim_tail)
-                if not ok_conv:
-                    print(f"⏭️ TS不可用，跳过片段: {src.name}")
-                    continue
-            selected_ts.append(ts_path)
+        # 映射为 TS 文件；如缺失则即时转换（统一辅助函数）
+        selected_ts = ensure_ts_segments(selected_videos, input_roots, args_trim_tail)
         if not selected_ts:
             return False, idx, "无可用TS片段"
         
@@ -867,7 +878,7 @@ def main():
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
     parser.add_argument('--height', type=int, default=1920, help='输出视频高度（默认1920）')
     parser.add_argument('--fps', type=int, default=25, help='输出帧率（默认25）')
-    parser.add_argument('--trim-tail', type=float, default=2.0, help='在转换为TS时裁剪每段视频结尾N秒（默认1.0秒）；拼接阶段不再逐段裁剪')
+    parser.add_argument('--trim-tail', type=float, default=3.0, help='在转换为TS时裁剪每段视频结尾N秒（默认3.0秒）；拼接阶段不再逐段裁剪')
     parser.add_argument('--fill', choices=['pad', 'crop'], default='pad', help='填充模式：pad(居中黑边) 或 crop(裁剪满屏)，默认pad')
     # 默认启用分辨率分组，使用 --no-group-res 可关闭
     parser.add_argument('--group-res', dest='group_res', action='store_true', default=True,
@@ -1101,16 +1112,8 @@ def main():
                 for i, video in enumerate(selected_videos, 1):
                     print(f"  {i}. {video.name}")
 
-                # 使用已转换的 TS 文件；如缺失则即时转换
-                selected_ts = []
-                for src in selected_videos:
-                    ts_path = get_ts_output_path(src, video_dirs)
-                    if not ts_path.exists() or ts_path.stat().st_size == 0:
-                        ok_conv = convert_video_to_ts(src, ts_path, trim_tail_seconds=args.trim_tail)
-                        if not ok_conv:
-                            print(f"⏭️ TS不可用，跳过片段: {src.name}")
-                            continue
-                    selected_ts.append(ts_path)
+                # 使用已转换的 TS 文件；如缺失则即时转换（统一辅助函数）
+                selected_ts = ensure_ts_segments(selected_videos, video_dirs, args.trim_tail)
                 if not selected_ts:
                     print("❌ 无可用TS片段，结束。")
                     sys.exit(1)
