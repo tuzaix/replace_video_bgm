@@ -5,10 +5,8 @@
 功能：随机选择n个视频进行拼接，然后替换BGM，不进行转码压缩以提高效率
 """
 
-import os
 import sys
 import shutil
-import tempfile
 import time
 from pathlib import Path
 import argparse
@@ -16,10 +14,6 @@ import random
 from typing import List, Optional
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
-
-# MoviePy imports
-from moviepy.editor import VideoFileClip, concatenate_videoclips, AudioFileClip, concatenate_audioclips
 
 # 支持的视频格式
 SUPPORTED_VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v'}
@@ -482,6 +476,11 @@ def process_group_single_output(args_tuple):
         if not selected_ts:
             return False, f"组 {w}x{h} 输出{out_index} 无可用TS片段"
 
+        # 在拼接前根据时间戳种子打乱片段顺序，增强每次输出的变化性
+        random.seed(auto_seed)
+        random.shuffle(selected_ts)
+        print(f"🔀 [组 {w}x{h}] 输出{out_index} 使用时间戳种子 {auto_seed}，已随机打乱 {len(selected_ts)} 个片段的顺序")
+
         # 输出路径与临时文件
         if output_spec:
             out_spec = Path(output_spec)
@@ -795,6 +794,10 @@ def run_random_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_inp
         if not selected_ts:
             print("❌ 无可用TS片段，结束。")
             sys.exit(1)
+        # 在拼接前根据时间戳种子打乱片段顺序，增强每次输出的变化性
+        random.seed(auto_seed)
+        random.shuffle(selected_ts)
+        print(f"🔀 使用时间戳种子 {auto_seed}，已随机打乱 {len(selected_ts)} 个片段的顺序")
         try:
             bgm_path = select_bgm_file(bgm_input_path, auto_seed)
             print(f"🎵 使用BGM: {bgm_path.name}")
@@ -1047,6 +1050,10 @@ def process_single_output(args_tuple):
         selected_ts = ensure_ts_segments(selected_videos, input_roots, args_trim_head, args_trim_tail)
         if not selected_ts:
             return False, idx, "无可用TS片段"
+        # 在拼接前根据时间戳种子打乱片段顺序
+        random.seed(auto_seed)
+        random.shuffle(selected_ts)
+        print(f"🔀 [输出{idx}] 使用时间戳种子 {auto_seed}，已随机打乱 {len(selected_ts)} 个片段的顺序")
         
         # 选择BGM文件
         try:
