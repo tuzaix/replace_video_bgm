@@ -631,15 +631,10 @@ def process_group_single_output(args_tuple):
             selected_ts,
             temp_concat_output,
             use_gpu=args_gpu,
-            # temp_dir=temp_dir,
             target_width=w,
             target_height=h,
             target_fps=target_fps,
-            fill_mode='pad',
-            nvenc_cq=args_nvenc_cq,
-            bitrate_mbps=args_bitrate_mbps,
-            x264_crf=args_x264_crf,
-            # trim_tail_seconds=args_trim_tail,
+            fill_mode='pad'
         )
         if not ok:
             return False, f"组 {w}x{h} 输出{out_index} 拼接失败"
@@ -936,11 +931,9 @@ def run_random_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_inp
         temp_concat_output = temp_dir / f"temp_concat_{idx}.mp4"
         if not concat_videos(
             selected_ts, temp_concat_output,
-            use_gpu=args.gpu, temp_dir=temp_dir,
+            use_gpu=args.gpu,
             target_width=args.width, target_height=args.height,
-            target_fps=args.fps, fill_mode=args.fill,
-            nvenc_cq=args.nvenc_cq, bitrate_mbps=args.bitrate, x264_crf=args.crf,
-            trim_tail_seconds=args.trim_tail,
+            target_fps=args.fps, fill_mode=args.fill
         ):
             print("❌ 视频拼接失败")
             sys.exit(1)
@@ -1241,15 +1234,10 @@ def process_single_output(args_tuple):
             selected_ts,
             temp_concat_output,
             use_gpu=args_gpu,
-            temp_dir=temp_dir,
             target_width=target_width,
             target_height=target_height,
             target_fps=target_fps,
-            fill_mode=fill_mode,
-            nvenc_cq=args_nvenc_cq,
-            bitrate_mbps=args_bitrate_mbps,
-            x264_crf=args_x264_crf,
-            trim_tail_seconds=args_trim_tail,
+            fill_mode=fill_mode
         ):
             return False, idx, "视频拼接失败"
         
