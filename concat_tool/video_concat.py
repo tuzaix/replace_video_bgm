@@ -273,7 +273,7 @@ def clear_mismatched_ts_cache(input_roots: List[Path], trim_head_seconds: float,
     return removed
 
 
-def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_head_seconds: float, trim_tail_seconds: float) -> List[Path]:
+def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_head_seconds: float, trim_tail_seconds: float, use_gpu: bool) -> List[Path]:
     """将源视频列表映射为可用的 TS 片段路径列表。
     - 若目标 TS 缺失或为空，则即时进行无重编码转换，并在转换时裁剪开头 `trim_head_seconds` 与尾部 `trim_tail_seconds`。
     - 返回成功生成的 TS 路径列表；失败或过短的条目会被跳过。
@@ -283,7 +283,7 @@ def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_head_s
         ts_path = get_ts_output_path_with_trim(src, input_roots, trim_head_seconds, trim_tail_seconds)
         try:
             if not ts_path.exists() or ts_path.stat().st_size == 0:
-                ok = convert_video_to_ts(src, ts_path, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds)
+                ok = convert_video_to_ts(src, ts_path, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds, use_gpu=use_gpu)
                 if not ok:
                     print(f"⏭️ TS不可用，跳过片段: {src.name}")
                     continue
@@ -293,12 +293,13 @@ def ensure_ts_segments(sources: List[Path], input_roots: List[Path], trim_head_s
     return ts_list
 
 
-def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds: float = 0.0, trim_tail_seconds: float = 1.0) -> bool:
-    """将视频无重编码地转换为 MPEG-TS，支持裁剪开头与尾部。
-    - 使用 `-c copy`，按源编码选择 bsf：h264 -> h264_mp4toannexb，hevc -> hevc_mp4toannexb。
-    - 允许在转换阶段裁剪开头(`trim_head_seconds`)与尾部(`trim_tail_seconds`)以减少拼接卡顿。
-    - 当裁剪后长度不足阈值时跳过该片段。
-    返回 True/False 表示成功与否。
+def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds: float = 0.0, trim_tail_seconds: float = 1.0, use_gpu: bool = True) -> bool:
+    """将视频转换为 MPEG-TS（仅视频轨，移除音频），支持裁剪与按 GPU/CPU 区分压缩，并在 GPU 失败时自动回退到 CPU。
+
+    目标：在保证观感的情况下尽可能增大压缩比例。
+    - 优先尝试 GPU 编码（NVENC）：先试 `hevc_nvenc`，失败则试 `h264_nvenc`。
+    - 若 GPU 不可用或失败，则自动回退到 CPU：使用 `libx265`（H.265）并设置 `CRF` 和 `preset`。
+    - 始终生成缺失的 PTS 并重置时间戳，避免拼接卡顿；TS 中不包含音频轨（-an）。
     """
     try:
         ffmpeg_bin = shutil.which('ffmpeg')
@@ -315,9 +316,14 @@ def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds
 
         output_ts.parent.mkdir(parents=True, exist_ok=True)
 
-        codec = probe_video_codec_ffprobe(input_video) or ''
-        # 计算裁剪参数与输出时长
+        # 计算裁剪参数与输出时长，并收集输入体积信息用于压缩对比
         out_duration = None
+        orig_size_bytes = None
+        est_input_bytes = None
+        try:
+            orig_size_bytes = input_video.stat().st_size
+        except Exception:
+            orig_size_bytes = None
         try:
             dur = probe_duration_ffprobe(input_video)
             head = max(0.0, float(trim_head_seconds or 0.0))
@@ -327,51 +333,148 @@ def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds
                 if out_duration <= 0.05:
                     print(f"⏭️ 片段过短，跳过 TS 转换: {input_video.name} (时长 {dur:.2f}s, 头裁剪 {head:.2f}s, 尾裁剪 {tail:.2f}s)")
                     return False
+                # 若可获取总时长与原文件大小，估算裁剪片段对应的参考体积
+                try:
+                    if orig_size_bytes and dur and dur > 0:
+                        est_input_bytes = int(orig_size_bytes * (out_duration / dur))
+                except Exception:
+                    est_input_bytes = None
         except Exception:
             # 若获取时长失败，则继续无裁剪转换
             out_duration = None
 
-        cmd = [ffmpeg_bin, '-y']
-        # 开头裁剪：输入级快速seek，结合流复制以提升效率
+        # 组装基础命令（输入、时间戳、帧率、去音轨）
+        base_cmd = [ffmpeg_bin, '-y']
         try:
             if trim_head_seconds and float(trim_head_seconds) > 0:
-                cmd += ['-ss', f'{max(0.0, float(trim_head_seconds)):.3f}']
+                base_cmd += ['-ss', f'{max(0.0, float(trim_head_seconds)):.3f}']
         except Exception:
             pass
-        # 生成缺失的 PTS 并将时间戳重置，减少拼接后时序不稳的风险
-        cmd += ['-fflags', '+genpts', '-i', str(input_video), '-c', 'copy', '-reset_timestamps', '1', '-an']
-        if codec.lower() == 'h264':
-            cmd += ['-bsf:v', 'h264_mp4toannexb']
-        elif codec.lower() == 'hevc':
-            cmd += ['-bsf:v', 'hevc_mp4toannexb']
-        else:
-            # 非 H.264/HEVC 源，省略 bsf，仍使用 mpegts 容器
-            pass
-        # 尾部裁剪：使用 -t 限制输出时长（流复制，关键帧对齐）
-        if out_duration is not None:
-            cmd += ['-t', f'{out_duration:.3f}']
-        cmd += ['-f', 'mpegts', str(output_ts)]
+        base_cmd += [
+            '-fflags', '+genpts',
+            '-i', str(input_video),
+            '-reset_timestamps', '1',
+            '-an',
+            # '-r', '25',
+        ]
 
-        res = subprocess.run(cmd, capture_output=True)
-        if res.returncode == 0:
-            return True
-        else:
-            stderr_text = ''
+        # 编码器尝试序列：根据 use_gpu 决定尝试顺序
+        encoder_attempts: list[list[str]] = []
+        if use_gpu:
+            # 首选 HEVC NVENC，高压缩；次选 H.264 NVENC，兼容性好
+            encoder_attempts.append([
+                '-c:v', 'hevc_nvenc',
+                '-preset', 'p4',
+                '-tune', 'hq',
+                '-rc', 'vbr',
+                '-cq', '36',
+                '-b:v', '0',
+                '-pix_fmt', 'yuv420p',
+            ])
+            encoder_attempts.append([
+                '-c:v', 'h264_nvenc',
+                '-preset', 'p4',
+                '-tune', 'hq',
+                '-rc', 'vbr',
+                '-cq', '30',
+                '-b:v', '0',
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-pix_fmt', 'yuv420p',
+            ])
+        # CPU 兜底：libx265，较高压缩与观感折中（veryfast 更稳妥）
+        encoder_attempts.append([
+            '-c:v', 'libx265',
+            '-crf', '28',
+            '-preset', 'veryfast',
+            '-pix_fmt', 'yuv420p',
+        ])
+
+        # 逐个尝试编码器，GPU 失败自动回退到下一方案（最终 CPU）
+        for idx, enc in enumerate(encoder_attempts):
+            cmd = list(base_cmd) + enc
+            if out_duration is not None:
+                cmd += ['-t', f'{out_duration:.3f}']
+            cmd += ['-f', 'mpegts', str(output_ts)]
+
+            # 打印命令摘要便于诊断
             try:
-                stderr_text = (res.stderr or b'').decode('utf-8', errors='ignore')
+                label = enc[1] if len(enc) > 1 else 'unknown'
+                print(f"🔧 TS转换编码尝试[{idx+1}/{len(encoder_attempts)}] 使用 {label}: {' '.join(cmd)}")
             except Exception:
+                pass
+
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode == 0:
+                # 成功后打印压缩前后体积对比
                 try:
-                    stderr_text = (res.stderr or b'').decode('mbcs', errors='ignore')
+                    out_size_bytes = None
+                    try:
+                        out_size_bytes = output_ts.stat().st_size
+                    except Exception:
+                        out_size_bytes = None
+
+                    def _fmt_size(n: Optional[int]) -> str:
+                        try:
+                            if n is None:
+                                return '未知'
+                            units = ['B', 'KB', 'MB', 'GB']
+                            size = float(n)
+                            idx = 0
+                            while size >= 1024 and idx < len(units) - 1:
+                                size /= 1024.0
+                                idx += 1
+                            if idx <= 1:
+                                return f"{size:.0f}{units[idx]}"
+                            return f"{size:.2f}{units[idx]}"
+                        except Exception:
+                            return str(n)
+
+                    base_input = est_input_bytes if est_input_bytes else orig_size_bytes
+                    ratio = None
+                    percent = None
+                    try:
+                        if base_input and out_size_bytes and base_input > 0:
+                            ratio = out_size_bytes / base_input
+                            percent = (1.0 - ratio) * 100.0
+                    except Exception:
+                        ratio = None
+                        percent = None
+
+                    msg_parts = [
+                        f"📦 体积对比: 输入={_fmt_size(orig_size_bytes)}",
+                    ]
+                    if est_input_bytes is not None:
+                        msg_parts.append(f"估算裁剪片段={_fmt_size(est_input_bytes)}")
+                    msg_parts.append(f"输出TS={_fmt_size(out_size_bytes)}")
+                    if ratio is not None and percent is not None:
+                        msg_parts.append(f"输出/参考输入比例={ratio:.2f}")
+                        msg_parts.append(f"体积变化={percent:.1f}%")
+                    print('，'.join(msg_parts))
                 except Exception:
-                    stderr_text = ''
-            print(f"⚠️ TS转换失败: {input_video.name} -> {output_ts.name}\n{stderr_text[-600:]}")
-            return False
+                    pass
+                return True
+            else:
+                # 失败则打印末尾日志并继续下一尝试
+                stderr_text = ''
+                try:
+                    stderr_text = (res.stderr or b'').decode('utf-8', errors='ignore')
+                except Exception:
+                    try:
+                        stderr_text = (res.stderr or b'').decode('mbcs', errors='ignore')
+                    except Exception:
+                        stderr_text = ''
+                print(f"⚠️ TS转换失败(编码器 {enc[1]}): {input_video.name} -> {output_ts.name}\n{stderr_text[-600:]}")
+
+        # 所有尝试均失败
+        print(f"❌ TS转换失败，已尝试 GPU/CPU 编码但均未成功: {input_video.name}")
+        return False
     except Exception as e:
         print(f"❌ TS转换异常: {e}")
         return False
 
 
-def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int, *, trim_head_seconds: float = 0.0, trim_tail_seconds: float = 1.0) -> None:
+def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int, *, trim_head_seconds: float = 0.0, trim_tail_seconds: float = 1.0, use_gpu: bool = True) -> None:
     """并发将输入目录中的所有视频转换为 TS 并写入各自根目录的 _temp/video_ts。
     - 线程数复用 `threads` 参数。
     - 已有且非空的 TS 文件会跳过。
@@ -385,7 +488,7 @@ def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int,
             futures = {}
             for v in videos:
                 out_ts = get_ts_output_path_with_trim(v, input_roots, trim_head_seconds, trim_tail_seconds)
-                fut = executor.submit(convert_video_to_ts, v, out_ts, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds)
+                fut = executor.submit(convert_video_to_ts, v, out_ts, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds, use_gpu=use_gpu)
                 futures[fut] = (v, out_ts)
             for fut in as_completed(futures):
                 v, out_ts = futures[fut]
@@ -472,7 +575,7 @@ def process_group_single_output(args_tuple):
         print(f"🔄 [组 {w}x{h}] 输出{out_index} 选择了 {len(selected)} 个视频片段…")
 
         # 将所选视频映射为 TS 文件路径；若不存在则尝试即时转换（统一辅助函数）
-        selected_ts = ensure_ts_segments(selected, input_roots, args_trim_head, args_trim_tail)
+        selected_ts = ensure_ts_segments(selected, input_roots, args_trim_head, args_trim_tail, args_gpu)
         if not selected_ts:
             return False, f"组 {w}x{h} 输出{out_index} 无可用TS片段"
 
@@ -591,18 +694,18 @@ def select_bgm_file(bgm_path: Path, seed: Optional[int] = None) -> Path:
         raise ValueError(f"BGM路径不存在: {bgm_path}")
 
 
-def write_concat_list_file(videos: List[Path], list_file: Path) -> int:
-    """写入 concat demuxer 所需的列表文件，返回写入的条目数。
-    拼接阶段不再进行逐段裁剪，直接写入 `file '<path>'` 行。
-    """
-    lines = []
-    for v in videos:
-        p = str(v)
-        p_escaped = p.replace("'", r"'\''")
-        lines.append(f"file '{p_escaped}'\n")
-    with open(list_file, 'w', encoding='utf-8') as f:
-        f.writelines(lines)
-    return len(lines)
+# def write_concat_list_file(videos: List[Path], list_file: Path) -> int:
+#     """写入 concat demuxer 所需的列表文件，返回写入的条目数。
+#     拼接阶段不再进行逐段裁剪，直接写入 `file '<path>'` 行。
+#     """
+#     lines = []
+#     for v in videos:
+#         p = str(v)
+#         p_escaped = p.replace("'", r"'\''")
+#         lines.append(f"file '{p_escaped}'\n")
+#     with open(list_file, 'w', encoding='utf-8') as f:
+#         f.writelines(lines)
+#     return len(lines)
 
 
 def validate_and_prepare(args: argparse.Namespace):
@@ -790,7 +893,7 @@ def run_random_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_inp
         print(f"🎲 随机选择了 {len(selected_videos)} 个视频:")
         for i, video in enumerate(selected_videos, 1):
             print(f"  {i}. {video.name}")
-        selected_ts = ensure_ts_segments(selected_videos, input_roots, args.trim_head, args.trim_tail)
+        selected_ts = ensure_ts_segments(selected_videos, input_roots, args.trim_head, args.trim_tail, args.gpu)
         if not selected_ts:
             print("❌ 无可用TS片段，结束。")
             sys.exit(1)
@@ -835,10 +938,10 @@ def run_random_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_inp
         print(f"📊 文件大小: {out_path.stat().st_size / (1024*1024):.1f} MB")
 
 
-def preconvert_all_ts(all_videos: List[Path], input_roots: List[Path], threads: int, trim_head_seconds: float, trim_tail_seconds: float) -> None:
+def preconvert_all_ts(all_videos: List[Path], input_roots: List[Path], threads: int, trim_head_seconds: float, trim_tail_seconds: float, use_gpu: bool) -> None:
     """对所有输入视频进行TS预转换，统一裁剪开头/尾部时长，提升拼接稳定性。"""
     try:
-        convert_all_to_ts(all_videos, input_roots, threads, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds)
+        convert_all_to_ts(all_videos, input_roots, threads, trim_head_seconds=trim_head_seconds, trim_tail_seconds=trim_tail_seconds, use_gpu=use_gpu)
     except KeyboardInterrupt:
         sys.exit(1)
 
@@ -847,7 +950,6 @@ def concat_videos(
     videos: List[Path],
     output_path: Path,
     use_gpu: bool = False,
-    temp_dir: Optional[Path] = None,
     target_width: int = 1920,
     target_height: int = 1080,
     target_fps: int = 24,
@@ -855,7 +957,6 @@ def concat_videos(
     nvenc_cq: int = 24,
     bitrate_mbps: int = 6,
     x264_crf: int = 22,
-    trim_tail_seconds: float = 1.0,
 ) -> bool:
     """使用FFmpeg concat demuxer拼接视频（无音频），支持NVENC加速编码。
     - 生成文件列表并通过 `-f concat -safe 0` 拼接。
@@ -918,7 +1019,7 @@ def concat_videos(
         if nvenc_ok:
             cmd += [
                 '-c:v', 'h264_nvenc',
-                '-preset', 'p4',
+                '-preset', 'p6',
                 '-tune', 'hq',
                 '-rc', 'vbr',
                 # 压缩参数（默认更小体积且保持观感）
@@ -943,7 +1044,7 @@ def concat_videos(
             cmd += [
                 '-c:v', 'libx264',
                 # 提升质量：更慢预设与更低 CRF
-                '-preset', 'slow',
+                '-preset', 'ultrafast',
                 '-crf', str(x264_crf),
                 '-tune', 'film',
                 '-profile:v', 'high',
@@ -982,17 +1083,23 @@ def concat_videos(
         print(f"❌ 拼接过程异常: {e}")
         return False
 
+def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, use_gpu: bool = True) -> bool:
+    """使用FFmpeg替换视频音频为BGM并进行压缩。
 
-def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, use_gpu: bool = False) -> bool:
-    """使用FFmpeg替换视频音频为BGM：视频流copy，音频AAC，支持循环/截断"""
+    - 视频编码优先使用 GPU 的 `hevc_nvenc`（H.265），失败则自动回退到 CPU 的 `libx265`。
+    - 音频使用 AAC，码率 96k，BGM 通过 `-stream_loop -1` 循环并与视频 `-shortest` 对齐。
+    - 保持时间戳连续（`-fflags +genpts`），并添加 `-movflags +faststart` 以优化播放器加载。
+    """
+    # use_gpu = False
     try:
-        print("🎵 使用FFmpeg合成BGM…")
+        print("🎵 使用FFmpeg压缩视频并合成BGM…")
         ffmpeg_bin = shutil.which('ffmpeg')
         if not ffmpeg_bin:
             print("❌ 未找到 ffmpeg，请确保已安装并配置到 PATH")
             return False
 
-        cmd = [
+        # 通用输入参数（视频 + BGM）
+        base_inputs = [
             ffmpeg_bin, '-y',
             '-fflags', '+genpts',
             '-i', str(video_path),
@@ -1000,15 +1107,68 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
             '-i', str(bgm_path),
             '-map', '0:v:0',
             '-map', '1:a:0',
-            '-c:v', 'copy',
-            '-c:a', 'aac', '-b:a', '192k',
             '-shortest',
+            '-movflags', '+faststart',
+        ]
+
+        # 优先使用 GPU（hevc_nvenc），质量参数参考 CRF 28（使用 NVENC 的 CQ 近似）
+        gpu_cmd = base_inputs + [
+            '-c:v', 'hevc_nvenc',
+            '-preset', 'p4',        
+            '-rc', 'vbr',             # 码率控制：可变码率
+            '-cq', '36',              # 近似 CRF 的质量参数
+            '-b:v', '0',              # 不设定目标码率，让 CQ 控制质量
+            '-pix_fmt', 'yuv420p',
+            '-multipass', 'fullres',
+            # '-rc-lookahead', '60',
+            '-c:a', 'aac',
+            '-b:a', '96k',
             str(output_path)
         ]
 
-        result = subprocess.run(cmd, capture_output=True)
+        # CPU 回退（libx265），CRF 28 + veryfast（参考你的命令）
+        cpu_cmd = base_inputs + [
+            '-c:v', 'libx265',
+            '-crf', '28',
+            '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
+            '-b:a', '96k',
+            str(output_path)
+        ]
+
+        result = None
+        tried_gpu = False
+
+        # 先尝试 GPU 编码
+        if use_gpu:
+            tried_gpu = True
+            print("⚙️ 尝试使用 GPU 编码 (hevc_nvenc)…")
+            print(f"🔧 GPU执行命令: {' '.join(gpu_cmd)}")
+            result = subprocess.run(gpu_cmd, capture_output=True)
+            if result.returncode == 0:
+                print(f"✅ 使用 GPU(hevc_nvenc) 压缩并替换BGM成功: {output_path.name}")
+                return True
+            else:
+                stderr_text = ''
+                try:
+                    stderr_text = (result.stderr or b'').decode('utf-8', errors='ignore')
+                except Exception:
+                    try:
+                        stderr_text = (result.stderr or b'').decode('mbcs', errors='ignore')
+                    except Exception:
+                        stderr_text = ''
+                print(f"⚠️ GPU编码失败，准备回退到CPU。错误摘要: {stderr_text[-500:]}")
+
+        # GPU 不可用或失败则回退到 CPU（libx265）
+        print("⚙️ 使用 CPU 编码 (libx265)…")
+        print(f"🔧 CPU执行命令: {' '.join(cpu_cmd)}")
+        result = subprocess.run(cpu_cmd, capture_output=True)
         if result.returncode == 0:
-            print(f"✅ BGM替换成功: {output_path.name}")
+            if tried_gpu:
+                print(f"✅ CPU回退成功，压缩并替换BGM: {output_path.name}")
+            else:
+                print(f"✅ 使用 CPU(libx265) 压缩并替换BGM成功: {output_path.name}")
             return True
         else:
             stderr_text = ''
@@ -1047,7 +1207,7 @@ def process_single_output(args_tuple):
             print(f"  {i}. {video.name}")
 
         # 映射为 TS 文件；如缺失则即时转换（统一辅助函数）
-        selected_ts = ensure_ts_segments(selected_videos, input_roots, args_trim_head, args_trim_tail)
+        selected_ts = ensure_ts_segments(selected_videos, input_roots, args_trim_head, args_trim_tail, args_gpu)
         if not selected_ts:
             return False, idx, "无可用TS片段"
         # 在拼接前根据时间戳种子打乱片段顺序
@@ -1140,8 +1300,8 @@ def main():
                         help='默认按分辨率分组拼接并输出（文件名追加分辨率后缀），使用 --no-group-res 关闭')
     parser.add_argument('--no-group-res', dest='group_res', action='store_false', help='关闭分辨率分组模式')
     # 压缩参数：在不影响观感的前提下减小体积
-    parser.add_argument('--nvenc-cq', type=int, default=28, help='NVENC质量参数cq（默认28，值越大体积越小）')
-    parser.add_argument('--crf', type=int, default=26, help='x264 CRF（默认26，值越大体积越小）')
+    parser.add_argument('--nvenc-cq', type=int, default=36, help='NVENC质量参数cq（默认36，值越大体积越小）')
+    parser.add_argument('--crf', type=int, default=28, help='x264 CRF（默认28，值越大体积越小）')
     parser.add_argument('--bitrate', type=int, default=5, help='NVENC目标码率，单位Mbps（默认5）')
     
     args = parser.parse_args()
@@ -1157,7 +1317,7 @@ def main():
         # 按需清理与当前裁剪参数不匹配的 TS 缓存
         if args.clear_mismatched_cache:
             clear_mismatched_ts_cache(video_dirs, args.trim_head, args.trim_tail)
-        preconvert_all_ts(all_videos, video_dirs, args.threads, trim_head_seconds=args.trim_head, trim_tail_seconds=args.trim_tail)
+        preconvert_all_ts(all_videos, video_dirs, args.threads, trim_head_seconds=args.trim_head, trim_tail_seconds=args.trim_tail, use_gpu=args.gpu)
         
         # 创建临时目录
         temp_dir = create_temp_dir(video_dirs)
