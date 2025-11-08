@@ -19,13 +19,38 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 SUPPORTED_VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v'}
 SUPPORTED_AUDIO_EXTS = {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg'}
 
-
-def get_global_ffmpeg_base_cmd() -> List[str]:
-    """获取全局 ffmpeg 基础参数"""
-    return [
-            '-r', '25',                 # 帧率 25fps
-            '-pix_fmt', 'yuv420p',      # 像素格式 yuv420p（兼容大多数播放器）
-        ]
+def get_ffmpeg_gpu_mapping_cpu_enc_opts() -> List[str]:
+    """获取 GPU 与 CPU 编码器的通用编码参数映射关系"""
+    common_opts = [
+        # '-r', '25',                 # 帧率 25fps
+        '-pix_fmt', 'yuv420p',      # 像素格式 yuv420p（兼容大多数播放器）
+    ]
+    common_enc_opts = {
+        "gpu": [
+            '-c:v', 'hevc_nvenc',
+            '-preset', 'p7',           # 最强压缩预设（更慢）
+            '-tune', 'hq',             # 画质优化模式
+            '-rc', 'vbr',              # 可变码率，结合 CQ
+            '-cq', '40',               # 提升压缩强度（体积更小）
+            '-b:v', '0',               # 让 CQ 主导（不设目标码率）
+            '-bf', '3',                # 使用 B 帧提升压缩效率
+            '-b_ref_mode', 'middle',   # B 帧参考模式，提高参考帧利用
+            '-spatial_aq', '1',        # 空间自适应量化
+            '-temporal_aq', '1',       # 时间自适应量化
+            '-aq-strength', '6',       # 略降 AQ 强度，压缩更激进
+            '-g', '240',               # GOP，提升跨帧压缩（典型 24/30fps 场景）
+        ],
+        "cpu": [
+            '-c:v', 'libx265',
+            '-crf', '32',                 # 更强压缩（CRF 越大体积越小）
+            '-preset', 'veryslow',        # 极高压缩取向（耗时↑↑）
+            # 精调 x265，以在主观质量可接受前提下提升压缩率
+            '-x265-params', 'aq-mode=2:aq-strength=1.0:psy-rd=1.8:psy-rdoq=1.0:qcomp=0.60:rc-lookahead=80:keyint=240:min-keyint=24:bframes=8:ref=6:scenecut=40:limit-sao=1',
+        ],
+    }
+    for enc_opts in common_enc_opts.values():
+        enc_opts.extend(common_opts)
+    return common_enc_opts
 
 def generate_auto_seed() -> int:
     """自动生成随机种子：基于时间戳和随机数组合"""
@@ -365,30 +390,17 @@ def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds
         ]
 
         # 编码器尝试序列：统一 HEVC（NVENC→CPU），根据 use_gpu 决定是否先试 GPU
+        # 抽取通用编码选项（两种编码器均需），保持输出像素格式一致
+        gpu_cpu_mapping = get_ffmpeg_gpu_mapping_cpu_enc_opts()
         encoder_attempts: list[list[str]] = []
         if use_gpu:
-            # 首选 HEVC NVENC，参数与 CPU libx265(crf=28, preset=medium)近似映射
-            encoder_attempts.append([
-                '-c:v', 'hevc_nvenc',
-                '-preset', 'p6',
-                '-tune', 'hq',
-                '-cq', '26',
-                # '-b:v', '2000k',
-                # '-maxrate', '4000k',
-                # '-bufsize', '8000k',
-                '-rc', 'vbr',
-            ])
+            encoder_attempts.append(gpu_cpu_mapping['gpu'])
         # CPU 兜底：统一使用 libx265（H.265）
-        encoder_attempts.append([
-            '-c:v', 'libx265',
-            '-crf', '28',
-            '-preset', 'medium',
-            # '-b:v', '2000k',
-        ])
+        encoder_attempts.append(gpu_cpu_mapping['cpu'])
 
         # 逐个尝试编码器，GPU 失败自动回退到下一方案（最终 CPU）
         for idx, enc in enumerate(encoder_attempts):
-            cmd = list(base_cmd) + get_global_ffmpeg_base_cmd() + enc
+            cmd = list(base_cmd) + enc
             if out_duration is not None:
                 cmd += ['-t', f'{out_duration:.3f}']
             cmd += ['-f', 'mpegts', str(output_ts)]
@@ -446,21 +458,32 @@ def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds
                     msg_parts = [
                         f"📦 体积对比: 输入={_fmt_size(orig_size_bytes)}",
                     ]
+                   
                     if est_input_bytes is not None:
                         msg_parts.append(f"估算裁剪片段={_fmt_size(est_input_bytes)}")
                     msg_parts.append(f"输出TS={_fmt_size(out_size_bytes)}")
                     if ratio is not None and percent is not None:
                         msg_parts.append(f"输出/参考输入比例={ratio:.2f}")
                         msg_parts.append(f"体积变化={percent:.1f}%")
+                     # 打印原始与输出文件名，便于定位具体文件
+                    try:
+                        # msg_parts.insert(0, f"🎬 原始文件={input_video.name}")
+                        msg_parts.append(f"🎬 原始文件={input_video.name}")
+                        # msg_parts.insert(1, f"🎞️ 输出文件={output_ts.name}")
+                    except Exception:
+                        pass
                     print('，'.join(msg_parts))
                 except Exception:
                     pass
                 return True
             else:
-                # 失败则打印末尾日志并继续下一尝试
+                # 失败则打印末尾日志并继续下一尝试（兼容 encoding='utf-8' 的返回类型）
                 stderr_text = ''
                 try:
-                    stderr_text = (res.stderr or b'').decode('utf-8', errors='ignore')
+                    if isinstance(res.stderr, str):
+                        stderr_text = res.stderr
+                    else:
+                        stderr_text = (res.stderr or b'').decode('utf-8', errors='ignore')
                 except Exception:
                     try:
                         stderr_text = (res.stderr or b'').decode('mbcs', errors='ignore')
@@ -482,9 +505,6 @@ def convert_all_to_ts(videos: List[Path], input_roots: List[Path], threads: int,
     - 已有且非空的 TS 文件会跳过。
     """
     print("🚧 正在预转换视频为 TS 以优化拼接…")
-    # 调试
-    videos = videos[:5]
-
     total = len(videos)
     succeeded = 0
     failed = 0
@@ -611,7 +631,7 @@ def process_group_single_output(args_tuple):
             selected_ts,
             temp_concat_output,
             use_gpu=args_gpu,
-            temp_dir=temp_dir,
+            # temp_dir=temp_dir,
             target_width=w,
             target_height=h,
             target_fps=target_fps,
@@ -619,11 +639,12 @@ def process_group_single_output(args_tuple):
             nvenc_cq=args_nvenc_cq,
             bitrate_mbps=args_bitrate_mbps,
             x264_crf=args_x264_crf,
-            trim_tail_seconds=args_trim_tail,
+            # trim_tail_seconds=args_trim_tail,
         )
         if not ok:
             return False, f"组 {w}x{h} 输出{out_index} 拼接失败"
 
+        return True, f"组 {w}x{h} 输出{out_index} 拼接成功"
         # 选择 BGM 并合成
         try:
             bgm_path = select_bgm_file(bgm_input_path, auto_seed)
@@ -951,18 +972,7 @@ def preconvert_all_ts(all_videos: List[Path], input_roots: List[Path], threads: 
         sys.exit(1)
 
 
-def concat_videos(
-    videos: List[Path],
-    output_path: Path,
-    use_gpu: bool = False,
-    target_width: int = 1920,
-    target_height: int = 1080,
-    target_fps: int = 24,
-    fill_mode: str = 'pad',  # 'pad' 或 'crop'
-    nvenc_cq: int = 24,
-    bitrate_mbps: int = 6,
-    x264_crf: int = 22,
-) -> bool:
+def concat_videos(videos: List[Path], output_path: Path, use_gpu: bool = False, target_width: int = 1920, target_height: int = 1080, target_fps: int = 24, fill_mode: str = 'pad') -> bool:
     """使用FFmpeg concat demuxer拼接视频（无音频），支持NVENC加速编码。
     - 生成文件列表并通过 `-f concat -safe 0` 拼接。
     - 统一输出为指定分辨率/帧率/像素格式（可配置）。
@@ -986,10 +996,10 @@ def concat_videos(
         # 检测编码器
         nvenc_ok = use_gpu and is_nvenc_available()
         if nvenc_ok:
-            print("🟢 检测到 NVENC，使用 h264_nvenc")
+            print("🟢 检测到 NVENC，使用 hevc_nvenc (H.265)")
         else:
             if use_gpu:
-                print("⚠️ 未检测到 h264_nvenc，回退到 libx264")
+                print("⚠️ 未检测到 hevc_nvenc，回退到 libx265 (CPU H.265)")
         # 构建 FFmpeg 编码命令（统一输出规格，可配置）
         if fill_mode == 'crop':
             # 等比放大填满，超出部分裁剪，使用高质量 Lanczos 缩放以降低锯齿
@@ -1007,71 +1017,64 @@ def concat_videos(
             )
 
         # 使用 filter_complex 基于解码的级联拼接，避免不同编码/时间戳导致的卡帧
-        cmd = [ffmpeg_bin, '-y', '-fflags', '+genpts']
+        cmd = [ffmpeg_bin, '-y', '-fflags', '+genpts', '-avoid_negative_ts', 'make_zero',]
         for v in videos:
             cmd += ['-i', str(v)]
         # 构造 concat 过滤器，将所有输入的视频流串接，随后统一缩放/填充
-        concat_inputs = ''.join([f'[{i}:v]' for i in range(len(videos))])
+        concat_inputs = ''.join([f'[{i}:v:0]' for i in range(len(videos))])
         filter_complex = f"{concat_inputs}concat=n={len(videos)}:v=1:a=0,{post_vf}[vout]"
+
         cmd += [
             '-filter_complex', filter_complex,
             '-map', '[vout]',
-            '-avoid_negative_ts', 'make_zero',
             '-fps_mode', 'cfr',
             '-sws_flags', 'lanczos+accurate_rnd+full_chroma_int',
         ]
 
+        common_video_opts = [
+            # '-profile:v', 'high',
+            # '-level', '4.1',
+            # '-pix_fmt', 'yuv420p',
+            # '-r', str(target_fps),  # 帧率已在 filter_complex 中设置
+            '-movflags', '+faststart',
+            '-an',
+        ]
+
         if nvenc_ok:
+            # 使用 HEVC NVENC（H.265），质量与体积更均衡
             cmd += [
-                '-c:v', 'h264_nvenc',
-                '-preset', 'p6',
-                '-tune', 'hq',
-                '-rc', 'vbr',
-                # 压缩参数（默认更小体积且保持观感）
-                '-cq', str(nvenc_cq),
-                '-b:v', f"{bitrate_mbps}M",
-                '-maxrate', f"{int(bitrate_mbps*1.5)}M",
-                '-bufsize', f"{int(bitrate_mbps*2)}M",
-                '-profile:v', 'high',
-                '-level', '4.1',
-                '-pix_fmt', 'yuv420p',
+                '-c:v', 'hevc_nvenc',
+                '-preset', 'p6',           # 压缩/速度平衡
+                '-tune', 'hq',             # 画质优化
+                '-rc', 'vbr',              # 可变码率，结合 CQ
+                '-cq', '28',               # 主观高质量、体积较小
+                '-b:v', '0',               # 让 CQ 主导
                 # 缩放等后处理已在 filter_complex 中完成
-                '-gpu', '0',
-                '-r', str(target_fps),
-                '-movflags', '+faststart',
                 '-spatial_aq', '1',
                 '-temporal_aq', '1',
                 '-rc-lookahead', '20',
-                '-surfaces', '64',
-                '-an',
-            ]
+            ] + common_video_opts
         else:
+            # 使用 CPU H.265（libx265），注重质量与体积平衡
             cmd += [
-                '-c:v', 'libx264',
-                # 提升质量：更慢预设与更低 CRF
-                '-preset', 'ultrafast',
-                '-crf', str(x264_crf),
-                '-tune', 'film',
-                '-profile:v', 'high',
-                '-level', '4.1',
-                '-pix_fmt', 'yuv420p',
+                '-c:v', 'libx265',
+                '-crf', '28',              # 主观高质量、体积较小
+                '-preset', 'medium',       # 速度与压缩平衡
                 # 缩放等后处理已在 filter_complex 中完成
-                '-r', str(target_fps),
-                '-movflags', '+faststart',
-                '-an',
-            ]
+            ] + common_video_opts
 
         cmd += [str(output_path)]
 
         print(f"🔧 编码命令: {' '.join(cmd)}")
         
         # 执行 FFmpeg
-        result = subprocess.run(cmd, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True, encoding='utf-8')
         if result.returncode == 0:
             print(f"✅ 视频拼接成功: {output_path.name}")
             return True
         else:
             print("❌ 视频拼接失败")
+            print(result.stderr)
             # 输出部分错误信息帮助定位问题
             stderr_text = ''
             try:
@@ -1081,6 +1084,7 @@ def concat_videos(
                     stderr_text = (result.stderr or b'').decode('mbcs', errors='ignore')
                 except Exception:
                     stderr_text = ''
+                
             print(stderr_text[-1000:])
             return False
 
@@ -1322,9 +1326,8 @@ def main():
         # 按需清理与当前裁剪参数不匹配的 TS 缓存
         if args.clear_mismatched_cache:
             clear_mismatched_ts_cache(video_dirs, args.trim_head, args.trim_tail)
+        # 预处理mp4 -> ts
         preconvert_all_ts(all_videos, video_dirs, args.threads, trim_head_seconds=args.trim_head, trim_tail_seconds=args.trim_tail, use_gpu=args.gpu)
-        
-        return # 调试 
         
         # 创建临时目录
         temp_dir = create_temp_dir(video_dirs)
@@ -1350,9 +1353,6 @@ def main():
                 print(f"🧹 已清理临时目录: {temp_dir}")
         except Exception as e:
             print(f"⚠️  清理临时目录失败: {e}")
-    
-    
-
 
 if __name__ == '__main__':
     main()
