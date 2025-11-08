@@ -15,10 +15,19 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, asdict
+import re
 from pathlib import Path
 from typing import List, Optional
 
 from PySide6 import QtCore, QtWidgets, QtGui
+import subprocess
+import platform
+import shutil
+try:
+    # PySide6 提供的对象有效性检测工具
+    from shiboken6 import isValid as _qt_is_valid  # type: ignore
+except Exception:
+    _qt_is_valid = None
 
 # Ensure imports work both in development and PyInstaller-frozen runtime.
 # In frozen mode, bundled packages are available without modifying sys.path.
@@ -29,6 +38,176 @@ if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(PROJECT_ROOT))
 
 from concat_tool import video_concat as vc  # type: ignore
+
+
+def _detect_nvidia_gpu() -> bool:
+    """Detect whether an NVIDIA GPU is present on the system.
+
+    This function uses a platform-aware strategy with several fallbacks:
+
+    1) Try to invoke `nvidia-smi` (Windows/Linux). If it exists and lists GPUs, return True.
+    2) On Windows, fall back to querying Win32_VideoController via PowerShell and
+       check whether any adapter name contains "NVIDIA".
+    3) On macOS, try `system_profiler SPDisplaysDataType` to find any entries with
+       vendor or model name containing "NVIDIA". Modern macOS machines rarely have
+       NVIDIA GPUs; if none found, return False.
+    4) On Linux, if `nvidia-smi` is not available, try `lspci` to grep for NVIDIA.
+
+    Returns
+    -------
+    bool
+        True if the system appears to have an NVIDIA GPU; otherwise False.
+    """
+    try:
+        # 1) Prefer nvidia-smi if available
+        nvsmi = shutil.which("nvidia-smi")
+        if nvsmi:
+            try:
+                out = subprocess.check_output([nvsmi, "-L"], stderr=subprocess.STDOUT, timeout=3)
+                text = out.decode(errors="ignore")
+                if any("GPU" in line for line in text.splitlines()):
+                    return True
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+
+        system = platform.system().lower()
+        # 2) Windows fallback: PowerShell query of video controllers
+        if system == "windows":
+            try:
+                # Use PowerShell to query adapter names; avoid WMI Python deps.
+                ps_cmd = [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"
+                ]
+                out = subprocess.check_output(ps_cmd, stderr=subprocess.STDOUT, timeout=3)
+                text = out.decode(errors="ignore").lower()
+                if "nvidia" in text:
+                    return True
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+
+        # 3) macOS: system_profiler
+        if system == "darwin":
+            try:
+                out = subprocess.check_output(["system_profiler", "SPDisplaysDataType"], stderr=subprocess.STDOUT, timeout=4)
+                text = out.decode(errors="ignore").lower()
+                if "nvidia" in text:
+                    return True
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+
+        # 4) Linux: lspci fallback
+        if system == "linux":
+            try:
+                lspci = shutil.which("lspci")
+                if lspci:
+                    out = subprocess.check_output([lspci], stderr=subprocess.STDOUT, timeout=3)
+                    text = out.decode(errors="ignore").lower()
+                    if "nvidia" in text:
+                        return True
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+    except Exception:
+        # Any unexpected error -> consider not detected
+        pass
+    return False
+
+
+def _preflight_license_hook() -> bool:
+    """Preflight hook placeholder for future license/authorization checks.
+
+    This function is designed as an extensibility point (切面接口). It currently
+    always returns True to allow normal startup, but in the future you can implement
+    license verification (online/offline) and return False to block application
+    launch.
+
+    Returns
+    -------
+    bool
+        True if license/authorization passes; False to block startup.
+    """
+    # TODO: Implement real authorization check (network request, local license file, etc.)
+    return True
+
+
+def run_preflight_checks(app: QtWidgets.QApplication) -> bool:
+    """Run startup preflight checks (NVIDIA GPU presence and license hook).
+
+    This executes in the earliest stage after QApplication is created and before
+    the main window is shown. If the machine does not have an NVIDIA GPU, a modal
+    dialog is displayed with the required message; when the user confirms, the app
+    exits. If the optional license hook fails, a dialog is shown similarly.
+
+    Parameters
+    ----------
+    app : QtWidgets.QApplication
+        The Qt application instance.
+
+    Returns
+    -------
+    bool
+        True to continue launching the main window; False to terminate the app.
+    """
+    # 1) NVIDIA GPU check
+    try:
+        has_nv = _detect_nvidia_gpu()
+    except Exception:
+        has_nv = False
+
+    if not has_nv:
+        try:
+            # 使用用户提供文案（保留其拼写）
+            msg = (
+                "该程序是使用navida显卡来处理视频，请升级显卡，cpu渲染效率太低"
+            )
+            QtWidgets.QMessageBox.critical(
+                None,
+                "硬件要求",
+                msg,
+                QtWidgets.QMessageBox.StandardButton.Ok,
+            )
+        except Exception:
+            # 作为回退，打印到控制台
+            print("[启动检查] 未检测到NVIDIA显卡：该程序是使用navida显卡来处理视频，请升级显卡，cpu渲染效率太低")
+        try:
+            app.quit()
+        except Exception:
+            pass
+        return False
+
+    # 2) License/authorization hook (currently always True)
+    try:
+        lic_ok = _preflight_license_hook()
+    except Exception:
+        lic_ok = True
+    if not lic_ok:
+        try:
+            QtWidgets.QMessageBox.warning(
+                None,
+                "授权校验失败",
+                "授权校验未通过，程序将退出。",
+                QtWidgets.QMessageBox.StandardButton.Ok,
+            )
+        except Exception:
+            print("[启动检查] 授权校验未通过，程序将退出。")
+        try:
+            app.quit()
+        except Exception:
+            pass
+        return False
+
+    return True
 
 
 @dataclass
@@ -477,6 +656,111 @@ class VideoConcatWorker(QtCore.QObject):
                 pass
 
 
+class SpinnerIndicator(QtWidgets.QWidget):
+    """
+    简易菊花转圈指示器（无第三方资源），用于加载状态提示。
+
+    通过 QTimer 周期性刷新角度，使用 QPainter 绘制 12 段线条，
+    根据当前角度设置透明度生成旋转效果。
+    """
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None, size: int = 64, color: QtGui.QColor | None = None) -> None:
+        super().__init__(parent)
+        self._size = max(32, size)
+        self._angle = 0
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.setFixedSize(self._size, self._size)
+        self._color = color or QtGui.QColor("#3b82f6")
+
+    def _tick(self) -> None:
+        """推进角度并触发重绘。"""
+        self._angle = (self._angle + 1) % 12
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # type: ignore[override]
+        """绘制 12 段旋转线条形成菊花效果。
+
+        注意：确保在 finally 中调用 painter.end()，避免 QBackingStore 错误。
+        """
+        painter = QtGui.QPainter(self)
+        try:
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            cx, cy = self.width() / 2.0, self.height() / 2.0
+            radius = self._size / 2.0 - 6.0
+            line_len = float(max(6, int(self._size * 0.20)))
+            line_w = max(2, int(self._size * 0.06))
+            # 使用更健壮的设置方式，避免枚举差异带来的异常
+            for i in range(12):
+                # 透明度随相对角度递减
+                rel = (i - self._angle) % 12
+                alpha = int(60 + (195 * (1 - rel / 12.0)))  # 60..255
+                color = QtGui.QColor(self._color)
+                color.setAlpha(alpha)
+                pen = QtGui.QPen(color)
+                pen.setWidth(line_w)
+                try:
+                    pen.setCapStyle(QtCore.Qt.RoundCap)
+                except Exception:
+                    pass
+                painter.setPen(pen)
+                # 使用 Python 内置 math 库计算坐标，避免 QtCore.qCos/qSin 不可用
+                from math import cos, sin, pi
+                theta = (i / 12.0) * 2.0 * pi
+                sx = cx + (radius - line_len) * cos(theta)
+                sy = cy + (radius - line_len) * sin(theta)
+                ex = cx + radius * cos(theta)
+                ey = cy + radius * sin(theta)
+                painter.drawLine(QtCore.QPointF(sx, sy), QtCore.QPointF(ex, ey))
+        finally:
+            # 显式结束绘制，避免活动 painter 导致 QBackingStore 报错
+            try:
+                painter.end()
+            except Exception:
+                pass
+
+
+class BusyOverlay(QtWidgets.QWidget):
+    """
+    半透明蒙层，居中显示菊花转圈与提示文本，用于遮罩“输出结果”区域。
+
+    行为：
+    - 显示时阻止底部点击（通过禁用列表实现）；
+    - 随父组件大小变化自动调整几何；
+    - 无滚动条、无边框，仅视觉遮罩。
+    """
+    def __init__(self, parent: QtWidgets.QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.setStyleSheet("background-color: rgba(0,0,0,96);")
+        self.setVisible(False)
+        # 居中布局
+        vbox = QtWidgets.QVBoxLayout(self)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(10)
+        vbox.setAlignment(QtCore.Qt.AlignCenter)
+        self.spinner = SpinnerIndicator(self, size=64)
+        self.label = QtWidgets.QLabel("处理中…")
+        self.label.setStyleSheet("color: white; font-size: 14px; font-weight: 600;")
+        vbox.addWidget(self.spinner, 0, QtCore.Qt.AlignCenter)
+        vbox.addWidget(self.label, 0, QtCore.Qt.AlignCenter)
+        # 拦截父组件 resize 以随动
+        parent.installEventFilter(self)
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if watched is self.parent() and event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Move):
+            try:
+                # 填满父组件内容区域
+                parent_widget = self.parentWidget()
+                if parent_widget is not None:
+                    self.setGeometry(parent_widget.rect())
+            except Exception:
+                pass
+        return super().eventFilter(watched, event)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """Main application window for Video Concat GUI.
 
@@ -600,9 +884,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.x265_crf_spin = QtWidgets.QSpinBox(); self.x265_crf_spin.setRange(0, 51); self.x265_crf_spin.setSpecialValueText("(默认)"); self.x265_crf_spin.setValue(0)
 
         # Buttons
-        self.start_btn = QtWidgets.QPushButton("开始")
-        self.stop_btn = QtWidgets.QPushButton("停止")
+        self.start_btn = QtWidgets.QPushButton("开始-混剪")
+        self.stop_btn = QtWidgets.QPushButton("停止-混剪")
         self.stop_btn.setEnabled(False)
+        # 提高“开始/停止”按钮的高度与字号，采用 DPI 自适应以在高分屏上保持醒目
+        try:
+            self._apply_action_buttons_style(base_h=38, base_pt=12)
+        except Exception:
+            # 兜底：固定高度与字号
+            try:
+                self.start_btn.setFixedHeight(38)
+                self.stop_btn.setFixedHeight(38)
+                _bf = self.start_btn.font(); _bf.setPointSize(max(12, _bf.pointSize())); self.start_btn.setFont(_bf)
+                _bf2 = self.stop_btn.font(); _bf2.setPointSize(max(12, _bf2.pointSize())); self.stop_btn.setFont(_bf2)
+            except Exception:
+                pass
 
         # Progress（移除右侧日志框，仅保留阶段与进度条）
         self.phase_label = QtWidgets.QLabel("阶段: ")
@@ -867,15 +1163,58 @@ class MainWindow(QtWidgets.QMainWindow):
         _top_v.addLayout(btn_box)
       
 
-        # Results list group（放在右侧，执行后结果更直观）
-        self.results_list = QtWidgets.QListWidget()
-        self.results_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        results_group = QtWidgets.QGroupBox("输出结果（双击打开文件）")
-        # 保持与“运行状态”分组一致的布局边距与间距，确保上下两组宽度视觉一致
+        # Results table group（右下：结果以表格形式展示，支持多选与右键菜单）
+        results_group = QtWidgets.QGroupBox("混剪长视频的结果")
         _rg_layout = QtWidgets.QVBoxLayout(results_group)
         _rg_layout.setContentsMargins(10, 8, 10, 8)
         _rg_layout.setSpacing(8)
-        _rg_layout.addWidget(self.results_list)
+
+        # 表格：序号、文件名、输出路径、大小(MB)
+        self.results_table = QtWidgets.QTableWidget(0, 4, results_group)
+        # 列顺序调整：将“大小(MB)”与“输出路径”位置互换为：序号、文件名、大小(MB)、输出路径
+        self.results_table.setHorizontalHeaderLabels(["序号", "文件名", "大小(MB)", "输出路径"])
+        # 记录列索引，避免后续读写错列
+        self._RESULTS_PATH_COL = 3
+        self._RESULTS_SIZE_COL = 2
+        self.results_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.results_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        try:
+            header = self.results_table.horizontalHeader()
+            # 对齐头和列显示策略：序号/大小按内容自适应，文件名固定较宽，路径尽量拉伸
+            header.setMinimumSectionSize(80)
+            self.results_table.verticalHeader().setVisible(False)
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)  # 序号
+            header.setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)       # 文件名
+            header.setSectionResizeMode(self._RESULTS_SIZE_COL, QtWidgets.QHeaderView.ResizeToContents)  # 大小(MB)
+            header.setSectionResizeMode(self._RESULTS_PATH_COL, QtWidgets.QHeaderView.Stretch)           # 输出路径
+        except Exception:
+            pass
+        # 双击打开文件
+        self.results_table.itemDoubleClicked.connect(self._on_results_table_double_clicked)
+        _rg_layout.addWidget(self.results_table)
+
+        # 结果区操作栏（打开文件/目录、复制路径）
+        actions_bar = QtWidgets.QHBoxLayout()
+        actions_bar.setContentsMargins(0, 0, 0, 0)
+        actions_bar.setSpacing(6)
+        self.open_selected_btn = QtWidgets.QPushButton("打开文件")
+        self.copy_selected_path_btn = QtWidgets.QPushButton("复制路径")
+        actions_bar.addWidget(self.open_selected_btn)
+        actions_bar.addWidget(self.copy_selected_path_btn)
+        actions_bar.addStretch(1)
+        _rg_layout.addLayout(actions_bar)
+        # 创建“输出结果”蒙层与菊花转圈指示器（默认隐藏）
+        try:
+            self._results_overlay = BusyOverlay(results_group)
+            # 初始化几何尺寸为父组件当前矩形
+            try:
+                self._results_overlay.setGeometry(results_group.rect())
+            except Exception:
+                pass
+            self._results_overlay.hide()
+        except Exception:
+            self._results_overlay = None
         # 统一设置两组的尺寸策略为横向扩展，保持同宽
         try:
             progress_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
@@ -933,9 +1272,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.clicked.connect(self._on_stop)
       
         # self.open_out_dir_btn.clicked.connect(self._on_open_default_output_dir)
-        # self.open_selected_btn.clicked.connect(self._on_open_selected_files)
-        # self.open_selected_dir_btn.clicked.connect(self._on_open_selected_dirs)
-        # self.results_list.itemDoubleClicked.connect(self._on_results_item_double_clicked)
+        self.open_selected_btn.clicked.connect(self._on_open_selected_files)
+        self.copy_selected_path_btn.clicked.connect(self._copy_selected_paths)
         self.ffmpeg_info_btn.clicked.connect(self._on_show_ffmpeg_info)
         self.use_bundled_ffmpeg_chk.toggled.connect(self._on_toggle_ffmpeg_priority)
 
@@ -1458,11 +1796,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_enc_summary(self) -> None:
         """Update label that summarizes effective encoding parameters."""
-        p = self._compute_effective_enc_params()
-        display = getattr(self, "_profile_code_to_display", {}).get(p["profile"], p["profile"])  # 中文优先
-        self.enc_summary_label.setText(
-            f"编码参数概览：质量档位={display} | NVENC cq={p['nvenc_cq']} preset={p['preset_gpu']} | x265 crf={p['x265_crf']} preset={p['preset_cpu']}"
-        )
+        try:
+            # 当窗口已关闭或控件已被销毁时，避免调用已删除的 Qt 对象
+            lbl = getattr(self, "enc_summary_label", None)
+            if lbl is None:
+                return
+            if _qt_is_valid is not None and not _qt_is_valid(lbl):
+                return
+            if hasattr(lbl, "isVisible") and lbl is not None and not lbl.isVisible():
+                # 不可见时仍可安全更新，但若对象已被销毁，上面 isValid 会截获
+                pass
+
+            p = self._compute_effective_enc_params()
+            display = getattr(self, "_profile_code_to_display", {}).get(p["profile"], p["profile"])  # 中文优先
+            lbl.setText(
+                f"编码参数概览：质量档位={display} | NVENC cq={p['nvenc_cq']} preset={p['preset_gpu']} | x265 crf={p['x265_crf']} preset={p['preset_cpu']}"
+            )
+        except Exception:
+            # 防御性保护：任何异常（含对象已删除）都不影响主流程
+            pass
 
     def _on_profile_changed(self, text: str) -> None:
         """当质量档位变化时，自动设置推荐的编码参数。
@@ -1543,6 +1895,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._thread is not None:
             QtWidgets.QMessageBox.warning(self, "提示", "已有任务在运行")
             return
+        # 预校验：未选择视频目录或关键参数缺失时直接提示并返回，不切换按钮或显示蒙层
+        try:
+            settings_preview = self._collect_settings()
+            if not settings_preview.video_dirs:
+                QtWidgets.QMessageBox.warning(self, "提示", "请先选择至少一个视频目录")
+                return
+            if not settings_preview.bgm_path:
+                QtWidgets.QMessageBox.warning(self, "提示", "请先选择 BGM 路径（文件或目录）")
+                return
+        except Exception:
+            # 若采集设置异常则保守返回
+            QtWidgets.QMessageBox.warning(self, "提示", "采集参数失败，请检查表单输入")
+            return
+        # 显示右下“输出结果”蒙层并禁用列表交互
+        try:
+            self._show_results_overlay()
+        except Exception:
+            pass
         # 新任务开始前重置进度条到 0%，本次任务期间不再自动重置
         try:
             self.progress_bar.setMaximum(100)
@@ -1601,54 +1971,243 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_progress_style(chunk_color="#22c55e")
         except Exception:
             pass
+        # 关闭蒙层，恢复交互
+        try:
+            self._hide_results_overlay()
+        except Exception:
+            pass
         self._cleanup_thread()
 
     def _on_results_ready(self, paths: List[str]) -> None:
-        """Populate the results list with generated output file paths.
+        """Populate the results table with generated output file paths.
 
         Parameters
         ----------
         paths : List[str]
             List of output file paths.
         """
-        self.results_list.clear()
-        for p in paths:
-            self.results_list.addItem(p)
+        try:
+            self.results_table.setRowCount(0)
+        except Exception:
+            pass
+        for idx, p in enumerate(paths, start=1):
+            try:
+                # 兼容：有些结果字符串可能携带尾随的"(xx MB)"展示信息，这里先规范化为纯路径
+                normalized_p = self._normalize_result_path(p)
+                from pathlib import Path as _P
+                st_size = _P(normalized_p).stat().st_size if _P(normalized_p).exists() else 0
+                size_mb = st_size / (1024 * 1024) if st_size else 0.0
+            except Exception:
+                size_mb = 0.0
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+            # 序号
+            idx_item = QtWidgets.QTableWidgetItem(str(idx))
+            idx_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            # 文件名（优化显示：去除后缀与末尾括号内容，如 "abc (123)" -> "abc"；支持全角括号）
+            name_item = QtWidgets.QTableWidgetItem(self._display_file_name_from_path(normalized_p))
+            # 大小(MB)
+            size_item = QtWidgets.QTableWidgetItem(f"{size_mb:.1f}")
+            size_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            # 输出路径
+            path_item = QtWidgets.QTableWidgetItem(normalized_p)
+            # 为每个单元项写入 UserRole 以便稳健地获取路径
+            try:
+                for _it in (idx_item, name_item, size_item, path_item):
+                    _it.setData(QtCore.Qt.UserRole, normalized_p)
+            except Exception:
+                pass
+            self.results_table.setItem(row, 0, idx_item)
+            self.results_table.setItem(row, 1, name_item)
+            # 列位置调整：第2列为大小(MB)，第3列为输出路径
+            self.results_table.setItem(row, self._RESULTS_SIZE_COL, size_item)
+            self.results_table.setItem(row, self._RESULTS_PATH_COL, path_item)
+        # 自适应列宽（文件名和路径更宽，序号和大小适度；输出路径位于最后一列并可适度拉伸）
+        try:
+            self.results_table.resizeColumnToContents(0)
+            self.results_table.setColumnWidth(1, max(160, int(self.results_table.width() * 0.25)))
+            # 大小(MB)列适度
+            self.results_table.resizeColumnToContents(self._RESULTS_SIZE_COL)
+            # 输出路径列更宽
+            self.results_table.setColumnWidth(self._RESULTS_PATH_COL, max(240, int(self.results_table.width() * 0.45)))
+        except Exception:
+            pass
 
-    def _on_results_item_double_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
-        """Open selected output file using system default application."""
-        path = Path(item.text())
-        if not path.exists():
-            QtWidgets.QMessageBox.warning(self, "提示", f"文件不存在: {path}")
-            return
-        QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+    def _normalize_result_path(self, s: str) -> str:
+        """将可能包含尾随大小展示信息的结果字符串规范化为纯文件路径。
+
+        场景：分辨率分组模式曾返回类似 "C:/path/to/out.mp4 (12.3 MB)" 的字符串，
+        这里识别并去掉末尾的括号块（仅当括号内包含 "MB" 关键字时），保留纯路径。
+
+        Parameters
+        ----------
+        s : str
+            结果字符串，可能是纯路径，也可能带有尾随大小信息。
+
+        Returns
+        -------
+        str
+            纯路径字符串。
+        """
+        try:
+            text = s.strip()
+            # 仅在尾部存在括号且括号内包含 "MB" 时去除，避免误伤正常带括号的路径
+            # 支持半角 () 与全角（）
+            tail_pattern = re.compile(r"\s*[（(][^（）()]*MB[^（）()]*[）)]\s*$")
+            if tail_pattern.search(text):
+                text = tail_pattern.sub("", text).strip()
+            return text
+        except Exception:
+            return s
+
+    def _display_file_name_from_path(self, path_str: str) -> str:
+        """根据完整路径生成更干净的文件名用于展示。
+
+        规则：
+        - 去掉文件后缀（例如 .mp4）
+        - 去掉末尾的括号及其内部内容（支持半角 () 与全角（）），可重复去除
+          例如："示例视频 (版本1)" -> "示例视频"
+
+        Parameters
+        ----------
+        path_str : str
+            完整的文件路径字符串。
+
+        Returns
+        -------
+        str
+            优化后的文件名（用于表格“文件名”列展示）。
+        """
+        try:
+            p = Path(path_str)
+            stem = p.stem  # 去后缀
+            # 反复去除末尾括号及其内部内容（支持半角/全角）
+            # 匹配示例："名称 (abc)"、"名称（abc）"、末尾可能有空格
+            pattern = re.compile(r"\s*[（(][^）)]*[）)]\s*$")
+            sanitized = stem
+            # 最多重复 3 次，避免极端情况死循环（一般 1~2 次足够）
+            for _ in range(3):
+                if not pattern.search(sanitized):
+                    break
+                sanitized = pattern.sub("", sanitized).strip()
+            sanitized = sanitized.strip()
+            return sanitized or stem
+        except Exception:
+            # 回退：异常时返回去后缀的文件名
+            try:
+                return Path(path_str).stem
+            except Exception:
+                return path_str
+
+    def _get_result_path_by_row(self, row: int) -> Optional[Path]:
+        """根据表格行安全地获取输出路径。
+
+        尝试读取指定行的“输出路径”列文本；若为空则回退到各列的 UserRole 数据。
+
+        Parameters
+        ----------
+        row : int
+            表格的行号。
+
+        Returns
+        -------
+        Optional[Path]
+            若成功获取，返回 Path；否则返回 None。
+        """
+        try:
+            p_item = self.results_table.item(row, self._RESULTS_PATH_COL)
+            if p_item and p_item.text():
+                return Path(p_item.text().strip())
+            # 回退：从任一列的 UserRole 读取路径
+            for col in range(self.results_table.columnCount()):
+                it = self.results_table.item(row, col)
+                if not it:
+                    continue
+                data = it.data(QtCore.Qt.UserRole)
+                if isinstance(data, str) and data.strip():
+                    return Path(data.strip())
+        except Exception:
+            return None
+        return None
+
+    def _on_results_table_double_clicked(self, item: QtWidgets.QTableWidgetItem) -> None:
+        """双击表格项时，在文件管理器中打开所在目录并选中该文件。"""
+        try:
+            row = item.row()
+            path = self._get_result_path_by_row(row)
+            if not path:
+                QtWidgets.QMessageBox.warning(self, "提示", "无法读取该行的输出路径")
+                return
+            if not path.exists():
+                QtWidgets.QMessageBox.warning(self, "提示", f"文件不存在: {path}")
+                return
+            # 优化：改为在文件管理器中定位并选中文件
+            self._reveal_in_file_manager([path])
+        except Exception:
+            pass
 
     def _on_open_selected_files(self) -> None:
-        """Open all selected output files."""
-        items = self.results_list.selectedItems()
-        if not items:
+        """在文件管理器中打开并选中所有选中的输出文件（表格选中行）。"""
+        try:
+            sel = self.results_table.selectionModel().selectedRows()
+        except Exception:
+            sel = []
+        if not sel:
             QtWidgets.QMessageBox.information(self, "提示", "请先选择一个或多个输出文件")
             return
-        for it in items:
-            p = Path(it.text())
-            if p.exists():
-                QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p)))
-            else:
-                QtWidgets.QMessageBox.warning(self, "提示", f"文件不存在: {p}")
+        paths: list[Path] = []
+        for mi in sel:
+            try:
+                p = self._get_result_path_by_row(mi.row())
+                if p and p.exists():
+                    paths.append(p)
+                else:
+                    QtWidgets.QMessageBox.warning(self, "提示", f"文件不存在: {p}")
+            except Exception:
+                pass
+        if paths:
+            self._reveal_in_file_manager(paths)
 
-    def _on_open_selected_dirs(self) -> None:
-        """Open directories for the selected output files."""
-        items = self.results_list.selectedItems()
-        if not items:
+    # 已移除“打开所在目录”按钮。若后续需要恢复，可将此处理函数重新绑定到按钮或菜单。
+    # def _on_open_selected_dirs(self) -> None:
+    #     """在文件管理器中打开选中文件的所在目录，并选中这些文件（与“打开文件”一致）。"""
+    #     try:
+    #         sel = self.results_table.selectionModel().selectedRows()
+    #     except Exception:
+    #         sel = []
+    #     if not sel:
+    #         QtWidgets.QMessageBox.information(self, "提示", "请先选择一个或多个输出文件")
+    #         return
+    #     paths: list[Path] = []
+    #     for mi in sel:
+    #         try:
+    #             p = self._get_result_path_by_row(mi.row())
+    #             if p and p.exists():
+    #                 paths.append(p)
+    #             else:
+    #                 QtWidgets.QMessageBox.warning(self, "提示", f"文件不存在: {p}")
+    #         except Exception:
+    #             pass
+    #     if paths:
+    #         self._reveal_in_file_manager(paths)
+
+    def _copy_selected_paths(self) -> None:
+        """复制选中行的输出路径到剪贴板。"""
+        try:
+            sel = self.results_table.selectionModel().selectedRows()
+        except Exception:
+            sel = []
+        if not sel:
             QtWidgets.QMessageBox.information(self, "提示", "请先选择一个或多个输出文件")
             return
-        opened = set()
-        for it in items:
-            p = Path(it.text())
-            d = p.parent
-            if d.exists() and str(d) not in opened:
-                QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(d)))
-                opened.add(str(d))
+        paths = []
+        for mi in sel:
+            p = self._get_result_path_by_row(mi.row())
+            if p:
+                paths.append(str(p))
+        if paths:
+            QtWidgets.QApplication.clipboard().setText("\n".join(paths))
+            QtWidgets.QMessageBox.information(self, "提示", f"已复制 {len(paths)} 个路径到剪贴板")
 
     def _on_show_ffmpeg_info(self) -> None:
         """Show FFmpeg/FFprobe version details in a dialog.
@@ -1676,6 +2235,52 @@ class MainWindow(QtWidgets.QMainWindow):
                 ffmpeg_type = "内置(vendor)"
         except Exception:
             pass
+
+    def _reveal_in_file_manager(self, paths: List[Path]) -> None:
+        """在系统文件管理器中显示并选中指定文件。
+
+        不同平台的实现：
+        - Windows: 使用 `explorer /select,<path>`，逐个文件执行
+        - macOS: 使用 `open -R <path>`，逐个文件执行
+        - 其他平台: 打开所在目录（不保证选中），使用 QDesktopServices
+
+        Parameters
+        ----------
+        paths : List[pathlib.Path]
+            需要在文件管理器中显示并选中的文件列表。
+        """
+        if not paths:
+            return
+        try:
+            plat = sys.platform.lower()
+        except Exception:
+            plat = ""
+
+        for p in paths:
+            try:
+                if not p or not isinstance(p, Path):
+                    continue
+                if plat.startswith("win"):
+                    # Windows: explorer /select,<path>
+                    try:
+                        subprocess.run(["explorer", "/select,", str(p)], check=False)
+                    except Exception:
+                        # 回退：打开所在目录
+                        QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p.parent)))
+                elif plat == "darwin":
+                    # macOS: open -R <path>
+                    try:
+                        subprocess.run(["open", "-R", str(p)], check=False)
+                    except Exception:
+                        QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p.parent)))
+                else:
+                    # 其他平台：打开目录（不保证选中）
+                    QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p.parent)))
+            except Exception:
+                try:
+                    QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p.parent)))
+                except Exception:
+                    pass
 
         # Collect version info
         def run_ver(cmd: list[str]) -> str:
@@ -1769,10 +2374,20 @@ class MainWindow(QtWidgets.QMainWindow):
             Error message to show.
         """
         QtWidgets.QMessageBox.critical(self, "错误", msg)
+        try:
+            self._hide_results_overlay()
+        except Exception:
+            pass
         self._cleanup_thread()
 
     def _cleanup_thread(self) -> None:
-        """Cleanup thread/worker state and re-enable controls."""
+        """Cleanup thread/worker state and re-enable controls.
+
+        完成、错误或手动停止后统一在此处恢复按钮互斥逻辑：
+        - 启用“开始”按钮，禁用“停止”按钮；
+        - 清空 worker 引用，置空线程；
+        - 阶段标签回到 idle（不重置进度值，保留到下一次开始任务前）。
+        """
         try:
             if self._thread is not None:
                 self._thread.quit()
@@ -1780,6 +2395,103 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._thread = None
+        # 恢复互斥按钮状态
+        try:
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+        except Exception:
+            pass
+        # 清理 worker 引用
+        self._worker = None
+        # 阶段标签回到 idle，进度值保持不变
+        try:
+            self.phase_label.setText("阶段: idle")
+        except Exception:
+            pass
+
+    def _apply_action_buttons_style(self, base_h: int = 44, base_pt: int = 12) -> None:
+        """
+        根据屏幕 DPI 自适应地设置“开始/停止”按钮的高度与字号，并应用轻量样式。
+
+        参数:
+            base_h: 基准高度（像素），会随 DPI 线性缩放并在合理范围内裁剪。
+            base_pt: 基准字号（pt），会随 DPI 缩放并限制上下限。
+        """
+        # 计算 DPI 缩放
+        try:
+            screen = QtWidgets.QApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInch() if screen else 96.0
+            scale = max(1.0, dpi / 96.0)
+        except Exception:
+            scale = 1.0
+
+        # 计算自适应高度与字号
+        height = int(max(40, min(64, base_h * scale)))
+        pt_size = int(max(12, min(18, base_pt * scale)))
+
+        # 固定高度，避免不同平台下被压缩
+        try:
+            self.start_btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            self.stop_btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            self.start_btn.setFixedHeight(height)
+            self.stop_btn.setFixedHeight(height)
+        except Exception:
+            pass
+
+        # 设置统一字号
+        try:
+            bf = self.start_btn.font(); bf.setPointSize(pt_size); self.start_btn.setFont(bf)
+            bf2 = self.stop_btn.font(); bf2.setPointSize(pt_size); self.stop_btn.setFont(bf2)
+        except Exception:
+            pass
+
+        # 轻量级样式提升触控面积与美观（圆角与内边距）
+        try:
+            # 恢复边框，并提供悬停/按下/禁用状态的细微视觉反馈
+            style = (
+                f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:6px 14px;border:1px solid #bfbfbf;border-radius:6px;}}"
+                f"QPushButton:hover{{border:1px solid #999999;}}"
+                f"QPushButton:pressed{{border:1px solid #888888;background-color: rgba(0,0,0,0.04);}}"
+                f"QPushButton:disabled{{color: rgba(0,0,0,0.4);border:1px solid #dddddd;background-color: rgba(0,0,0,0.02);}}"
+            )
+            # 分别设置，避免影响其他按钮
+            self.start_btn.setStyleSheet(style)
+            self.stop_btn.setStyleSheet(style)
+        except Exception:
+            pass
+
+    def _show_results_overlay(self) -> None:
+        """显示右下“输出结果”分组的蒙层与菊花转圈，并禁用列表交互。"""
+        if getattr(self, "_results_overlay", None):
+            try:
+                self._results_overlay.show()
+                self._results_overlay.raise_()
+            except Exception:
+                pass
+        # 禁用结果交互（表格优先，兼容旧列表）
+        try:
+            if hasattr(self, "results_table"):
+                self.results_table.setEnabled(False)
+            elif hasattr(self, "results_list"):
+                self.results_list.setEnabled(False)
+        except Exception:
+            pass
+
+    def _hide_results_overlay(self) -> None:
+        """隐藏右下“输出结果”分组的蒙层，并恢复列表交互。"""
+        if getattr(self, "_results_overlay", None):
+            try:
+                self._results_overlay.hide()
+            except Exception:
+                pass
+        # 恢复结果交互（表格优先，兼容旧列表）
+        try:
+            if hasattr(self, "results_table"):
+                self.results_table.setEnabled(True)
+            elif hasattr(self, "results_list"):
+                self.results_list.setEnabled(True)
+        except Exception:
+            pass
 
     def _apply_progress_style(self, chunk_color: str = "#3b82f6") -> None:
         """
@@ -1854,11 +2566,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_progress_style(chunk_color=color)
         except Exception:
             pass
-        self._worker = None
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.phase_label.setText("阶段: idle")
-        # 不在清理阶段重置进度条，保留为 100%，仅在下次开始任务前重置
+        # 注意：阶段更新不应更改开始/停止按钮状态或清理线程；这些逻辑由 _cleanup_thread 统一处理。
+        # 进度条重置策略：保留在完成后 100%，仅在下次开始任务前重置，在 _on_start 中执行。
 
     def _on_stop(self) -> None:
         """Attempt to stop the running worker.
@@ -1866,6 +2575,10 @@ class MainWindow(QtWidgets.QMainWindow):
         Note: For simplicity, this demo performs a soft stop by quitting the thread.
         Long-running ffmpeg subprocesses will finish their current item.
         """
+        try:
+            self._hide_results_overlay()
+        except Exception:
+            pass
         self._cleanup_thread()
 
     # ==== 托盘与窗口关闭行为优化 ====
@@ -1976,6 +2689,10 @@ def main() -> None:
     Creates the Qt application and displays the main window.
     """
     app = QtWidgets.QApplication(sys.argv)
+    # 在显示主窗口之前执行启动自检（英伟达显卡与授权切面）
+    if not run_preflight_checks(app):
+        # 用户确认后退出，或授权校验失败
+        return
     w = MainWindow()
     w.show()
     sys.exit(app.exec())

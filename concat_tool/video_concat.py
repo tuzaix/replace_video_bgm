@@ -709,8 +709,8 @@ def process_group_single_output(args_tuple):
         if not ok2:
             return False, f"组 {w}x{h} 输出{out_index} BGM替换失败"
 
-        size_mb = final_out.stat().st_size / (1024*1024)
-        return True, f"{final_out} ({size_mb:.1f} MB)"
+        # 返回纯路径字符串，避免上层GUI将带有“(xx MB)”的展示文本误当作真实路径
+        return True, str(final_out)
     except Exception as e:
         import traceback
         traceback.print_exc()
