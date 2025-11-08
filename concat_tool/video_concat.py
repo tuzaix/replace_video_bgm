@@ -19,33 +19,68 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 SUPPORTED_VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v'}
 SUPPORTED_AUDIO_EXTS = {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg'}
 
+# 编码全局配置（由 CLI 设置），用于统一控制 GPU/CPU 的压缩/观感/速度取向
+ENCODE_PROFILE: str = 'balanced'       # 可选：visual/balanced/size
+ENCODE_NVENC_CQ: Optional[int] = None  # NVENC CQ 覆盖
+ENCODE_X265_CRF: Optional[int] = None  # x265 CRF 覆盖
+ENCODE_PRESET_GPU: Optional[str] = None  # NVENC 预设：p4/p5/p6/p7
+ENCODE_PRESET_CPU: Optional[str] = None  # x265 预设：ultrafast/medium/slow/slower/veryslow
+
 def get_ffmpeg_gpu_mapping_cpu_enc_opts() -> List[str]:
-    """获取 GPU 与 CPU 编码器的通用编码参数映射关系"""
+    """获取 GPU 与 CPU 编码器的通用编码参数映射关系。
+    根据全局 ENCODE_* 设置（由 CLI 注入）动态生成编码参数，以满足三档需求：
+    - visual：观感优先（更低 CQ/CRF、较快预设）
+    - balanced：均衡（默认）
+    - size：体积优先（更高 CQ/CRF、较慢预设）
+    同时支持 `--nvenc-cq / --x265-crf / --preset-gpu / --preset-cpu` 精细覆盖。
+    """
+    # 档位默认参数
+    profile = (ENCODE_PROFILE or 'balanced').lower()
+    if profile not in ('visual', 'balanced', 'size'):
+        profile = 'balanced'
+
+    # 选择默认预设与质量参数
+    if profile == 'visual':
+        default_nvenc_cq, default_preset_gpu = 30, 'p5'
+        default_x265_crf, default_preset_cpu = 28, 'medium'
+    elif profile == 'size':
+        default_nvenc_cq, default_preset_gpu = 34, 'p7'
+        default_x265_crf, default_preset_cpu = 32, 'veryslow'
+    else:  # balanced
+        default_nvenc_cq, default_preset_gpu = 32, 'p6'
+        default_x265_crf, default_preset_cpu = 30, 'slow'
+
+    # 应用 CLI 覆盖（如提供）
+    nvenc_cq = ENCODE_NVENC_CQ if isinstance(ENCODE_NVENC_CQ, int) else default_nvenc_cq
+    x265_crf = ENCODE_X265_CRF if isinstance(ENCODE_X265_CRF, int) else default_x265_crf
+    preset_gpu = ENCODE_PRESET_GPU or default_preset_gpu
+    preset_cpu = ENCODE_PRESET_CPU or default_preset_cpu
+
     common_opts = [
-        # '-r', '25',                 # 帧率 25fps
         '-pix_fmt', 'yuv420p',      # 像素格式 yuv420p（兼容大多数播放器）
     ]
+
     common_enc_opts = {
         "gpu": [
             '-c:v', 'hevc_nvenc',
-            '-preset', 'p7',           # 最强压缩预设（更慢）
-            '-tune', 'hq',             # 画质优化模式
-            '-rc', 'vbr',              # 可变码率，结合 CQ
-            '-cq', '40',               # 提升压缩强度（体积更小）
-            '-b:v', '0',               # 让 CQ 主导（不设目标码率）
-            '-bf', '3',                # 使用 B 帧提升压缩效率
-            '-b_ref_mode', 'middle',   # B 帧参考模式，提高参考帧利用
-            '-spatial_aq', '1',        # 空间自适应量化
-            '-temporal_aq', '1',       # 时间自适应量化
-            '-aq-strength', '6',       # 略降 AQ 强度，压缩更激进
-            '-g', '240',               # GOP，提升跨帧压缩（典型 24/30fps 场景）
+            '-preset', preset_gpu,
+            '-tune', 'hq',
+            '-rc', 'vbr',
+            '-cq', str(nvenc_cq),
+            '-b:v', '0',
+            '-bf', '3',
+            '-b_ref_mode', 'middle',
+            '-spatial_aq', '1',
+            '-temporal_aq', '1',
+            '-aq-strength', '8' if profile != 'size' else '6',
+            '-g', '240',
+            '-rc-lookahead', '32' if profile != 'visual' else '20',
         ],
         "cpu": [
             '-c:v', 'libx265',
-            '-crf', '32',                 # 更强压缩（CRF 越大体积越小）
-            '-preset', 'veryslow',        # 极高压缩取向（耗时↑↑）
-            # 精调 x265，以在主观质量可接受前提下提升压缩率
-            '-x265-params', 'aq-mode=2:aq-strength=1.0:psy-rd=1.8:psy-rdoq=1.0:qcomp=0.60:rc-lookahead=80:keyint=240:min-keyint=24:bframes=8:ref=6:scenecut=40:limit-sao=1',
+            '-crf', str(x265_crf),
+            '-preset', preset_cpu,
+            '-x265-params', 'aq-mode=2:aq-strength=1.0:psy-rd=2.0:psy-rdoq=1.0:qcomp=0.65:rc-lookahead=60:keyint=240:min-keyint=24:bframes=8:ref=5:scenecut=40:limit-sao=1',
         ],
     }
     for enc_opts in common_enc_opts.values():
@@ -1177,7 +1212,7 @@ def main():
     parser.add_argument('-o', '--output', help='输出文件路径或目录（多目录输入时必须为目录；默认在第一个目录同级创建<name>_longvideo_combined）')
     # 默认启用 GPU，加 --no-gpu 可关闭
     parser.add_argument('--gpu', dest='gpu', action='store_true', default=True,
-                        help='默认启用GPU加速（需ffmpeg支持h264_nvenc），使用 --no-gpu 关闭')
+                        help='默认启用GPU加速（需ffmpeg支持hevc_nvenc），使用 --no-gpu 关闭')
     parser.add_argument('--no-gpu', dest='gpu', action='store_false', help='关闭GPU加速')
     parser.add_argument('--threads', type=int, default=4, help='并发处理线程数（默认4，建议不超过CPU核心数）')
     parser.add_argument('--width', type=int, default=1080, help='输出视频宽度（默认1080）')
@@ -1193,7 +1228,27 @@ def main():
                         help='默认按分辨率分组拼接并输出（文件名追加分辨率后缀），使用 --no-group-res 关闭')
     parser.add_argument('--no-group-res', dest='group_res', action='store_false', help='关闭分辨率分组模式')
 
+    # 编码质量/预设控制参数
+    parser.add_argument('--quality-profile', choices=['visual', 'balanced', 'size'], default='balanced',
+                        help='编码质量档位：visual(观感优先) / balanced(均衡) / size(体积优先)，默认 balanced')
+    parser.add_argument('--nvenc-cq', type=int, default=None,
+                        help='覆盖 NVENC 的 CQ 数值（越大体积越小，建议 30~36）')
+    parser.add_argument('--x265-crf', type=int, default=None,
+                        help='覆盖 x265 的 CRF 数值（越大体积越小，建议 28~32）')
+    parser.add_argument('--preset-gpu', choices=['p4', 'p5', 'p6', 'p7'], default=None,
+                        help='覆盖 NVENC 的预设（p7 最省体积但更慢）')
+    parser.add_argument('--preset-cpu', choices=['ultrafast', 'medium', 'slow', 'slower', 'veryslow'], default=None,
+                        help='覆盖 x265 的预设（veryslow 最省体积但更慢）')
+
     args = parser.parse_args()
+
+    # 注入全局编码配置（供映射函数使用）
+    global ENCODE_PROFILE, ENCODE_NVENC_CQ, ENCODE_X265_CRF, ENCODE_PRESET_GPU, ENCODE_PRESET_CPU
+    ENCODE_PROFILE = args.quality_profile
+    ENCODE_NVENC_CQ = args.nvenc_cq
+    ENCODE_X265_CRF = args.x265_crf
+    ENCODE_PRESET_GPU = args.preset_gpu
+    ENCODE_PRESET_CPU = args.preset_cpu
     
     # 参数校验与路径准备
     video_dirs, bgm_input_path, output_spec, default_output_dir = validate_and_prepare(args)
