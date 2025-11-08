@@ -15,6 +15,31 @@ from typing import List, Optional
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
+def _popen_silent_kwargs() -> dict:
+    """Return kwargs to suppress console windows for subprocess on Windows.
+
+    This helper ensures ffmpeg/ffprobe processes do not spawn visible console
+    windows (e.g., openconsole.exe) when launched from the GUI application.
+
+    Returns
+    -------
+    dict
+        Keyword arguments suitable for passing to subprocess.run/Popen. On
+        Windows, includes a STARTUPINFO and CREATE_NO_WINDOW flag. On other
+        platforms, returns an empty dict.
+    """
+    try:
+        import os
+        if os.name == 'nt':
+            # Hide console windows on Windows
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            return {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+    except Exception:
+        pass
+    return {}
+
 # 支持的视频格式
 SUPPORTED_VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v'}
 SUPPORTED_AUDIO_EXTS = {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg'}
@@ -154,7 +179,7 @@ def probe_resolution_ffprobe(video_path: Path) -> Optional[tuple]:
                 '-of', 'csv=p=0:s=x',
                 str(video_path)
             ]
-            res = subprocess.run(cmd, capture_output=True)
+            res = subprocess.run(cmd, capture_output=True, **_popen_silent_kwargs())
             if res.returncode == 0:
                 text = ''
                 try:
@@ -192,7 +217,7 @@ def probe_duration_ffprobe(video_path: Path) -> Optional[float]:
                 '-of', 'default=noprint_wrappers=1:nokey=1',
                 str(video_path)
             ]
-            res = subprocess.run(cmd, capture_output=True)
+            res = subprocess.run(cmd, capture_output=True, **_popen_silent_kwargs())
             if res.returncode == 0:
                 text = ''
                 try:
@@ -234,7 +259,7 @@ def probe_video_codec_ffprobe(video_path: Path) -> Optional[str]:
             '-of', 'default=noprint_wrappers=1:nokey=1',
             str(video_path)
         ]
-        res = subprocess.run(cmd, capture_output=True)
+        res = subprocess.run(cmd, capture_output=True, **_popen_silent_kwargs())
         if res.returncode == 0:
             try:
                 text = (res.stdout or b'').decode('utf-8', errors='ignore').strip()
@@ -453,7 +478,7 @@ def convert_video_to_ts(input_video: Path, output_ts: Path, *, trim_head_seconds
             except Exception:
                 pass
 
-            res = subprocess.run(cmd, capture_output=True, encoding='utf-8')
+            res = subprocess.run(cmd, capture_output=True, encoding='utf-8', **_popen_silent_kwargs())
             if res.returncode == 0:
                 # 成功后打印压缩前后体积对比
                 try:
@@ -698,7 +723,7 @@ def is_nvenc_available() -> bool:
     if not ffmpeg_bin:
         return False
     try:
-        res = subprocess.run([ffmpeg_bin, '-hide_banner', '-encoders'], capture_output=True)
+        res = subprocess.run([ffmpeg_bin, '-hide_banner', '-encoders'], capture_output=True, **_popen_silent_kwargs())
         if res.returncode != 0:
             return False
         # 尝试安全解码（避免不同本地编码导致的异常）
@@ -1012,7 +1037,7 @@ def concat_videos(videos: List[Path], output_path: Path, use_gpu: bool = False, 
         print(f"🔧 编码命令: {' '.join(cmd)}")
         
         # 执行 FFmpeg
-        result = subprocess.run(cmd, capture_output=True, encoding='utf-8')
+        result = subprocess.run(cmd, capture_output=True, encoding='utf-8', **_popen_silent_kwargs())
         if result.returncode == 0:
             print(f"✅ 视频拼接成功: {output_path.name}")
             return True
@@ -1080,7 +1105,7 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
             tried_gpu = True
             print("⚙️ 尝试使用 GPU 编码 (hevc_nvenc)…")
             print(f"🔧 GPU执行命令: {' '.join(gpu_cmd)}")
-            result = subprocess.run(gpu_cmd, capture_output=True, encoding='utf-8')
+            result = subprocess.run(gpu_cmd, capture_output=True, encoding='utf-8', **_popen_silent_kwargs())
             if result.returncode == 0:
                 print(f"✅ 使用 GPU(hevc_nvenc) 压缩并替换BGM成功: {output_path.name}")
                 return True
@@ -1098,7 +1123,7 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
         # GPU 不可用或失败则回退到 CPU（libx265）
         print("⚙️ 使用 CPU 编码 (libx265)…")
         print(f"🔧 CPU执行命令: {' '.join(cpu_cmd)}")
-        result = subprocess.run(cpu_cmd, capture_output=True, encoding='utf-8')
+        result = subprocess.run(cpu_cmd, capture_output=True, encoding='utf-8', **_popen_silent_kwargs())
         if result.returncode == 0:
             if tried_gpu:
                 print(f"✅ CPU回退成功，压缩并替换BGM: {output_path.name}")

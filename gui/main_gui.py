@@ -275,11 +275,14 @@ class VideoConcatWorker(QtCore.QObject):
                 except Exception as e:
                     self._emit(f"⚠️ 清理缓存失败: {e}")
 
-            # Phase: preconvert TS with per-item progress
-            self.phase.emit("preconvert")
+            # Phase: preconvert TS（占总进度的 30%）
+            # 进度条采用固定刻度 1000：TS 阶段 0..300（30%），混合拼接阶段 300..1000（70%）。
+            self.phase.emit("预处理视频（mp4转换成ts)")
             self._emit("🚧 正在预转换视频为 TS 以优化拼接…")
             total = len(all_videos)
             done = 0
+            # 初始化进度条为固定总量 1000
+            self.progress.emit(0, 1000)
 
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -302,12 +305,16 @@ class VideoConcatWorker(QtCore.QObject):
                         try:
                             ok = fut.result()
                             done += 1
-                            self.progress.emit(done, total)
+                            # TS 阶段比例进度更新（无论成功或失败都记入已处理项，避免进度卡住）
+                            ts_progress = int(done * 300 / max(1, total))
+                            self.progress.emit(ts_progress, 1000)
                             if not ok:
                                 self._emit(f"❌ TS转换失败: {v.name}")
                         except Exception as e:
                             done += 1
-                            self.progress.emit(done, total)
+                            # TS 阶段比例进度更新
+                            ts_progress = int(done * 300 / max(1, total))
+                            self.progress.emit(ts_progress, 1000)
                             self._emit(f"❌ TS转换任务异常: {v.name} -> {e}")
             except KeyboardInterrupt:
                 self.error.emit("用户中断，停止 TS 预转换…")
@@ -319,7 +326,7 @@ class VideoConcatWorker(QtCore.QObject):
             temp_dir = vc.create_temp_dir(video_dirs)
 
             # Phase: execution (grouped or random)
-            self.phase.emit("execute")
+            self.phase.emit("长视频混合拼接")
             success_outputs: List[str] = []
             fail_count = 0
 
@@ -333,6 +340,10 @@ class VideoConcatWorker(QtCore.QObject):
                 else:
                     alloc = vc.allocate_outputs_by_group_size(qualified_groups, self.settings.outputs)
                     total_tasks = sum(n for _, n in alloc)
+                    # 进入混合拼接阶段，将进度条切换到第二阶段的区间，并从 30% 开始累计
+                    # 先刷新到 30%
+                    self.progress.emit(300, 1000)
+                    mix_done = 0
                     self._emit("📦 分配结果（组分辨率 -> 输出数量）：")
                     for (w, h), n in alloc:
                         self._emit(f"  - {w}x{h} -> {n}")
@@ -371,9 +382,16 @@ class VideoConcatWorker(QtCore.QObject):
                                 else:
                                     fail_count += 1
                                     self._emit(f"❌ [组 {key[0]}x{key[1]}] 失败: {msg}")
+                                # 第二阶段比例进度：30% + (完成/总数)*70%
+                                mix_done += 1
+                                mix_progress = 300 + int(mix_done * 700 / max(1, total_tasks))
+                                self.progress.emit(mix_progress, 1000)
                             except Exception as e:
                                 fail_count += 1
                                 self._emit(f"❌ [组 {key[0]}x{key[1]}] 异常: {e}")
+                                mix_done += 1
+                                mix_progress = 300 + int(mix_done * 700 / max(1, total_tasks))
+                                self.progress.emit(mix_progress, 1000)
 
             if not self.settings.group_res or not success_outputs:
                 # Random mode
@@ -382,6 +400,10 @@ class VideoConcatWorker(QtCore.QObject):
                     f"🚀 启用并发处理，使用 {max_workers} 个线程" if max_workers > 1 else "🔄 使用线程池顺序处理（workers=1）"
                 )
                 tasks = []
+                total_tasks = self.settings.outputs
+                # 切换到混合拼接阶段，从 30% 开始
+                self.progress.emit(300, 1000)
+                mix_done = 0
                 for idx in range(1, self.settings.outputs + 1):
                     task_args = (
                         idx,
@@ -417,9 +439,15 @@ class VideoConcatWorker(QtCore.QObject):
                             else:
                                 fail_count += 1
                                 self._emit(f"❌ 任务 {result_idx} 失败: {message}")
+                            mix_done += 1
+                            mix_progress = 300 + int(mix_done * 700 / max(1, total_tasks))
+                            self.progress.emit(mix_progress, 1000)
                         except Exception as e:
                             fail_count += 1
                             self._emit(f"❌ 任务 {idx} 异常: {e}")
+                            mix_done += 1
+                            mix_progress = 300 + int(mix_done * 700 / max(1, total_tasks))
+                            self.progress.emit(mix_progress, 1000)
 
             # Emit finished
             self.finished.emit(len(success_outputs), fail_count)
@@ -576,10 +604,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn = QtWidgets.QPushButton("停止")
         self.stop_btn.setEnabled(False)
 
-        # Progress & log
-        self.phase_label = QtWidgets.QLabel("阶段: idle")
-        self.progress_bar = QtWidgets.QProgressBar(); self.progress_bar.setMinimum(0); self.progress_bar.setMaximum(100); self.progress_bar.setValue(0)
-        self.log_view = QtWidgets.QTextEdit(); self.log_view.setReadOnly(True)
+        # Progress（移除右侧日志框，仅保留阶段与进度条）
+        self.phase_label = QtWidgets.QLabel("阶段: ")
+        # 进度条：显示百分比文本，并加大高度便于观察
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        # 进度条尺寸策略：横向扩展，纵向固定，避免被压缩成细线
+        try:
+            self.progress_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        except Exception:
+            pass
+        # 将文本居中显示，格式为“进度: XX%”
+        try:
+            self.progress_bar.setAlignment(QtCore.Qt.AlignCenter)
+        except Exception:
+            pass
+        self.progress_bar.setFormat("进度: %p%")
+        # 应用 DPI 自适应的进度条样式（高度与字号），默认使用蓝色块
+        try:
+            self._apply_progress_style(chunk_color="#3b82f6")
+        except Exception:
+            # 兜底样式（非 DPI 自适应）
+            try:
+                self.progress_bar.setFixedHeight(40)
+                font = self.progress_bar.font()
+                font.setPointSize(max(12, font.pointSize()))
+                self.progress_bar.setFont(font)
+                self.progress_bar.setStyleSheet(
+                    "QProgressBar{min-height:40px;max-height:40px;border:1px solid #bbb;border-radius:4px;text-align:center;}"
+                    "QProgressBar::chunk{background-color:#3b82f6;margin:0px;}"
+                )
+            except Exception:
+                pass
 
         # Layout composition — 左右分布与参数分区
         # 左侧：参数设置（按类型分组）；右侧：进度、日志、结果与动作按钮
@@ -589,9 +648,13 @@ class MainWindow(QtWidgets.QMainWindow):
         left_scroll.setWidgetResizable(True)
         left_container = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left_container)
+        # 左侧容器在垂直方向可扩展，以便其内部最后一个分组可以“贴底”对齐右侧下方分组
+        left_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
         # 1) 输入与路径
         input_group = QtWidgets.QGroupBox("输入与路径")
+        # 上部分组保持固定高度（根据其内容自适应），不参与剩余空间分配
+        input_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         input_form = QtWidgets.QFormLayout()
         input_form.addRow(dir_group)
         input_form.addRow("BGM路径", bgm_hbox)
@@ -601,6 +664,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 2) 基本流程参数（双列布局）
         flow_group = QtWidgets.QGroupBox("基本流程参数")
+        flow_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         flow_grid = QtWidgets.QGridLayout()
         flow_grid.setContentsMargins(10, 8, 10, 8)
         flow_grid.setHorizontalSpacing(16)
@@ -636,6 +700,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 3) 编码参数（双列布局）
         encode_group = QtWidgets.QGroupBox("编码参数")
+        encode_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         encode_grid = QtWidgets.QGridLayout()
         encode_grid.setContentsMargins(10, 8, 10, 8)
         encode_grid.setHorizontalSpacing(16)
@@ -669,6 +734,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 预设项单独成组：编码预设（位于编码参数之上）
         preset_group = QtWidgets.QGroupBox("编码预设(推荐使用<均衡>档位即可)")
+        preset_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         # 标题使用红色以醒目提示“使用默认即可”，仅影响标题不影响内容
         try:
             preset_group.setStyleSheet("QGroupBox::title { color: #d32f2f; font-weight: 600; }")
@@ -717,6 +783,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 4) 裁剪与缓存
         trim_group = QtWidgets.QGroupBox("裁剪与缓存(**使用默认即可**)")
+        # 最下方分组设置为垂直方向可扩展，用于占用剩余空间，从而使其底部与右侧下方分组底部对齐
+        trim_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         # 标题使用红色以醒目提示“使用默认即可”，仅影响标题不影响内容
         try:
             trim_group.setStyleSheet("QGroupBox::title { color: #d32f2f; font-weight: 600; }")
@@ -728,7 +796,9 @@ class MainWindow(QtWidgets.QMainWindow):
         trim_group.setLayout(trim_form)
         left_layout.addWidget(trim_group)
 
-        # 5) 环境状态与概览
+        # 5) 环境状态与概览（按需求移除左侧下方布局，仅保留控件以兼容现有逻辑）
+        # 注意：以下控件仍然初始化，以便后台逻辑（环境检测、编码概览更新、按钮回调）不报错，
+        # 但不再加入左侧布局，从而在界面上隐藏该区域。
         status_group = QtWidgets.QGroupBox("环境状态")
         status_vbox = QtWidgets.QVBoxLayout()
         status_box = QtWidgets.QHBoxLayout()
@@ -742,13 +812,14 @@ class MainWindow(QtWidgets.QMainWindow):
         status_box.addWidget(self.ffmpeg_info_btn)
         status_box.addWidget(self.use_bundled_ffmpeg_chk)
         status_vbox.addLayout(status_box)
-        # 概览标签放在状态组下方，便于集中查看有效编码参数
+        # 概览标签保留但不显示，用于兼容编码参数概览文本更新
         self.enc_summary_label = QtWidgets.QLabel("编码参数概览：")
         status_vbox.addWidget(self.enc_summary_label)
         status_group.setLayout(status_vbox)
-        left_layout.addWidget(status_group)
-
-        left_layout.addStretch(1)
+        # 不再加入 left_layout，以达到“移除左侧下方的环境状态布局”的视觉效果
+        # 注意：为了实现左右两侧“上下分组底部对齐”的视觉效果，这里移除尾部的 addStretch，
+        # 通过将 trim_group 设置为垂直 Expanding 来占用剩余空间，从而使其底部贴近容器底部。
+        
         # 优化左侧滚动区域的尺寸策略，避免被右侧压缩到过窄
         left_scroll.setWidget(left_container)
         left_scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
@@ -765,42 +836,68 @@ class MainWindow(QtWidgets.QMainWindow):
         left_scroll.setMinimumWidth(600)
         left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
-        # 右侧运行区：阶段、进度、日志、动作按钮、结果
+        # 右侧运行区：阶段、进度、动作按钮、结果（移除日志打印框）
         right_container = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_container)
-        right_layout.addWidget(self.phase_label)
-        right_layout.addWidget(self.progress_bar)
-        right_layout.addWidget(self.log_view)
+
+        # 上部：运行状态组（阶段标签 + 进度条），用分组包裹使信息更集中
+        progress_group = QtWidgets.QGroupBox("运行状态")
+        try:
+            # 适度强化标题样式，提升辨识度
+            progress_group.setStyleSheet("QGroupBox::title { font-weight: 600; }")
+        except Exception:
+            pass
+        _top_v = QtWidgets.QVBoxLayout(progress_group)
+        _top_v.setContentsMargins(10, 8, 10, 8)
+        _top_v.setSpacing(8)
+        _top_v.addWidget(self.phase_label)
+        _top_v.addWidget(self.progress_bar)
 
         # Toolbar-like action buttons
         btn_box = QtWidgets.QHBoxLayout()
-        # self.export_cfg_btn = QtWidgets.QPushButton("导出配置")
-        # self.import_cfg_btn = QtWidgets.QPushButton("导入配置")
-        # self.export_log_btn = QtWidgets.QPushButton("导出日志")
-        self.copy_cfg_btn = QtWidgets.QPushButton("复制配置到剪贴板")
-        self.open_out_dir_btn = QtWidgets.QPushButton("打开默认输出目录")
+        try:
+            btn_box.setContentsMargins(0, 0, 0, 0)
+            btn_box.setSpacing(8)
+        except Exception:
+            pass
+        # self.open_out_dir_btn = QtWidgets.QPushButton("打开默认输出目录")
         btn_box.addWidget(self.start_btn)
         btn_box.addWidget(self.stop_btn)
-        # btn_box.addWidget(self.export_cfg_btn)
-        # btn_box.addWidget(self.import_cfg_btn)
-        # btn_box.addWidget(self.export_log_btn)
-        btn_box.addWidget(self.copy_cfg_btn)
-        btn_box.addWidget(self.open_out_dir_btn)
-        right_layout.addLayout(btn_box)
+        # 将开始/停止按钮放到上面的进度条分组下方
+        _top_v.addLayout(btn_box)
+      
 
         # Results list group（放在右侧，执行后结果更直观）
         self.results_list = QtWidgets.QListWidget()
         self.results_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         results_group = QtWidgets.QGroupBox("输出结果（双击打开文件）")
+        # 保持与“运行状态”分组一致的布局边距与间距，确保上下两组宽度视觉一致
         _rg_layout = QtWidgets.QVBoxLayout(results_group)
+        _rg_layout.setContentsMargins(10, 8, 10, 8)
+        _rg_layout.setSpacing(8)
         _rg_layout.addWidget(self.results_list)
-        _rg_btns = QtWidgets.QHBoxLayout()
-        self.open_selected_btn = QtWidgets.QPushButton("打开选中输出")
-        self.open_selected_dir_btn = QtWidgets.QPushButton("打开选中所在目录")
-        _rg_btns.addWidget(self.open_selected_btn)
-        _rg_btns.addWidget(self.open_selected_dir_btn)
-        _rg_layout.addLayout(_rg_btns)
-        right_layout.addWidget(results_group)
+        # 统一设置两组的尺寸策略为横向扩展，保持同宽
+        try:
+            progress_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            results_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        except Exception:
+            pass
+
+        # 使用垂直分割器控制上下比例为 2:8
+        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right_splitter.setChildrenCollapsible(False)
+        right_splitter.addWidget(progress_group)
+        # 直接添加结果分组到分割器，去除中间容器，保证与上方分组同宽
+        right_splitter.addWidget(results_group)
+        # 设置比例
+        right_splitter.setStretchFactor(0, 2)
+        right_splitter.setStretchFactor(1, 8)
+        try:
+            # 设置初始高度比例（以像素估算 2:8 比例）
+            right_splitter.setSizes([200, 800])
+        except Exception:
+            pass
+        right_layout.addWidget(right_splitter)
         # 右侧扩大显示日志和结果
         right_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
@@ -834,14 +931,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.output_browse_btn.clicked.connect(self._on_browse_output)
         self.start_btn.clicked.connect(self._on_start)
         self.stop_btn.clicked.connect(self._on_stop)
-        self.export_cfg_btn.clicked.connect(self._on_export_config)
-        self.import_cfg_btn.clicked.connect(self._on_import_config)
-        self.export_log_btn.clicked.connect(self._on_export_log)
-        self.copy_cfg_btn.clicked.connect(self._on_copy_config)
-        self.open_out_dir_btn.clicked.connect(self._on_open_default_output_dir)
-        self.open_selected_btn.clicked.connect(self._on_open_selected_files)
-        self.open_selected_dir_btn.clicked.connect(self._on_open_selected_dirs)
-        self.results_list.itemDoubleClicked.connect(self._on_results_item_double_clicked)
+      
+        # self.open_out_dir_btn.clicked.connect(self._on_open_default_output_dir)
+        # self.open_selected_btn.clicked.connect(self._on_open_selected_files)
+        # self.open_selected_dir_btn.clicked.connect(self._on_open_selected_dirs)
+        # self.results_list.itemDoubleClicked.connect(self._on_results_item_double_clicked)
         self.ffmpeg_info_btn.clicked.connect(self._on_show_ffmpeg_info)
         self.use_bundled_ffmpeg_chk.toggled.connect(self._on_toggle_ffmpeg_priority)
 
@@ -901,27 +995,10 @@ class MainWindow(QtWidgets.QMainWindow):
             hb.addWidget(x)
         return w
 
+    # 已移除日志打印框，保留方法以兼容旧代码（不执行任何动作）
     def _append_log(self, text: str) -> None:
-        """Append text to the log view and auto-scroll.
-
-        Parameters
-        ----------
-        text : str
-            Log message to append.
-        """
-        self.log_view.append(text)
-        self.log_view.moveCursor(QtGui.QTextCursor.End)
-
-    def _on_export_log(self) -> None:
-        """Export current log to a UTF-8 text file."""
-        path, ok = QtWidgets.QFileDialog.getSaveFileName(self, "保存日志", "log.txt", "Text Files (*.txt)")
-        if ok and path:
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(self.log_view.toPlainText())
-                QtWidgets.QMessageBox.information(self, "成功", f"已保存: {path}")
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "错误", f"保存失败: {e}")
+        """兼容占位：过去用于日志追加，现已移除日志视图。"""
+        return
 
     def _on_add_dir(self) -> None:
         """Open a directory selection dialog and add to the list."""
@@ -1169,17 +1246,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _detect_env(self) -> None:
         """Detect ffmpeg and NVENC availability and update labels.
 
-        根据“优先使用内置 FFmpeg”开关，选择先查内置还是系统 ffmpeg。
-        若发现内置 ffmpeg，会把其 bin 目录加入到 PATH 的前端，保证子进程能找到。
+        改进：强制只使用内置打包的 FFmpeg/FFprobe，不再回退到系统安装。
+        检测到内置 ffmpeg 后，会将其 bin 目录插入到 PATH 前端，确保所有子进程只调用内置版本。
+        若未发现内置 ffmpeg，则标记为不可用并提示，而不是使用系统版本。
         """
         import shutil, os
 
+        # 统一要求仅使用内置 ffmpeg：强制首选并忽略外部系统版本
         settings = QtCore.QSettings("ReplaceVideoBGM", "VideoConcatGUI")
-        prefer_bundled = settings.value("prefer_bundled_ffmpeg", True, type=bool)
-        # 使复选框状态与设置一致（避免初次加载不同步）
+        prefer_bundled = True
+        # 如果界面上存在“优先使用内置 FFmpeg”的复选框，强制勾选以反映策略
         if hasattr(self, "use_bundled_ffmpeg_chk"):
             block = self.use_bundled_ffmpeg_chk.blockSignals(True)
-            self.use_bundled_ffmpeg_chk.setChecked(bool(prefer_bundled))
+            self.use_bundled_ffmpeg_chk.setChecked(True)
             self.use_bundled_ffmpeg_chk.blockSignals(block)
 
         def _bundled_ffmpeg_dir() -> Optional[Path]:
@@ -1201,22 +1280,25 @@ class MainWindow(QtWidgets.QMainWindow):
         src = "不可用"
         bdir = _bundled_ffmpeg_dir()
 
-        if prefer_bundled and bdir:
+        # 仅允许内置 ffmpeg；若未找到则显示不可用，不再回退系统版本
+        if bdir:
             _ensure_path_front(bdir)
             ffmpeg_bin = shutil.which("ffmpeg")
-            src = "内置" if ffmpeg_bin else src
-            if not ffmpeg_bin:
-                # fallback to system
-                ffmpeg_bin = shutil.which("ffmpeg")
-                src = "系统" if ffmpeg_bin else src
+            # 保险起见，确认解析到的路径确实来自内置目录
+            try:
+                if ffmpeg_bin and os.path.abspath(os.path.dirname(ffmpeg_bin)) == os.path.abspath(str(bdir)):
+                    src = "内置"
+                else:
+                    # PATH 被修改但解析到的并非内置目录，则视为不可用
+                    ffmpeg_bin = None
+                    src = "不可用"
+            except Exception:
+                # 任何异常都视为不可用
+                ffmpeg_bin = None
+                src = "不可用"
         else:
-            ffmpeg_bin = shutil.which("ffmpeg")
-            if ffmpeg_bin:
-                src = "系统"
-            elif bdir:
-                _ensure_path_front(bdir)
-                ffmpeg_bin = shutil.which("ffmpeg")
-                src = "内置" if ffmpeg_bin else src
+            ffmpeg_bin = None
+            src = "不可用"
 
         # Update ffmpeg badge
         if ffmpeg_bin:
@@ -1224,7 +1306,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.ffmpeg_status.setText("ffmpeg: 不可用")
 
-        # NVENC badge由后续检测来更新，这里仅在 ffmpeg 不可用时重置
+        # NVENC badge 由后续检测来更新，这里仅在 ffmpeg 不可用时重置
         try:
             ok = vc.is_nvenc_available()
             self.nvenc_status.setText("NVENC: 可用" if ok else "NVENC: 不可用")
@@ -1461,15 +1543,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._thread is not None:
             QtWidgets.QMessageBox.warning(self, "提示", "已有任务在运行")
             return
+        # 新任务开始前重置进度条到 0%，本次任务期间不再自动重置
+        try:
+            self.progress_bar.setMaximum(100)
+            self.progress_bar.setValue(0)
+        except Exception:
+            pass
         settings = self._collect_settings()
-        self._append_log("▶️ 开始任务\n" + str(asdict(settings)))
+        # 移除日志输出，仅在状态区显示阶段与进度
 
         self._thread = QtCore.QThread(self)
         self._worker = VideoConcatWorker(settings)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.log.connect(self._append_log)
-        self._worker.phase.connect(lambda p: self.phase_label.setText(f"阶段: {p}"))
+        self._worker.phase.connect(self._on_phase)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
         self._worker.results.connect(self._on_results_ready)
@@ -1480,14 +1567,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.setEnabled(True)
 
     def _on_progress(self, done: int, total: int) -> None:
-        """Update progress bar with (done, total).
+        """Update progress bar with fixed-scale phase percentages.
+
+        The worker emits progress on a fixed scale of 1000 units:
+        - Phase 1 (TS 预转换) uses 0..300 units (30%).
+        - Phase 2 (混合拼接) uses 300..1000 units (70%).
 
         Parameters
         ----------
         done : int
-            Completed items.
+            Current progress units on the 0..1000 scale.
         total : int
-            Total items in the current phase.
+            Always 1000 in this scheme.
         """
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(done)
@@ -1502,7 +1593,14 @@ class MainWindow(QtWidgets.QMainWindow):
         fail_count : int
             Number of failed outputs.
         """
-        self._append_log(f"\n📊 完成：✅ 成功 {ok_count}，❌ 失败 {fail_count}")
+        # 任务完成后将进度条显示为 100%，直到下次开始任务前不再重置
+        try:
+            # 若当前最大值为固定刻度（例如 1000），此处直接置为最大值即可呈现 100%
+            self.progress_bar.setValue(self.progress_bar.maximum())
+            # 完成后以绿色显示块，直到下一次开始
+            self._apply_progress_style(chunk_color="#22c55e")
+        except Exception:
+            pass
         self._cleanup_thread()
 
     def _on_results_ready(self, paths: List[str]) -> None:
@@ -1536,7 +1634,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if p.exists():
                 QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p)))
             else:
-                self._append_log(f"⚠️ 文件不存在: {p}")
+                QtWidgets.QMessageBox.warning(self, "提示", f"文件不存在: {p}")
 
     def _on_open_selected_dirs(self) -> None:
         """Open directories for the selected output files."""
@@ -1582,7 +1680,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # Collect version info
         def run_ver(cmd: list[str]) -> str:
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+                # 在 Windows 下静默执行，避免弹出 openconsole.exe 窗口
+                kwargs = {}
+                try:
+                    import os as _os
+                    if _os.name == 'nt':
+                        si = subprocess.STARTUPINFO()
+                        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+                except Exception:
+                    kwargs = {}
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=8, **kwargs)
                 out = res.stdout.strip() or res.stderr.strip()
                 return out or "<无输出>"
             except Exception as e:
@@ -1661,7 +1769,6 @@ class MainWindow(QtWidgets.QMainWindow):
             Error message to show.
         """
         QtWidgets.QMessageBox.critical(self, "错误", msg)
-        self._append_log("❌ " + msg)
         self._cleanup_thread()
 
     def _cleanup_thread(self) -> None:
@@ -1673,11 +1780,85 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._thread = None
+
+    def _apply_progress_style(self, chunk_color: str = "#3b82f6") -> None:
+        """
+        根据当前屏幕 DPI 自适应地设置进度条高度与字体大小，并应用指定块颜色。
+
+        参数:
+            chunk_color: 进度条填充块颜色（如 #3b82f6 蓝色、#f59e0b 橙色、#22c55e 绿色）
+        """
+        # 尺寸策略：横向扩展，纵向固定
+        try:
+            self.progress_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        except Exception:
+            pass
+
+        # 计算 DPI 缩放
+        try:
+            screen = QtWidgets.QApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInch() if screen else 96.0
+            scale = max(1.0, dpi / 96.0)
+        except Exception:
+            scale = 1.0
+
+        # 自适应高度与字号（设上下限防止过大/过小）
+        base_h = 40
+        height = int(max(34, min(56, base_h * scale)))
+        try:
+            self.progress_bar.setFixedHeight(height)
+        except Exception:
+            pass
+
+        try:
+            font = self.progress_bar.font()
+            base_pt = 12
+            pt_size = int(max(base_pt, min(18, base_pt * scale)))
+            font.setPointSize(pt_size)
+            self.progress_bar.setFont(font)
+        except Exception:
+            pass
+
+        # 应用样式表
+        try:
+            style = (
+                f"QProgressBar{{min-height:{height}px;max-height:{height}px;border:1px solid #bbb;border-radius:4px;text-align:center;}}"
+                f"QProgressBar::chunk{{background-color:{chunk_color};margin:0px;}}"
+            )
+            self.progress_bar.setStyleSheet(style)
+        except Exception:
+            pass
+
+    def _on_phase(self, phase_text: str) -> None:
+        """阶段更新槽：更新阶段标签，并按阶段调整进度条配色。"""
+        try:
+            self.phase_label.setText(f"阶段: {phase_text}")
+        except Exception:
+            pass
+
+        # 根据阶段关键字选择颜色
+        pt = (phase_text or "").lower()
+        color = "#3b82f6"  # 默认蓝色
+        try:
+            if "预处理" in phase_text or "pre" in pt or "scan" in pt:
+                color = "#f59e0b"  # 橙色：预处理/扫描
+            elif "混合" in phase_text or "concat" in pt or "merge" in pt:
+                color = "#3b82f6"  # 蓝色：合并/混合
+            elif "完成" in phase_text or "finish" in pt or "done" in pt:
+                color = "#22c55e"  # 绿色：完成
+        except Exception:
+            pass
+
+        # 应用选择的颜色（同时保留 DPI 自适应）
+        try:
+            self._apply_progress_style(chunk_color=color)
+        except Exception:
+            pass
         self._worker = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.phase_label.setText("阶段: idle")
-        self.progress_bar.setValue(0)
+        # 不在清理阶段重置进度条，保留为 100%，仅在下次开始任务前重置
 
     def _on_stop(self) -> None:
         """Attempt to stop the running worker.
@@ -1686,6 +1867,107 @@ class MainWindow(QtWidgets.QMainWindow):
         Long-running ffmpeg subprocesses will finish their current item.
         """
         self._cleanup_thread()
+
+    # ==== 托盘与窗口关闭行为优化 ====
+    def _ensure_tray(self) -> None:
+        """Ensure system tray icon and menu are initialized."""
+        try:
+            if getattr(self, "tray_icon", None):
+                return
+            self.tray_icon = QtWidgets.QSystemTrayIcon(self)
+            # 使用窗口图标或一个标准图标
+            icon = self.windowIcon()
+            try:
+                if getattr(icon, 'isNull', lambda: True)():
+                    icon = QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
+            except Exception:
+                pass
+            self.tray_icon.setIcon(icon)
+
+            self.tray_menu = QtWidgets.QMenu(self)
+            self.tray_act_show = QtGui.QAction("显示窗口", self)
+            self.tray_act_exit = QtGui.QAction("退出", self)
+            self.tray_menu.addAction(self.tray_act_show)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.tray_act_exit)
+            self.tray_icon.setContextMenu(self.tray_menu)
+
+            self.tray_act_show.triggered.connect(self._restore_from_tray)
+            self.tray_act_exit.triggered.connect(self._on_exit_requested)
+            self.tray_icon.activated.connect(self._on_tray_activated)
+        except Exception:
+            # 托盘初始化失败不影响主流程
+            self.tray_icon = None
+
+    def _restore_from_tray(self) -> None:
+        """Restore the main window from the system tray."""
+        try:
+            self.showNormal()
+            self.activateWindow()
+        except Exception:
+            pass
+
+    def _on_tray_activated(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
+        """Handle tray icon activation to restore window on click/double click."""
+        try:
+            if reason in (QtWidgets.QSystemTrayIcon.Trigger, QtWidgets.QSystemTrayIcon.DoubleClick):
+                self._restore_from_tray()
+        except Exception:
+            pass
+
+    def _on_exit_requested(self) -> None:
+        """Exit the application. If a task is running, ask for confirmation."""
+        try:
+            if self._thread is not None:
+                ret = QtWidgets.QMessageBox.question(
+                    self,
+                    "确认退出",
+                    "当前有任务在后台运行，退出将尝试停止线程并关闭程序。是否继续？",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+                if ret != QtWidgets.QMessageBox.Yes:
+                    return
+                # 软停止当前任务
+                self._on_stop()
+            QtWidgets.QApplication.quit()
+        except Exception:
+            QtWidgets.QApplication.quit()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        """Intercept window close.
+
+        当有后台任务运行时，关闭窗口不会直接退出应用，而是将窗口隐藏到系统托盘，
+        并在托盘中继续运行任务。用户可通过托盘菜单选择"退出"来结束程序。
+        """
+        try:
+            if self._thread is not None:
+                # 隐藏到托盘
+                self._ensure_tray()
+                if getattr(self, "tray_icon", None):
+                    try:
+                        self.tray_icon.show()
+                        # 提示继续后台运行
+                        self.tray_icon.showMessage(
+                            "后台运行",
+                            "任务未完成，窗口已隐藏到系统托盘。",
+                            QtWidgets.QSystemTrayIcon.Information,
+                            3000,
+                        )
+                    except Exception:
+                        pass
+                self.hide()
+                event.ignore()
+                return
+        except Exception:
+            pass
+        # 无后台任务，正常退出
+        try:
+            if getattr(self, "tray_icon", None):
+                self.tray_icon.hide()
+        except Exception:
+            pass
+        event.accept()
 
 
 def main() -> None:
