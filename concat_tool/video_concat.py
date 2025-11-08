@@ -585,7 +585,7 @@ def process_group_single_output(args_tuple):
     返回 (success, msg)
     """
     (group_key, group_videos, out_index, bgm_input_path, temp_dir, output_spec,
-     default_output_dir, args_count, args_gpu, target_fps, args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_head, args_trim_tail, input_roots) = args_tuple
+     default_output_dir, args_count, args_gpu, target_fps, args_fill_mode, args_trim_head, args_trim_tail, input_roots) = args_tuple
     try:
         w, h = group_key
         auto_seed = generate_auto_seed()
@@ -634,12 +634,11 @@ def process_group_single_output(args_tuple):
             target_width=w,
             target_height=h,
             target_fps=target_fps,
-            fill_mode='pad'
+            fill_mode=args_fill_mode
         )
         if not ok:
             return False, f"组 {w}x{h} 输出{out_index} 拼接失败"
 
-        return True, f"组 {w}x{h} 输出{out_index} 拼接成功"
         # 选择 BGM 并合成
         try:
             bgm_path = select_bgm_file(bgm_input_path, auto_seed)
@@ -653,6 +652,8 @@ def process_group_single_output(args_tuple):
         size_mb = final_out.stat().st_size / (1024*1024)
         return True, f"{final_out} ({size_mb:.1f} MB)"
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return False, f"异常: {e}"
 
 
@@ -713,21 +714,6 @@ def select_bgm_file(bgm_path: Path, seed: Optional[int] = None) -> Path:
 
     else:
         raise ValueError(f"BGM路径不存在: {bgm_path}")
-
-
-# def write_concat_list_file(videos: List[Path], list_file: Path) -> int:
-#     """写入 concat demuxer 所需的列表文件，返回写入的条目数。
-#     拼接阶段不再进行逐段裁剪，直接写入 `file '<path>'` 行。
-#     """
-#     lines = []
-#     for v in videos:
-#         p = str(v)
-#         p_escaped = p.replace("'", r"'\''")
-#         lines.append(f"file '{p_escaped}'\n")
-#     with open(list_file, 'w', encoding='utf-8') as f:
-#         f.writelines(lines)
-#     return len(lines)
-
 
 def validate_and_prepare(args: argparse.Namespace):
     """校验参数并准备关键路径对象。
@@ -825,8 +811,7 @@ def run_grouped_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_in
                 vids = qualified_groups[key]
                 for i in range(1, count_out + 1):
                     task_args = (key, vids, i, bgm_input_path, temp_dir, output_spec,
-                                 default_output_dir, args.count, args.gpu, args.fps,
-                                 args.nvenc_cq, args.bitrate, args.crf, args.trim_head, args.trim_tail, input_roots)
+                                 default_output_dir, args.count, args.gpu, args.fps, args.fill, args.trim_head, args.trim_tail, input_roots)
                     fut = executor.submit(process_group_single_output, task_args)
                     futures[fut] = (key, i)
             for fut in as_completed(futures):
@@ -857,104 +842,53 @@ def run_grouped_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_in
 def run_random_outputs(args: argparse.Namespace, all_videos: List[Path], bgm_input_path: Path,
                        temp_dir: Path, output_spec: Optional[Path], default_output_dir: Path,
                        input_roots: List[Path]) -> None:
-    """执行随机拼接模式，根据输出数与线程决定并发或串行。"""
-    use_concurrent = args.outputs > 1 and args.threads > 1
-    if use_concurrent:
-        max_workers = min(args.threads, args.outputs)
+    """执行随机拼接模式，统一使用线程池（max_workers 可为 1）。"""
+    max_workers = max(1, min(args.threads, args.outputs))
+    if max_workers > 1:
         print(f"🚀 启用并发处理，使用 {max_workers} 个线程")
-        tasks = []
-        for idx in range(1, args.outputs + 1):
-            task_args = (
-                 idx, all_videos, bgm_input_path, temp_dir, output_spec,
-                 default_output_dir, args.count, args.gpu, args.outputs,
-                 args.width, args.height, args.fps, args.fill,
-                 args.nvenc_cq, args.bitrate, args.crf, args.trim_head, args.trim_tail, input_roots,
-             )
-            tasks.append(task_args)
-        results = []
-        failed_count = 0
-        try:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_idx = {executor.submit(process_single_output, task): task[0] for task in tasks}
-                for future in as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    try:
-                        success, result_idx, message = future.result()
-                        if success:
-                            results.append((result_idx, message))
-                            print(f"✅ 任务 {result_idx} 完成")
-                        else:
-                            failed_count += 1
-                            print(f"❌ 任务 {result_idx} 失败: {message}")
-                    except Exception as e:
-                        failed_count += 1
-                        print(f"❌ 任务 {idx} 异常: {e}")
-            print(f"\n📊 并发处理完成:")
-            print(f"✅ 成功: {len(results)} 个")
-            print(f"❌ 失败: {failed_count} 个")
-            if results:
-                print(f"\n🎉 成功生成的文件:")
-                for idx, file_path in sorted(results):
-                    file_size = Path(file_path).stat().st_size / (1024*1024)
-                    print(f"  {idx}. {file_path} ({file_size:.1f} MB)")
-        except KeyboardInterrupt:
-            print(f"\n⚠️ 用户中断，正在停止所有任务...")
-            sys.exit(1)
-        return
-    # 串行处理
-    if args.outputs == 1:
-        print("🔄 单个输出，使用串行处理")
     else:
-        print("🔄 使用串行处理（threads=1 或 outputs=1）")
+        print("🔄 使用线程池顺序处理（workers=1）")
+
+    tasks = []
     for idx in range(1, args.outputs + 1):
-        print(f"\n=== 开始第 {idx}/{args.outputs} 个输出 ===")
-        auto_seed = generate_auto_seed()
-        print(f"🎲 使用随机种子: {auto_seed}")
-        selected_videos = select_random_videos(all_videos, args.count, auto_seed)
-        print(f"🎲 随机选择了 {len(selected_videos)} 个视频:")
-        for i, video in enumerate(selected_videos, 1):
-            print(f"  {i}. {video.name}")
-        selected_ts = ensure_ts_segments(selected_videos, input_roots, args.trim_head, args.trim_tail, args.gpu)
-        if not selected_ts:
-            print("❌ 无可用TS片段，结束。")
-            sys.exit(1)
-        # 在拼接前根据时间戳种子打乱片段顺序，增强每次输出的变化性
-        random.seed(auto_seed)
-        random.shuffle(selected_ts)
-        print(f"🔀 使用时间戳种子 {auto_seed}，已随机打乱 {len(selected_ts)} 个片段的顺序")
-        try:
-            bgm_path = select_bgm_file(bgm_input_path, auto_seed)
-            print(f"🎵 使用BGM: {bgm_path.name}")
-        except ValueError as e:
-            print(f"❌ BGM选择错误: {e}")
-            sys.exit(1)
-        temp_concat_output = temp_dir / f"temp_concat_{idx}.mp4"
-        if not concat_videos(
-            selected_ts, temp_concat_output,
-            use_gpu=args.gpu,
-            target_width=args.width, target_height=args.height,
-            target_fps=args.fps, fill_mode=args.fill
-        ):
-            print("❌ 视频拼接失败")
-            sys.exit(1)
-        if output_spec:
-            if output_spec.suffix.lower() == '.mp4':
-                out_dir = output_spec.parent
-                out_name = f"{output_spec.stem}_{idx}{output_spec.suffix}"
-            else:
-                out_dir = output_spec
-                out_name = f"concat_{args.count}videos_with_bgm_{idx}.mp4"
-        else:
-            out_dir = default_output_dir
-            out_name = f"concat_{args.count}videos_with_bgm_{idx}.mp4"
-        out_path = out_dir / out_name
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        if not replace_audio_with_bgm(temp_concat_output, bgm_path, out_path, use_gpu=args.gpu):
-            print("❌ BGM替换失败")
-            sys.exit(1)
-        print(f"\n🎉 第 {idx} 个输出完成！")
-        print(f"📄 输出文件: {out_path}")
-        print(f"📊 文件大小: {out_path.stat().st_size / (1024*1024):.1f} MB")
+        task_args = (
+             idx, all_videos, bgm_input_path, temp_dir, output_spec,
+             default_output_dir, args.count, args.gpu, args.outputs,
+             args.width, args.height, args.fps, args.fill,
+             args.trim_head, args.trim_tail, input_roots,
+         )
+        tasks.append(task_args)
+
+    results = []
+    failed_count = 0
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {executor.submit(process_single_output, task): task[0] for task in tasks}
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    success, result_idx, message = future.result()
+                    if success:
+                        results.append((result_idx, message))
+                        print(f"✅ 任务 {result_idx} 完成")
+                    else:
+                        failed_count += 1
+                        print(f"❌ 任务 {result_idx} 失败: {message}")
+                except Exception as e:
+                    failed_count += 1
+                    print(f"❌ 任务 {idx} 异常: {e}")
+        print(f"\n📊 处理完成:")
+        print(f"✅ 成功: {len(results)} 个")
+        print(f"❌ 失败: {failed_count} 个")
+        if results:
+            print(f"\n🎉 成功生成的文件:")
+            for idx, file_path in sorted(results):
+                file_size = Path(file_path).stat().st_size / (1024*1024)
+                print(f"  {idx}. {file_path} ({file_size:.1f} MB)")
+    except KeyboardInterrupt:
+        print(f"\n⚠️ 用户中断，正在停止所有任务...")
+        sys.exit(1)
+    return
 
 
 def preconvert_all_ts(all_videos: List[Path], input_roots: List[Path], threads: int, trim_head_seconds: float, trim_tail_seconds: float, use_gpu: bool) -> None:
@@ -1024,38 +958,20 @@ def concat_videos(videos: List[Path], output_path: Path, use_gpu: bool = False, 
             '-sws_flags', 'lanczos+accurate_rnd+full_chroma_int',
         ]
 
-        common_video_opts = [
-            # '-profile:v', 'high',
-            # '-level', '4.1',
-            # '-pix_fmt', 'yuv420p',
-            # '-r', str(target_fps),  # 帧率已在 filter_complex 中设置
+        gpu_cpu_mapping = get_ffmpeg_gpu_mapping_cpu_enc_opts()
+
+        if nvenc_ok:
+            # 使用 HEVC NVENC（H.265）：目标体积下降≥50%，同时维持主观观感
+            cmd += gpu_cpu_mapping["gpu"]
+        else:
+            # 使用 CPU H.265（libx265）：目标体积下降≥50%，兼顾主观观感
+            cmd += gpu_cpu_mapping["cpu"]
+          
+        # 公共参数
+        cmd += [
             '-movflags', '+faststart',
             '-an',
         ]
-
-        if nvenc_ok:
-            # 使用 HEVC NVENC（H.265），质量与体积更均衡
-            cmd += [
-                '-c:v', 'hevc_nvenc',
-                '-preset', 'p6',           # 压缩/速度平衡
-                '-tune', 'hq',             # 画质优化
-                '-rc', 'vbr',              # 可变码率，结合 CQ
-                '-cq', '28',               # 主观高质量、体积较小
-                '-b:v', '0',               # 让 CQ 主导
-                # 缩放等后处理已在 filter_complex 中完成
-                '-spatial_aq', '1',
-                '-temporal_aq', '1',
-                '-rc-lookahead', '20',
-            ] + common_video_opts
-        else:
-            # 使用 CPU H.265（libx265），注重质量与体积平衡
-            cmd += [
-                '-c:v', 'libx265',
-                '-crf', '28',              # 主观高质量、体积较小
-                '-preset', 'medium',       # 速度与压缩平衡
-                # 缩放等后处理已在 filter_complex 中完成
-            ] + common_video_opts
-
         cmd += [str(output_path)]
 
         print(f"🔧 编码命令: {' '.join(cmd)}")
@@ -1085,6 +1001,7 @@ def concat_videos(videos: List[Path], output_path: Path, use_gpu: bool = False, 
         print(f"❌ 拼接过程异常: {e}")
         return False
 
+
 def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, use_gpu: bool = True) -> bool:
     """使用FFmpeg替换视频音频为BGM并进行压缩。
 
@@ -1092,7 +1009,6 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
     - 音频使用 AAC，码率 96k，BGM 通过 `-stream_loop -1` 循环并与视频 `-shortest` 对齐。
     - 保持时间戳连续（`-fflags +genpts`），并添加 `-movflags +faststart` 以优化播放器加载。
     """
-    # use_gpu = False
     try:
         print("🎵 使用FFmpeg压缩视频并合成BGM…")
         ffmpeg_bin = shutil.which('ffmpeg')
@@ -1111,33 +1027,15 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
             '-map', '1:a:0',
             '-shortest',
             '-movflags', '+faststart',
-        ]
-
-        # 优先使用 GPU（hevc_nvenc），质量参数参考 CRF 28（使用 NVENC 的 CQ 近似）
-        gpu_cmd = base_inputs + [
-            '-c:v', 'hevc_nvenc',
-            '-preset', 'p4',        
-            '-rc', 'vbr',             # 码率控制：可变码率
-            '-cq', '36',              # 近似 CRF 的质量参数
-            '-b:v', '0',              # 不设定目标码率，让 CQ 控制质量
-            '-pix_fmt', 'yuv420p',
-            '-multipass', 'fullres',
-            # '-rc-lookahead', '60',
             '-c:a', 'aac',
             '-b:a', '96k',
-            str(output_path)
         ]
 
-        # CPU 回退（libx265），CRF 28 + veryfast（参考你的命令）
-        cpu_cmd = base_inputs + [
-            '-c:v', 'libx265',
-            '-crf', '28',
-            '-preset', 'ultrafast',
-            '-pix_fmt', 'yuv420p',
-            '-c:a', 'aac',
-            '-b:a', '96k',
-            str(output_path)
-        ]
+        gpu_cpu_mapping = get_ffmpeg_gpu_mapping_cpu_enc_opts()
+        # 优先使用 GPU（hevc_nvenc）：目标体积下降≥50%，同时维持主观观感
+        gpu_cmd = base_inputs + gpu_cpu_mapping["gpu"] + [str(output_path)]
+        # CPU 回退（libx265）：目标体积下降≥50%，兼顾主观观感
+        cpu_cmd = base_inputs + gpu_cpu_mapping["cpu"] + [str(output_path)]
 
         result = None
         tried_gpu = False
@@ -1147,7 +1045,7 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
             tried_gpu = True
             print("⚙️ 尝试使用 GPU 编码 (hevc_nvenc)…")
             print(f"🔧 GPU执行命令: {' '.join(gpu_cmd)}")
-            result = subprocess.run(gpu_cmd, capture_output=True)
+            result = subprocess.run(gpu_cmd, capture_output=True, encoding='utf-8')
             if result.returncode == 0:
                 print(f"✅ 使用 GPU(hevc_nvenc) 压缩并替换BGM成功: {output_path.name}")
                 return True
@@ -1165,7 +1063,7 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
         # GPU 不可用或失败则回退到 CPU（libx265）
         print("⚙️ 使用 CPU 编码 (libx265)…")
         print(f"🔧 CPU执行命令: {' '.join(cpu_cmd)}")
-        result = subprocess.run(cpu_cmd, capture_output=True)
+        result = subprocess.run(cpu_cmd, capture_output=True, encoding='utf-8')
         if result.returncode == 0:
             if tried_gpu:
                 print(f"✅ CPU回退成功，压缩并替换BGM: {output_path.name}")
@@ -1188,12 +1086,10 @@ def replace_audio_with_bgm(video_path: Path, bgm_path: Path, output_path: Path, 
         print(f"❌ BGM替换异常: {e}")
         return False
 
-
 def process_single_output(args_tuple):
     """处理单个输出的函数，用于并发执行"""
     (idx, all_videos, bgm_input_path, temp_dir, output_spec, default_output_dir, 
-     args_count, args_gpu, total_outputs, target_width, target_height, target_fps, fill_mode,
-     args_nvenc_cq, args_bitrate_mbps, args_x264_crf, args_trim_head, args_trim_tail, input_roots) = args_tuple
+     args_count, args_gpu, total_outputs, target_width, target_height, target_fps, fill_mode, args_trim_head, args_trim_tail, input_roots) = args_tuple
     
     try:
         print(f"\n=== 开始第 {idx}/{total_outputs} 个输出 ===")
@@ -1296,11 +1192,7 @@ def main():
     parser.add_argument('--group-res', dest='group_res', action='store_true', default=True,
                         help='默认按分辨率分组拼接并输出（文件名追加分辨率后缀），使用 --no-group-res 关闭')
     parser.add_argument('--no-group-res', dest='group_res', action='store_false', help='关闭分辨率分组模式')
-    # 压缩参数：在不影响观感的前提下减小体积
-    parser.add_argument('--nvenc-cq', type=int, default=36, help='NVENC质量参数cq（默认36，值越大体积越小）')
-    parser.add_argument('--crf', type=int, default=28, help='x264 CRF（默认28，值越大体积越小）')
-    parser.add_argument('--bitrate', type=int, default=5, help='NVENC目标码率，单位Mbps（默认5）')
-    
+
     args = parser.parse_args()
     
     # 参数校验与路径准备
@@ -1323,7 +1215,7 @@ def main():
         # 决定是否使用分辨率分组模式
         if args.group_res:
             run_grouped_outputs(args, all_videos, bgm_input_path, temp_dir, output_spec, default_output_dir, video_dirs)
-            return
+            return  
 
         # 决定是否使用并发处理（随机拼接模式）
         # 随机拼接执行（并发或串行）
