@@ -3,6 +3,8 @@ REM Build Windows .exe for Video Concat GUI using PyInstaller
 REM Prerequisites: Python, pip install -r requirements_gui.txt
 
 setlocal
+REM Security hardening options
+REM Encryption via --key is not supported in PyInstaller >= 6.0; rely on PyArmor obfuscation
 set PROJECT_ROOT=%~dp0
 cd /d %PROJECT_ROOT%
 
@@ -82,7 +84,8 @@ if "%OBFUSCATE%"=="1" (
   )
   if exist "%OBF_DIR%\gui\main_gui.py" (
     set ENTRY_SCRIPT="%OBF_DIR%\gui\main_gui.py"
-    set PYI_PATHS=--paths "%OBF_DIR%" --paths "%PROJECT_ROOT_NO_TRAILING%"
+    REM Prefer obfuscated sources only to avoid bundling original code
+    set PYI_PATHS=--paths "%OBF_DIR%"
     echo Using obfuscated entry script: %ENTRY_SCRIPT%
   ) else (
     echo WARNING: Obfuscation output not found, building without obfuscation.
@@ -148,8 +151,6 @@ if "%ENABLE_SIGN%"=="1" (
     echo WARNING: ENABLE_SIGN=1 but CERT_FILE not set, skipping code signing.
   )
 )
-
-pause
 
 REM Rename executables to requested APP_NAME (safe for names with spaces/parentheses)
 set "APP_NAME=短视频搬运工具v1.0(NVIDIA GPU版本)"
