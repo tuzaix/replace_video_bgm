@@ -45,6 +45,13 @@ if exist vendor\ffmpeg\bin (
   echo WARNING: vendor\ffmpeg\bin not found. Building without bundled FFmpeg.
 )
 
+REM Include GUI resources: pack gui\wechat directory and ONLY gui\secretkey\public.pem
+REM NOTE: Do NOT include private.pem for security reasons.
+set ADD_DATA=%ADD_DATA% --add-data "gui\wechat;gui\wechat"
+REM IMPORTANT: For a single file, DEST must be the target directory, not including the filename.
+REM Otherwise PyInstaller will create a nested folder named 'public.pem' and place the file inside it.
+set ADD_DATA=%ADD_DATA% --add-data "gui\secretkey\public.pem;gui\secretkey"
+
 REM Add project root to analysis paths so concat_tool can be discovered
 set PYI_PATHS=--paths "%PROJECT_ROOT%"
 
@@ -52,12 +59,25 @@ REM Normalize project root to avoid trailing backslash issues
 set PROJECT_ROOT_NO_TRAILING=%PROJECT_ROOT:~0,-1%
 set PYI_PATHS=--paths "%PROJECT_ROOT_NO_TRAILING%"
 
+REM Control where onefile runtime extracts its temporary files.
+REM Using current directory (.) helps keep relative resource paths consistent with dev layout.
+REM You can change this to %TEMP% if you deploy to a non-writable directory.
+set RUNTIME_TMPDIR=.
+
 REM Show the exact command being executed for diagnostics
-set BUILD_CMD=python -m PyInstaller -F -w -n VideoConcatGUI %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --collect-all concat_tool "gui\main_gui.py"
+set BUILD_CMD=python -m PyInstaller -F -w -n VideoConcatGUI --runtime-tmpdir "%RUNTIME_TMPDIR%" %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --collect-all concat_tool "gui\main_gui.py"
 echo Running: %BUILD_CMD%
 %BUILD_CMD%
 
 echo.
-echo Build complete. Executable is in the dist\ folder.
+echo Building debug variant with console...
+set BUILD_CMD_DEBUG=python -m PyInstaller -F -n VideoConcatGUI_debug --runtime-tmpdir "%RUNTIME_TMPDIR%" %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --collect-all concat_tool "gui\main_gui.py"
+echo Running: %BUILD_CMD_DEBUG%
+%BUILD_CMD_DEBUG%
+
+echo.
+echo Build complete. Executables are in the dist\ folder:
+echo   - Stable (windowed):   dist\VideoConcatGUI.exe
+echo   - Debug  (console):    dist\VideoConcatGUI_debug.exe
 echo.
 pause

@@ -1,2 +1,5 @@
 PySide6>=6.6,<7.0
 pyinstaller>=6.0
+wmi==1.5.1
+pycryptodome==3.23.0
+nuitka==2.8.4
