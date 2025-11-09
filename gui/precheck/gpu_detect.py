@@ -10,7 +10,7 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
-
+from PySide6 import QtWidgets
 
 def detect_nvidia_gpu() -> bool:
     """Detect whether an NVIDIA GPU is present on the system.
@@ -92,4 +92,125 @@ def detect_nvidia_gpu() -> bool:
     return False
 
 
-__all__ = ["detect_nvidia_gpu"]
+def show_no_nvidia_dialog(app: QtWidgets.QApplication) -> None:
+    """显示未检测到 NVIDIA 显卡的阻塞对话框，并退出应用。
+
+    Parameters
+    ----------
+    app : QtWidgets.QApplication
+        Qt 应用实例；在用户确认后调用 app.quit() 退出。
+    """
+    try:
+        msg = (
+            "该程序是使用navida显卡来处理视频，请升级显卡，cpu渲染效率太低"
+        )
+        QtWidgets.QMessageBox.critical(
+            None,
+            "硬件要求",
+            msg,
+            QtWidgets.QMessageBox.StandardButton.Ok,
+        )
+    except Exception:
+        print("[启动检查] 未检测到NVIDIA显卡：该程序是使用navida显卡来处理视频，请升级显卡，cpu渲染效率太低")
+    try:
+        app.quit()
+    except Exception:
+        pass
+
+
+def list_nvidia_gpus() -> list[str]:
+    """Return a list of detected NVIDIA GPU names, if any.
+
+    This function performs platform-specific queries and attempts to return
+    human-readable adapter names. It uses similar strategies to
+    ``detect_nvidia_gpu`` but collects names instead of only a boolean.
+
+    Returns
+    -------
+    list[str]
+        A list of GPU names. Empty if no NVIDIA GPU detected or on error.
+    """
+    names: list[str] = []
+    try:
+        # Prefer nvidia-smi if available
+        nvsmi = shutil.which("nvidia-smi")
+        if nvsmi:
+            try:
+                out = subprocess.check_output([nvsmi, "-L"], stderr=subprocess.STDOUT, timeout=3)
+                text = out.decode(errors="ignore")
+                for line in text.splitlines():
+                    # Example: GPU 0: NVIDIA GeForce RTX 3080 (UUID: GPU-...)
+                    if ":" in line:
+                        parts = line.split(":", 1)
+                        gpu_name = parts[1].strip().split("(")[0].strip()
+                        if gpu_name:
+                            names.append(gpu_name)
+                if names:
+                    return names
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+
+        system = platform.system().lower()
+
+        if system == "windows":
+            try:
+                ps_cmd = [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+                ]
+                out = subprocess.check_output(ps_cmd, stderr=subprocess.STDOUT, timeout=3)
+                text = out.decode(errors="ignore")
+                for line in text.splitlines():
+                    l = line.strip()
+                    if l and "nvidia" in l.lower():
+                        names.append(l)
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+
+        elif system == "darwin":
+            try:
+                out = subprocess.check_output(["system_profiler", "SPDisplaysDataType"], stderr=subprocess.STDOUT, timeout=4)
+                text = out.decode(errors="ignore")
+                # Extract lines containing "Chipset Model:" or vendor lines with NVIDIA
+                for line in text.splitlines():
+                    l = line.strip()
+                    if l.lower().startswith("chipset model:") or ("nvidia" in l.lower()):
+                        # Normalize "Chipset Model: NVIDIA GeForce GT 650M" -> name part
+                        if ":" in l:
+                            names.append(l.split(":", 1)[1].strip())
+                        else:
+                            names.append(l)
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+
+        elif system == "linux":
+            try:
+                lspci = shutil.which("lspci")
+                if lspci:
+                    out = subprocess.check_output([lspci], stderr=subprocess.STDOUT, timeout=3)
+                    text = out.decode(errors="ignore")
+                    for line in text.splitlines():
+                        if "nvidia" in line.lower():
+                            # Example: 01:00.0 VGA compatible controller: NVIDIA Corporation GP104 [GeForce GTX 1070]
+                            parts = line.split(":", 2)
+                            name = parts[-1].strip() if parts else line.strip()
+                            names.append(name)
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return names
+
+
+__all__ = ["detect_nvidia_gpu", "show_no_nvidia_dialog", "list_nvidia_gpus"]
