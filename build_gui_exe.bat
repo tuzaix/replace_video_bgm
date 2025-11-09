@@ -115,15 +115,16 @@ if "%USE_UPX%"=="1" (
 )
 
 REM Show the exact command being executed for diagnostics
+REM Security: use --collect-submodules for concat_tool to avoid bundling .py sources as data.
 set PYTHONOPTIMIZE=%STABLE_PYOPT%
-set BUILD_CMD=python -m PyInstaller -F -w -n VideoConcatGUI --runtime-tmpdir "%RUNTIME_TMPDIR%" %PYI_UPX% %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --hidden-import pytransform --hidden-import pyarmor_runtime --collect-all concat_tool --collect-all pyarmor_runtime %ENTRY_SCRIPT%
+set BUILD_CMD=python -m PyInstaller -F -w -n VideoConcatGUI --runtime-tmpdir "%RUNTIME_TMPDIR%" %PYI_UPX% %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --hidden-import pytransform --hidden-import pyarmor_runtime --collect-submodules concat_tool --collect-all pyarmor_runtime %ENTRY_SCRIPT%
 echo Running: %BUILD_CMD%
 %BUILD_CMD%
 
 echo.
 echo Building debug variant with console...
 set PYTHONOPTIMIZE=%DEBUG_PYOPT%
-set BUILD_CMD_DEBUG=python -m PyInstaller -F -n VideoConcatGUI_debug --runtime-tmpdir "%RUNTIME_TMPDIR%" %PYI_UPX% %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --hidden-import pytransform --hidden-import pyarmor_runtime --collect-all concat_tool --collect-all pyarmor_runtime %ENTRY_SCRIPT%
+set BUILD_CMD_DEBUG=python -m PyInstaller -F -n VideoConcatGUI_debug --runtime-tmpdir "%RUNTIME_TMPDIR%" %PYI_UPX% %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --hidden-import pytransform --hidden-import pyarmor_runtime --collect-submodules concat_tool --collect-all pyarmor_runtime %ENTRY_SCRIPT%
 echo Running: %BUILD_CMD_DEBUG%
 %BUILD_CMD_DEBUG%
 
