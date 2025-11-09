@@ -144,10 +144,10 @@ def show_license_failure_dialog(app: QtWidgets.QApplication) -> None:
                 pass
 
         msg_html = (
-            "未获得授权，程序将退出。<br><br>"
-            "请点击下方按钮复制机器指纹并发送给管理员 <br>"
+            "未获得授权<br><br>"
+            "请点击按钮生成<font color='red'>【专属口令】</font>并发送给管理员 <br>"
             + qr_html + debug_html + "<br>" +
-            "微信添加下面管理员"
+            "微信扫码添加管理员"
         )
 
         dialog = QtWidgets.QDialog()
@@ -184,7 +184,7 @@ def show_license_failure_dialog(app: QtWidgets.QApplication) -> None:
         label.setText(msg_html)
         vbox.addWidget(label)
 
-        copy_btn = QtWidgets.QPushButton("复制机器指纹")
+        copy_btn = QtWidgets.QPushButton("生成【专属口令】")
         vbox.addWidget(copy_btn)
 
         def _on_copy_clicked() -> None:
@@ -194,8 +194,8 @@ def show_license_failure_dialog(app: QtWidgets.QApplication) -> None:
                 if not fp:
                     QtWidgets.QMessageBox(
                         QtWidgets.QMessageBox.Critical,
-                        "获取失败",
-                        "获取机器指纹失败，请联系管理员。",
+                        "生成失败",
+                        "生成【专属口令】失败，请联系管理员。",
                         QtWidgets.QMessageBox.StandardButton.Ok,
                         dialog,
                     ).exec()
@@ -210,7 +210,7 @@ def show_license_failure_dialog(app: QtWidgets.QApplication) -> None:
                 info_box = QtWidgets.QMessageBox(
                     QtWidgets.QMessageBox.Information,
                     "已复制",
-                    "机器指纹已复制到剪贴板。<br>请添加管理员好友，并粘贴指纹发给 Ta",
+                    "【专属口令】已复制到剪贴板。<br>请添加管理员好友，并粘贴【专属口令】发给 Ta",
                     QtWidgets.QMessageBox.StandardButton.Ok,
                     dialog,
                 )
@@ -224,8 +224,8 @@ def show_license_failure_dialog(app: QtWidgets.QApplication) -> None:
                     pass
                 warn_box = QtWidgets.QMessageBox(
                     QtWidgets.QMessageBox.Warning,
-                    "复制失败",
-                    f"复制机器指纹失败：{e}",
+                    "生成失败",
+                    f"生成【专属口令】失败：{e}",
                     QtWidgets.QMessageBox.StandardButton.Ok,
                     dialog,
                 )
