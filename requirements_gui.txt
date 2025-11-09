@@ -3,3 +3,4 @@ pyinstaller>=6.0
 wmi==1.5.1
 pycryptodome==3.23.0
 nuitka==2.8.4
+pyarmor==9.2.0
