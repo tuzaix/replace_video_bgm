@@ -150,3 +150,22 @@ if "%ENABLE_SIGN%"=="1" (
 )
 
 pause
+
+REM Rename executables to requested APP_NAME (safe for names with spaces/parentheses)
+set "APP_NAME=短视频搬运工具v1.0(NVIDIA GPU版本)"
+set "APP_NAME_DEBUG=%APP_NAME%_debug"
+pushd "dist"
+if exist "VideoConcatGUI.exe" ren "VideoConcatGUI.exe" "%APP_NAME%.exe"
+if exist "VideoConcatGUI_debug.exe" ren "VideoConcatGUI_debug.exe" "%APP_NAME_DEBUG%.exe"
+popd
+
+REM Package release zip using PowerShell (built-in) instead of rar
+set "RELEASE_DIR=release"
+if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%"
+set "ZIP_FILE=%RELEASE_DIR%\%APP_NAME%.zip"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Force -DestinationPath '%ZIP_FILE%' -Path 'dist\%APP_NAME%.exe'"
+if exist "%ZIP_FILE%" (
+  echo Created release package: %ZIP_FILE%
+) else (
+  echo WARNING: Failed to create release zip: %ZIP_FILE%
+)
