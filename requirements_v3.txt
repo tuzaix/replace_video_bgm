@@ -31,3 +31,17 @@ tqdm>=4.64.0
 # 开发和测试依赖（可选）
 # pytest>=7.0.0
 # pytest-cov>=4.0.0
+
+# 可选后端（更精准的人脸识别与性别/美观评估）
+# 如需启用，请取消注释相应行并安装。
+# MediaPipe（更稳健的人脸检测，性别仍采用启发式）：
+# mediapipe>=0.10.0
+# InsightFace（性别预测，需要ONNX运行时）：
+# insightface>=0.7.3
+# onnxruntime>=1.16.0  # 或 onnxruntime-gpu（如需GPU推理）
+
+
+opencv-python-headless
+numpy 
+ultralytics 
+deepface

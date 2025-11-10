@@ -36,6 +36,9 @@ from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 
+# 统一启动策略：优先使用内置 FFmpeg（可通过环境变量在开发环境允许系统兜底）
+from gui.precheck.ffmpeg_paths import resolve_ffmpeg_paths, allow_system_fallback_env
+
 SUPPORTED_VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm'}
 SUPPORTED_AUDIO_EXTS = {'.mp3', '.wav', '.m4a', '.aac', '.flac'}
 
@@ -426,6 +429,23 @@ def main():
     if not bgms:
         print("错误：未在BGM目录中找到可支持的音频文件。")
         sys.exit(1)
+
+    # 统一启动策略：若未显式传入 --ffmpeg-path，则优先解析内置 FFmpeg 并将其插入到 PATH 前端；
+    # 开发环境可通过 FFMPEG_DEV_FALLBACK=1 允许系统 FFmpeg 兜底。
+    if not args.ffmpeg_path:
+        try:
+            from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+            bootstrap_ffmpeg_env(
+                prefer_bundled=True,
+                dev_fallback_env=True,
+                modify_env=True,
+                logger=lambda m: print(f"[ffmpeg] {m}"),
+                require_ffmpeg=True,
+                require_ffprobe=False,
+            )
+        except FileNotFoundError:
+            print("[fatal] 未找到内置 FFmpeg，请确保存在 vendor/ffmpeg/bin 或打包发行版本中包含 ffmpeg；开发环境可设置 FFMPEG_DEV_FALLBACK=1 允许系统兜底")
+            sys.exit(2)
 
     try:
         ffmpeg_bin = pick_ffmpeg(args.ffmpeg_path)

@@ -232,6 +232,115 @@ video_directory/
 python example_v3.py
 ```
 
+## 🧩 架构：GUI 与工作流分层（v3 项目结构优化）
+
+为提升可维护性与清晰度，项目对“长视频混合拼接”功能进行了分层设计：
+
+- GUI 层：`gui/main_gui.py`
+  - 仅负责界面、信号与线程管理。
+  - 将业务逻辑委托给工作流模块，保持代码简洁易懂。
+  - 默认强制使用内置 FFmpeg（ffmpeg/bin），不再提供用户切换选项，避免环境差异导致的问题。
+- 工作流层：`concat_tool/workflow.py`
+  - 纯 Python 业务模块，无 Qt 依赖，便于单元测试与复用。
+  - 提供 `WorkflowCallbacks` 回调与 `run_video_concat_workflow(settings, cb)` 统一入口。
+- 配置层：`concat_tool/settings.py`
+  - 提供共享 `Settings` dataclass，供 GUI/CLI/脚本统一使用。
+
+这样设计可以让 GUI 与业务逻辑解耦，便于后续扩展（例如命令行入口、服务端调用）。
+
+## 🖥️ 命令行（CLI）用法
+
+新增 `concat_tool/cli.py`，可在终端直接运行混合拼接工作流：
+
+```bash
+python -m concat_tool.cli \
+  --video-dirs D:\\videos1 D:\\videos2 \
+  --bgm-path D:\\audios \
+  --outputs 2 --count 5 --gpu --threads 4 \
+  --width 1080 --height 1920 --fps 25 --fill pad \
+  --trim-head 0.0 --trim-tail 1.0 --group-res --quality-profile balanced
+```
+
+关键参数说明：
+- `--video-dirs`：输入视频目录（一个或多个）
+- `--bgm-path`：BGM 文件或目录路径
+- `--output`：输出路径（目录或单文件；多目录输入时请提供目录）
+- `--gpu`：启用 NVENC（若可用），不可用时自动回退 CPU（日志有提示）
+- `--group-res`：按分辨率分组输出；如分组不满足条件则自动回退到随机模式
+- `--quality-profile`：编码质量档位（visual/balanced/size）
+
+CLI 输出会打印阶段、进度与日志；完成后显示成功文件列表与大小。默认强制使用内置 FFmpeg（若未找到会直接报错），行为与 GUI 一致。
+
+### FFmpeg 使用策略（默认强制内置，开发可兜底）
+
+- 默认：GUI 与 CLI 均首选并仅使用内置 FFmpeg，优先从打包目录或 `vendor/ffmpeg/bin` 解析，将其插入到 PATH 前端。
+- 未找到内置：GUI 显示“不可用”，CLI 报错退出，避免系统 PATH 带来的差异与不稳定。
+- 开发兜底（隐藏参数）：若确需在开发环境临时允许系统 FFmpeg 兜底，可设置环境变量 `FFMPEG_DEV_FALLBACK` 为 `1/true/yes/on`（不区分大小写）。启用后，若内置未找到，将回退到系统 PATH 中的 ffmpeg/ffprobe。
+
+#### CLI（macOS）使用示例
+
+```
+# 可选：开发环境允许系统 ffmpeg 兜底（仅开发）
+export FFMPEG_DEV_FALLBACK=1
+
+python3 -m concat_tool.cli \
+  --video-dirs "/Users/me/Videos1" "/Users/me/Videos2" \
+  --bgm-path "/Users/me/Audios" \
+  --outputs 2 --count 5 --gpu --threads 4 \
+  --width 1080 --height 1920 --fps 25 --fill pad \
+  --trim-head 0.0 --trim-tail 1.0 --group-res --quality-profile balanced
+```
+
+注：macOS 下推荐使用 `python3`；路径包含空格时请使用引号包裹。
+
+#### CLI（Windows）使用示例（含开发兜底可选项）
+
+```
+:: 可选：开发环境允许系统 ffmpeg 兜底（仅开发）
+set FFMPEG_DEV_FALLBACK=1
+
+python -m concat_tool.cli ^
+  --video-dirs "D:\\videos1" "D:\\videos2" ^
+  --bgm-path "D:\\audios" ^
+  --outputs 2 --count 5 --gpu --threads 4 ^
+  --width 1080 --height 1920 --fps 25 --fill pad ^
+  --trim-head 0.0 --trim-tail 1.0 --group-res --quality-profile balanced
+```
+
+#### 发行包包含 FFmpeg 的要求
+
+- Windows：仓库提供 `build_gui_exe.bat`，若存在 `vendor\ffmpeg\bin`，打包时会通过 `--add-data "vendor\ffmpeg\bin;ffmpeg\bin"` 自动内置 FFmpeg。
+- macOS/Linux：使用 PyInstaller 打包时，请确保将 `vendor/ffmpeg/bin` 以数据文件形式打入产物，并在运行时由 `gui/precheck/ffmpeg_paths.py` 解析 `ffmpeg/bin`。
+- 开发环境：如未准备好内置 FFmpeg，可临时设置 `FFMPEG_DEV_FALLBACK=1` 进行系统 PATH 兜底（不建议用于发布版本）。
+
+### 统一启动策略（Bootstrap）
+
+为确保各入口脚本（GUI、CLI、视频分离/替换工具、封面提取等）在相同策略下寻找 FFmpeg/FFprobe，项目提供了统一的引导函数：
+
+示例代码：
+
+```
+from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+
+# 默认行为：优先使用内置 FFmpeg，开发环境允许系统兜底，并将捆绑目录写入 PATH 前端
+bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
+
+# 严格要求存在 FFmpeg/FFprobe（若不存在则抛出错误）
+bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True,
+                     require_ffmpeg=True, require_ffprobe=True)
+
+# 测试或自定义场景：覆盖捆绑目录并插入 PATH 前端（无需真实二进制，仅用于验证 PATH 注入）
+bootstrap_ffmpeg_env(prefer_bundled=False, dev_fallback_env=False, modify_env=True,
+                     override_bundled_dir="/tmp/fake_vendor/ffmpeg/bin")
+```
+
+说明：
+- prefer_bundled=True：优先使用 `vendor/ffmpeg/bin` 或打包产物中的捆绑路径。
+- dev_fallback_env=True：开发环境可通过 `FFMPEG_DEV_FALLBACK=1` 使用系统 FFmpeg 兜底。
+- modify_env=True：将捆绑目录插入到 `PATH` 前端，保证子进程调用一致。
+- require_ffmpeg / require_ffprobe：要求可执行存在，否则抛出 `FileNotFoundError`。
+- override_bundled_dir：覆盖捆绑目录（测试专用），无需真实 ffmpeg 可执行。
+
 ## 📄 许可证
 
 MIT License

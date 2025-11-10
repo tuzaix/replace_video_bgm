@@ -82,3 +82,51 @@ BGM 替换
 - 配置分辨率/帧率/裁剪策略。
 - 启用 GPU（默认）或显式 --no-gpu 。
 - 运行并查看日志中的体积对比与产出文件列表。
+
+模块分层（v3 结构优化）
+
+- settings.py：共享 Settings 配置数据类，供 GUI/CLI/脚本统一使用。
+- workflow.py：纯业务工作流模块，提供 `run_video_concat_workflow(settings, callbacks)`；不依赖 Qt，易测试与复用。
+- cli.py：命令行入口，组装 settings 并连接 callbacks，打印阶段/进度/日志。
+- video_concat.py：底层操作集合（转码、分组、拼接、输出），供工作流调用。
+
+CLI 使用示例（Windows）：
+
+```
+python -m concat_tool.cli \
+  --video-dirs D:\\videos1 D:\\videos2 \
+  --bgm-path D:\\audios \
+  --outputs 2 --count 5 --gpu --threads 4 \
+  --width 1080 --height 1920 --fps 25 --fill pad \
+  --trim-head 0.0 --trim-tail 1.0 --group-res --quality-profile balanced
+```
+
+说明：CLI 默认强制使用内置 FFmpeg（ffmpeg/bin）。若未检测到内置 ffmpeg，将直接报错并退出，以避免系统环境差异造成的不稳定行为。
+
+开发环境兜底（隐藏参数）：若确需在开发环境临时允许系统 FFmpeg 兜底，可设置环境变量 `FFMPEG_DEV_FALLBACK` 为 `1/true/yes/on`（不区分大小写）。启用后，若内置未找到，将回退到系统 PATH 中的 ffmpeg/ffprobe。
+
+CLI 使用示例（macOS）：
+
+```
+# 可选：开发环境允许系统 ffmpeg 兜底（仅开发）
+export FFMPEG_DEV_FALLBACK=1
+
+python3 -m concat_tool.cli \
+  --video-dirs "/Users/me/Videos1" "/Users/me/Videos2" \
+  --bgm-path "/Users/me/Audios" \
+  --outputs 2 --count 5 --gpu --threads 4 \
+  --width 1080 --height 1920 --fps 25 --fill pad \
+  --trim-head 0.0 --trim-tail 1.0 --group-res --quality-profile balanced
+```
+
+统一启动策略（Bootstrap）
+
+- 本模块及 CLI 已统一集成 `utils.bootstrap_ffmpeg.bootstrap_ffmpeg_env`，优先使用内置 FFmpeg，并在开发环境允许系统兜底（通过 `FFMPEG_DEV_FALLBACK`）。
+- 若需要在自定义脚本中复用该策略，请参考项目根目录 `README_v3.md` 的“统一启动策略（Bootstrap）”章节，或直接使用如下示例：
+
+```
+from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+
+# 在脚本一开始调用，确保后续 subprocess.run('ffmpeg') 能找到正确版本
+bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
+```

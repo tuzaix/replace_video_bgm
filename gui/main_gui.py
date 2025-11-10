@@ -22,6 +22,7 @@ from typing import List, Optional
 from PySide6 import QtCore, QtWidgets, QtGui
 import subprocess
 import shutil
+import os
 
 try:
     # PySide6 提供的对象有效性检测工具
@@ -38,77 +39,19 @@ if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(PROJECT_ROOT))
 
 from concat_tool import video_concat as vc  # type: ignore
+from concat_tool.workflow import run_video_concat_workflow, WorkflowCallbacks  # type: ignore
+from concat_tool.settings import Settings  # type: ignore
 from gui.precheck import preflight
+from gui.precheck.ffmpeg_paths import (
+    resolve_ffmpeg_paths,
+    get_ffmpeg_versions,
+    detect_nvenc,
+)
+from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 # 预检逻辑已抽象到 gui.precheck.preflight 模块，main_gui 保留调用点即可。
 
 @dataclass
-class Settings:
-    """Configuration settings for video concatenation workflow.
-
-    Attributes
-    ----------
-    video_dirs : List[str]
-        List of directory paths containing input videos.
-    bgm_path : str
-        Path to a BGM file or a directory containing audio files.
-    output : Optional[str]
-        Output path (file or directory). When multiple input directories are used, this must be a directory.
-    count : int
-        Number of random videos per output.
-    outputs : int
-        Number of output videos to generate.
-    gpu : bool
-        Whether to enable GPU (NVENC) acceleration if available.
-    threads : int
-        Number of worker threads to use.
-    width : int
-        Target output width in pixels.
-    height : int
-        Target output height in pixels.
-    fps : int
-        Target output frame rate.
-    fill : str
-        Fill mode: 'pad' or 'crop'.
-    trim_head : float
-        Seconds to trim from the start of each clip during TS conversion.
-    trim_tail : float
-        Seconds to trim from the end of each clip during TS conversion.
-    clear_mismatched_cache : bool
-        If true, clear TS cache files that do not match the current trim settings.
-    group_res : bool
-        If true, use grouped-by-resolution mode to produce outputs per resolution group.
-    quality_profile : str
-        Encoding quality profile: 'visual', 'balanced', or 'size'.
-    nvenc_cq : Optional[int]
-        Override NVENC CQ value.
-    x265_crf : Optional[int]
-        Override x265 CRF value.
-    preset_gpu : Optional[str]
-        Override NVENC preset: 'p4', 'p5', 'p6', or 'p7'.
-    preset_cpu : Optional[str]
-        Override x265 preset: 'ultrafast', 'medium', 'slow', 'slower', or 'veryslow'.
-    """
-
-    video_dirs: List[str]
-    bgm_path: str
-    output: Optional[str]
-    count: int = 5
-    outputs: int = 1
-    gpu: bool = True
-    threads: int = 4
-    width: int = 1080
-    height: int = 1920
-    fps: int = 25
-    fill: str = "pad"
-    trim_head: float = 0.0
-    trim_tail: float = 1.0
-    clear_mismatched_cache: bool = False
-    group_res: bool = True
-    quality_profile: str = "balanced"
-    nvenc_cq: Optional[int] = None
-    x265_crf: Optional[int] = None
-    preset_gpu: Optional[str] = None
-    preset_cpu: Optional[str] = None
+# Settings dataclass moved to concat_tool.settings for reuse by GUI/CLI.
 
 
 class VideoConcatWorker(QtCore.QObject):
@@ -184,14 +127,8 @@ class VideoConcatWorker(QtCore.QObject):
     def run(self) -> None:
         """Run the workflow on the background thread.
 
-        This method performs:
-        1) Global encoding config injection
-        2) Validation and environment checks
-        3) Scan videos
-        4) Optional TS cache cleanup
-        5) Preconvert to TS with per-item progress
-        6) Execute grouped or random outputs
-        7) Emit final results
+        Delegates business logic to concat_tool.workflow.run_video_concat_workflow,
+        keeping GUI concerns (signals and stream redirect) isolated.
         """
         try:
             # Redirect prints from vc module to GUI log
@@ -225,243 +162,19 @@ class VideoConcatWorker(QtCore.QObject):
             _orig_out, _orig_err = _sys.stdout, _sys.stderr
             _sys.stdout = _StreamRedirect(self._emit)
             _sys.stderr = _StreamRedirect(self._emit)
-            # Inject global encoding config for mapping used by helper functions
-            vc.ENCODE_PROFILE = self.settings.quality_profile
-            vc.ENCODE_NVENC_CQ = self.settings.nvenc_cq
-            vc.ENCODE_X265_CRF = self.settings.x265_crf
-            vc.ENCODE_PRESET_GPU = self.settings.preset_gpu
-            vc.ENCODE_PRESET_CPU = self.settings.preset_cpu
+            # Bridge callbacks from workflow to GUI signals
+            callbacks = WorkflowCallbacks(
+                on_log=self._emit,
+                on_phase=self.phase.emit,
+                on_progress=self.progress.emit,
+                on_error=self.error.emit,
+            )
 
-            # Validate settings
-            err = self._validate()
-            if err:
-                self.error.emit(err)
-                return
+            # Execute business workflow
+            success_count, fail_count, success_outputs = run_video_concat_workflow(self.settings, callbacks)
 
-            # Detect ffmpeg
-            import shutil
-
-            ffmpeg_bin = shutil.which("ffmpeg")
-            if not ffmpeg_bin:
-                self.error.emit("未找到 ffmpeg，请确保已安装并配置到 PATH")
-                return
-
-            # Detect NVENC availability
-            nvenc_ok = False
-            try:
-                nvenc_ok = self.settings.gpu and vc.is_nvenc_available()
-            except Exception:
-                nvenc_ok = False
-            if self.settings.gpu and not nvenc_ok:
-                self._emit("⚠️ 未检测到 hevc_nvenc，将使用 CPU (libx265) 进行编码")
-
-            # Prepare output defaults
-            video_dirs = [Path(p) for p in self.settings.video_dirs]
-            if len(video_dirs) == 1:
-                default_output_dir = video_dirs[0].parent / f"{video_dirs[0].name}_longvideo"
-            else:
-                base_parent = video_dirs[0].parent
-                default_output_dir = base_parent / f"{video_dirs[0].name}_longvideo_combined"
-
-            output_spec = Path(self.settings.output) if self.settings.output else None
-
-            # Phase: scan videos
-            self.phase.emit("scan")
-            self._emit("📁 扫描视频目录…")
-            all_videos: List[Path] = []
-            for d in video_dirs:
-                self._emit(f"  - {d}")
-                all_videos.extend(vc.find_videos(d))
-            if not all_videos:
-                self.error.emit("在输入目录中未找到任何支持的视频文件")
-                return
-            self._emit(f"📹 合计找到 {len(all_videos)} 个视频文件")
-
-            # Optional: clear mismatched TS cache
-            if self.settings.clear_mismatched_cache:
-                try:
-                    removed = vc.clear_mismatched_ts_cache(video_dirs, self.settings.trim_head, self.settings.trim_tail)
-                    self._emit(f"🧹 已清理与当前裁剪参数不匹配的 TS 缓存: {removed} 个")
-                except Exception as e:
-                    self._emit(f"⚠️ 清理缓存失败: {e}")
-
-            # Phase: preconvert TS（占总进度的 30%）
-            # 进度条采用固定刻度 1000：TS 阶段 0..300（30%），混合拼接阶段 300..1000（70%）。
-            self.phase.emit("预处理视频（mp4转换成ts)")
-            self._emit("🚧 正在预转换视频为 TS 以优化拼接…")
-            total = len(all_videos)
-            done = 0
-            # 初始化进度条为固定总量 1000
-            self.progress.emit(0, 1000)
-
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            try:
-                with ThreadPoolExecutor(max_workers=max(1, self.settings.threads)) as executor:
-                    futures = {}
-                    for v in all_videos:
-                        out_ts = vc.get_ts_output_path_with_trim(v, video_dirs, self.settings.trim_head, self.settings.trim_tail)
-                        fut = executor.submit(
-                            vc.convert_video_to_ts,
-                            v,
-                            out_ts,
-                            trim_head_seconds=self.settings.trim_head,
-                            trim_tail_seconds=self.settings.trim_tail,
-                            use_gpu=self.settings.gpu,
-                        )
-                        futures[fut] = (v, out_ts)
-                    for fut in as_completed(futures):
-                        v, out_ts = futures[fut]
-                        try:
-                            ok = fut.result()
-                            done += 1
-                            # TS 阶段比例进度更新（无论成功或失败都记入已处理项，避免进度卡住）
-                            ts_progress = int(done * 300 / max(1, total))
-                            self.progress.emit(ts_progress, 1000)
-                            if not ok:
-                                self._emit(f"❌ TS转换失败: {v.name}")
-                        except Exception as e:
-                            done += 1
-                            # TS 阶段比例进度更新
-                            ts_progress = int(done * 300 / max(1, total))
-                            self.progress.emit(ts_progress, 1000)
-                            self._emit(f"❌ TS转换任务异常: {v.name} -> {e}")
-            except KeyboardInterrupt:
-                self.error.emit("用户中断，停止 TS 预转换…")
-                return
-
-            self._emit(f"📦 TS预转换完成：✅ {done}/{total}（包含失败项统计已在日志中显示）")
-
-            # Create temp dir
-            temp_dir = vc.create_temp_dir(video_dirs)
-
-            # Phase: execution (grouped or random)
-            self.phase.emit("长视频混合拼接")
-            success_outputs: List[str] = []
-            fail_count = 0
-
-            if self.settings.group_res:
-                # Grouped mode
-                self._emit("📐 开启分辨率分组模式：将按分辨率分别拼接输出")
-                groups = vc.group_videos_by_resolution(all_videos)
-                qualified_groups = {k: v for k, v in groups.items() if len(v) > 20}
-                if not qualified_groups:
-                    self._emit("❌ 没有分辨率分组达到 >20 个视频，自动回退到随机模式")
-                else:
-                    alloc = vc.allocate_outputs_by_group_size(qualified_groups, self.settings.outputs)
-                    total_tasks = sum(n for _, n in alloc)
-                    # 进入混合拼接阶段，将进度条切换到第二阶段的区间，并从 30% 开始累计
-                    # 先刷新到 30%
-                    self.progress.emit(300, 1000)
-                    mix_done = 0
-                    self._emit("📦 分配结果（组分辨率 -> 输出数量）：")
-                    for (w, h), n in alloc:
-                        self._emit(f"  - {w}x{h} -> {n}")
-                    max_workers = min(self.settings.threads, max(1, total_tasks))
-
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = {}
-                        for (key, count_out) in alloc:
-                            vids = qualified_groups[key]
-                            for i in range(1, count_out + 1):
-                                task_args = (
-                                    key,
-                                    vids,
-                                    i,
-                                    Path(self.settings.bgm_path),
-                                    temp_dir,
-                                    output_spec,
-                                    default_output_dir,
-                                    self.settings.count,
-                                    self.settings.gpu,
-                                    self.settings.fps,
-                                    self.settings.fill,
-                                    self.settings.trim_head,
-                                    self.settings.trim_tail,
-                                    video_dirs,
-                                )
-                                fut = executor.submit(vc.process_group_single_output, task_args)
-                                futures[fut] = key
-                        for fut in as_completed(futures):
-                            key = futures[fut]
-                            try:
-                                ok, msg = fut.result()
-                                if ok:
-                                    success_outputs.append(msg)
-                                    self._emit(f"✅ [组 {key[0]}x{key[1]}] 完成: {msg}")
-                                else:
-                                    fail_count += 1
-                                    self._emit(f"❌ [组 {key[0]}x{key[1]}] 失败: {msg}")
-                                # 第二阶段比例进度：30% + (完成/总数)*70%
-                                mix_done += 1
-                                mix_progress = 300 + int(mix_done * 700 / max(1, total_tasks))
-                                self.progress.emit(mix_progress, 1000)
-                            except Exception as e:
-                                fail_count += 1
-                                self._emit(f"❌ [组 {key[0]}x{key[1]}] 异常: {e}")
-                                mix_done += 1
-                                mix_progress = 300 + int(mix_done * 700 / max(1, total_tasks))
-                                self.progress.emit(mix_progress, 1000)
-
-            if not self.settings.group_res or not success_outputs:
-                # Random mode
-                max_workers = max(1, min(self.settings.threads, self.settings.outputs))
-                self._emit(
-                    f"🚀 启用并发处理，使用 {max_workers} 个线程" if max_workers > 1 else "🔄 使用线程池顺序处理（workers=1）"
-                )
-                tasks = []
-                total_tasks = self.settings.outputs
-                # 切换到混合拼接阶段，从 30% 开始
-                self.progress.emit(300, 1000)
-                mix_done = 0
-                for idx in range(1, self.settings.outputs + 1):
-                    task_args = (
-                        idx,
-                        all_videos,
-                        Path(self.settings.bgm_path),
-                        temp_dir,
-                        output_spec,
-                        default_output_dir,
-                        self.settings.count,
-                        self.settings.gpu,
-                        self.settings.outputs,
-                        self.settings.width,
-                        self.settings.height,
-                        self.settings.fps,
-                        self.settings.fill,
-                        self.settings.trim_head,
-                        self.settings.trim_tail,
-                        video_dirs,
-                    )
-                    tasks.append(task_args)
-
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_idx = {executor.submit(vc.process_single_output, task): task[0] for task in tasks}
-                    for future in as_completed(future_to_idx):
-                        idx = future_to_idx[future]
-                        try:
-                            success, result_idx, message = future.result()
-                            if success:
-                                success_outputs.append(message)
-                                self._emit(f"✅ 任务 {result_idx} 完成")
-                            else:
-                                fail_count += 1
-                                self._emit(f"❌ 任务 {result_idx} 失败: {message}")
-                            mix_done += 1
-                            mix_progress = 300 + int(mix_done * 700 / max(1, total_tasks))
-                            self.progress.emit(mix_progress, 1000)
-                        except Exception as e:
-                            fail_count += 1
-                            self._emit(f"❌ 任务 {idx} 异常: {e}")
-                            mix_done += 1
-                            mix_progress = 300 + int(mix_done * 700 / max(1, total_tasks))
-                            self.progress.emit(mix_progress, 1000)
-
-            # Emit finished
-            self.finished.emit(len(success_outputs), fail_count)
-            # Emit results list for GUI consumption
+            # Emit finished and results back to GUI
+            self.finished.emit(success_count, fail_count)
             try:
                 self.results.emit(success_outputs)
             except Exception:
@@ -934,10 +647,7 @@ class MainWindow(QtWidgets.QMainWindow):
         status_box.addWidget(self.ffmpeg_status)
         status_box.addWidget(self.nvenc_status)
         self.ffmpeg_info_btn = QtWidgets.QPushButton("显示 FFmpeg 版本信息")
-        self.use_bundled_ffmpeg_chk = QtWidgets.QCheckBox("优先使用内置 FFmpeg")
-        self.use_bundled_ffmpeg_chk.setToolTip("勾选后优先使用打包的 ffmpeg/ffprobe（ffmpeg\\bin），未勾选时优先使用系统 PATH 中的 ffmpeg")
         status_box.addWidget(self.ffmpeg_info_btn)
-        status_box.addWidget(self.use_bundled_ffmpeg_chk)
         status_vbox.addLayout(status_box)
         # 概览标签保留但不显示，用于兼容编码参数概览文本更新
         self.enc_summary_label = QtWidgets.QLabel("编码参数概览：")
@@ -1106,7 +816,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_selected_btn.clicked.connect(self._on_open_selected_files)
         self.copy_selected_path_btn.clicked.connect(self._copy_selected_paths)
         self.ffmpeg_info_btn.clicked.connect(self._on_show_ffmpeg_info)
-        self.use_bundled_ffmpeg_chk.toggled.connect(self._on_toggle_ffmpeg_priority)
 
         # Auto-update encoding summary on relevant control changes
         for w in [
@@ -1419,59 +1128,30 @@ class MainWindow(QtWidgets.QMainWindow):
         检测到内置 ffmpeg 后，会将其 bin 目录插入到 PATH 前端，确保所有子进程只调用内置版本。
         若未发现内置 ffmpeg，则标记为不可用并提示，而不是使用系统版本。
         """
-        import shutil, os
+        # 统一启动策略：使用封装的引导函数，优先内置并允许开发环境系统兜底，同时修改 PATH。
+        try:
+            bootstrap_ffmpeg_env(
+                prefer_bundled=True,
+                dev_fallback_env=True,
+                modify_env=True,
+                logger=lambda m: self._append_log(f"[FFmpeg探测] {m}") if hasattr(self, "_append_log") else None,
+            )
+        except Exception:
+            # 初始化失败时仍继续，用于更新标签为不可用
+            pass
 
-        # 统一要求仅使用内置 ffmpeg：强制首选并忽略外部系统版本
-        settings = QtCore.QSettings("ReplaceVideoBGM", "VideoConcatGUI")
-        prefer_bundled = True
-        # 如果界面上存在“优先使用内置 FFmpeg”的复选框，强制勾选以反映策略
-        if hasattr(self, "use_bundled_ffmpeg_chk"):
-            block = self.use_bundled_ffmpeg_chk.blockSignals(True)
-            self.use_bundled_ffmpeg_chk.setChecked(True)
-            self.use_bundled_ffmpeg_chk.blockSignals(block)
-
-        def _bundled_ffmpeg_dir() -> Optional[Path]:
-            base = getattr(sys, "_MEIPASS", None)
-            if base:
-                cand = Path(base) / "ffmpeg" / "bin"
-            else:
-                cand = PROJECT_ROOT / "vendor" / "ffmpeg" / "bin"
-            return cand if cand.exists() else None
-
-        def _ensure_path_front(dir_path: Path) -> None:
-            cur = os.environ.get("PATH", "")
-            parts = cur.split(os.pathsep) if cur else []
-            d = str(dir_path)
-            parts = [p for p in parts if os.path.abspath(p) != os.path.abspath(d)]
-            os.environ["PATH"] = d + os.pathsep + os.pathsep.join(parts)
-
-        ffmpeg_bin = None
-        src = "不可用"
-        bdir = _bundled_ffmpeg_dir()
-
-        # 仅允许内置 ffmpeg；若未找到则显示不可用，不再回退系统版本
-        if bdir:
-            _ensure_path_front(bdir)
-            ffmpeg_bin = shutil.which("ffmpeg")
-            # 保险起见，确认解析到的路径确实来自内置目录
-            try:
-                if ffmpeg_bin and os.path.abspath(os.path.dirname(ffmpeg_bin)) == os.path.abspath(str(bdir)):
-                    src = "内置"
-                else:
-                    # PATH 被修改但解析到的并非内置目录，则视为不可用
-                    ffmpeg_bin = None
-                    src = "不可用"
-            except Exception:
-                # 任何异常都视为不可用
-                ffmpeg_bin = None
-                src = "不可用"
-        else:
-            ffmpeg_bin = None
-            src = "不可用"
+        # 再次解析以获取来源标签（不修改 PATH，仅用于显示）
+        res = resolve_ffmpeg_paths(
+            prefer_bundled=True,
+            allow_system_fallback=True,
+            modify_env=False,
+            logger=lambda m: self._append_log(f"[FFmpeg探测] {m}") if hasattr(self, "_append_log") else None,
+        )
 
         # Update ffmpeg badge
-        if ffmpeg_bin:
-            self.ffmpeg_status.setText(f"ffmpeg: 可用 ({src})")
+        if res.ffmpeg_path:
+            src_text = "内置" if res.source.startswith("bundled") else res.source
+            self.ffmpeg_status.setText(f"ffmpeg: 可用 ({src_text})")
         else:
             self.ffmpeg_status.setText("ffmpeg: 不可用")
 
@@ -1482,17 +1162,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self.nvenc_status.setText("NVENC: 检测失败")
 
-    def _on_toggle_ffmpeg_priority(self, checked: bool) -> None:
-        """Toggle preference for using bundled FFmpeg first.
-
-        保存到 QSettings 并重新进行环境检测，以便立即生效。
-        """
-        settings = QtCore.QSettings("ReplaceVideoBGM", "VideoConcatGUI")
-        settings.setValue("prefer_bundled_ffmpeg", bool(checked))
-        try:
-            self._detect_env()
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "环境检测失败", f"切换 FFmpeg 选择策略时发生错误: {e}")
+    # 取消用户选择项：默认始终使用内置 FFmpeg，无需切换优先级
 
     def _get_profile_code(self) -> str:
         """Get internal profile code based on current selection.
@@ -2048,24 +1718,23 @@ class MainWindow(QtWidgets.QMainWindow):
         with the resolved executable path. Helpful to verify whether the
         app is using the bundled FFmpeg or the system one.
         """
-        import shutil
-        import subprocess
-
-        ffmpeg_path = shutil.which("ffmpeg")
+        # 使用封装的路径解析，不修改 PATH，仅用于信息展示。
+        res = resolve_ffmpeg_paths(
+            prefer_bundled=True,
+            allow_system_fallback=True,
+            modify_env=False,
+        )
+        ffmpeg_path = res.ffmpeg_path
+        ffprobe_path = res.ffprobe_path
         if not ffmpeg_path:
             QtWidgets.QMessageBox.critical(self, "错误", "未找到 ffmpeg，可在设置中检查环境或打包内置 FFmpeg")
             return
 
-        # Detect type (bundled vs system)
-        ffmpeg_type = "系统"
-        try:
-            base = getattr(sys, "_MEIPASS", None)
-            if base and str(Path(base) / "ffmpeg" / "bin") in ffmpeg_path:
-                ffmpeg_type = "内置(PyInstaller)"
-            elif str(PROJECT_ROOT / "vendor" / "ffmpeg" / "bin") in ffmpeg_path:
-                ffmpeg_type = "内置(vendor)"
-        except Exception:
-            pass
+        ffmpeg_type = (
+            "内置(PyInstaller)" if res.source == "bundled_meipass" else (
+                "内置(vendor)" if res.source == "bundled_vendor" else "系统"
+            )
+        )
 
     def _reveal_in_file_manager(self, paths: List[Path]) -> None:
         """在系统文件管理器中显示并选中指定文件。
@@ -2113,28 +1782,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
-        # Collect version info
-        def run_ver(cmd: list[str]) -> str:
-            try:
-                # 在 Windows 下静默执行，避免弹出 openconsole.exe 窗口
-                kwargs = {}
-                try:
-                    import os as _os
-                    if _os.name == 'nt':
-                        si = subprocess.STARTUPINFO()
-                        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                        kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-                except Exception:
-                    kwargs = {}
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=8, **kwargs)
-                out = res.stdout.strip() or res.stderr.strip()
-                return out or "<无输出>"
-            except Exception as e:
-                return f"<执行失败: {e}>"
-
-        ffmpeg_ver = run_ver([ffmpeg_path, "-version"])
-        ffprobe_path = shutil.which("ffprobe") or "(未找到 ffprobe)"
-        ffprobe_ver = run_ver([ffprobe_path, "-version"]) if "ffprobe" in ffprobe_path else "(未找到 ffprobe)"
+        # Collect version info via util
+        ffmpeg_ver, ffprobe_ver = get_ffmpeg_versions(ffmpeg_path, ffprobe_path, timeout=8)
 
         # Build and show dialog
         dlg = QtWidgets.QDialog(self)
@@ -2170,11 +1819,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def check_nvenc() -> None:
             """Run a quick NVENC availability check using ffmpeg output."""
-            encoders = run_ver([ffmpeg_path, "-hide_banner", "-encoders"]) if ffmpeg_path else ""
-            hwaccels = run_ver([ffmpeg_path, "-hide_banner", "-hwaccels"]) if ffmpeg_path else ""
+            nvenc_available, encoders, hwaccels = detect_nvenc(ffmpeg_path, timeout=8)
             has_h264 = "h264_nvenc" in encoders
             has_hevc = "hevc_nvenc" in encoders
-            nvenc_available = has_h264 or has_hevc
             summary = (
                 f"NVENC: {'可用' if nvenc_available else '不可用'}\n" +
                 f"检测到编码器: {', '.join([x for x in ['h264_nvenc' if has_h264 else '', 'hevc_nvenc' if has_hevc else ''] if x]) or '无'}\n" +

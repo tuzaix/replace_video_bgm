@@ -15,6 +15,15 @@ from typing import List, Optional
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# 统一启动策略：优先使用内置 FFmpeg，并在开发环境允许系统兜底（通过 FFMPEG_DEV_FALLBACK）。
+try:
+    from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+    # 底层工具模块初始化环境即可，不强制要求存在，由调用方决定错误处理。
+    bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
+except Exception:
+    # 静默忽略初始化失败，维持原行为
+    pass
+
 
 def _popen_silent_kwargs() -> dict:
     """Return kwargs to suppress console windows for subprocess on Windows.

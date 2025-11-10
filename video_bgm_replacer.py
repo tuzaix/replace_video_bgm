@@ -1426,3 +1426,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+# 统一启动策略：优先使用内置 FFmpeg（可通过环境变量在开发环境允许系统兜底），并在需要时写入 PATH。
+try:
+    from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+    bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
+except Exception:
+    # 静默忽略初始化失败，保持原有行为
+    pass
