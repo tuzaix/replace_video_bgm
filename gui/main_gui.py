@@ -14,7 +14,7 @@ Author: Your Team
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, asdict
+# from dataclasses import dataclass, asdict  # no longer used in this module
 import re
 from pathlib import Path
 from typing import List, Optional
@@ -39,7 +39,7 @@ if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(PROJECT_ROOT))
 
 from concat_tool import video_concat as vc  # type: ignore
-from concat_tool.workflow import run_video_concat_workflow, WorkflowCallbacks  # type: ignore
+from gui.workers.video_concat_worker import VideoConcatWorker
 from concat_tool.settings import Settings  # type: ignore
 from gui.precheck import preflight
 from gui.precheck.ffmpeg_paths import (
@@ -48,261 +48,16 @@ from gui.precheck.ffmpeg_paths import (
     detect_nvenc,
 )
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+from gui.tabs.cover_generator_tab import CoverGeneratorTab
+from gui.tabs.video_concat_tab import create_concat_tab, VideoConcatTab
+from gui.tabs.bgm_merge_tab import BgmMergeTab
+from gui.utils.table_helpers import ensure_table_headers, resolve_display_name, set_table_row_colors
 # 预检逻辑已抽象到 gui.precheck.preflight 模块，main_gui 保留调用点即可。
 
-@dataclass
-# Settings dataclass moved to concat_tool.settings for reuse by GUI/CLI.
+# Settings dataclass已迁移至 concat_tool.settings 供 GUI/CLI 复用。
+# NOTE: VideoConcatWorker 已迁移至 gui.workers.video_concat_worker 模块，
+# 以实现 GUI 与业务逻辑分离。此处不再定义该类。
 
-
-class VideoConcatWorker(QtCore.QObject):
-    """Background worker to run the video concatenation workflow.
-
-    This worker emits signals to update the GUI without blocking.
-
-    Signals
-    -------
-    log(str)
-        Emitted when there is a new log message.
-    phase(str)
-        Emitted when the workflow phase changes (e.g., 'scan', 'preconvert').
-    progress(int, int)
-        Emitted to indicate progress (completed, total) for the current phase.
-    finished(int, int)
-        Emitted at the end with (success_count, fail_count).
-    error(str)
-        Emitted when a non-recoverable error occurs.
-    """
-
-    log = QtCore.Signal(str)
-    phase = QtCore.Signal(str)
-    progress = QtCore.Signal(int, int)
-    finished = QtCore.Signal(int, int)
-    results = QtCore.Signal(list)
-    error = QtCore.Signal(str)
-
-    def __init__(self, settings: Settings):
-        super().__init__()
-        self.settings = settings
-
-    def _emit(self, msg: str) -> None:
-        """Emit a log message safely.
-
-        Parameters
-        ----------
-        msg : str
-            The message to emit to the GUI log view.
-        """
-        self.log.emit(msg)
-
-    def _validate(self) -> Optional[str]:
-        """Validate the settings.
-
-        Returns
-        -------
-        Optional[str]
-            Error message if validation fails; otherwise None.
-        """
-        if not self.settings.video_dirs:
-            return "请选择至少一个视频目录"
-        dirs = [Path(p) for p in self.settings.video_dirs]
-        for d in dirs:
-            if not d.exists() or not d.is_dir():
-                return f"视频目录不存在或不是目录: {d}"
-        bgm = Path(self.settings.bgm_path)
-        if not bgm.exists():
-            return f"BGM路径不存在: {bgm}"
-        if self.settings.threads < 1:
-            return "线程数必须大于0"
-        if self.settings.width <= 0 or self.settings.height <= 0:
-            return "width/height 必须为正整数"
-        if self.settings.fps <= 0:
-            return "fps 必须为正整数"
-        if self.settings.output:
-            out_spec = Path(self.settings.output)
-            if out_spec.suffix.lower() == ".mp4" and len(dirs) > 1:
-                return "多目录输入时请提供输出目录（不支持单文件路径）"
-        return None
-
-    @QtCore.Slot()
-    def run(self) -> None:
-        """Run the workflow on the background thread.
-
-        Delegates business logic to concat_tool.workflow.run_video_concat_workflow,
-        keeping GUI concerns (signals and stream redirect) isolated.
-        """
-        try:
-            # Redirect prints from vc module to GUI log
-            import sys as _sys
-
-            class _StreamRedirect:
-                """Redirect sys.stdout/sys.stderr to GUI log.
-
-                Parameters
-                ----------
-                write_fn : callable
-                    Function to call with decoded string chunks.
-                """
-
-                def __init__(self, write_fn):
-                    self.write_fn = write_fn
-
-                def write(self, s):  # type: ignore[override]
-                    try:
-                        s = str(s)
-                        s = s.replace("\r\n", "\n")
-                        for line in s.split("\n"):
-                            if line:
-                                self.write_fn(line)
-                    except Exception:
-                        pass
-
-                def flush(self):
-                    return
-
-            _orig_out, _orig_err = _sys.stdout, _sys.stderr
-            _sys.stdout = _StreamRedirect(self._emit)
-            _sys.stderr = _StreamRedirect(self._emit)
-            # Bridge callbacks from workflow to GUI signals
-            callbacks = WorkflowCallbacks(
-                on_log=self._emit,
-                on_phase=self.phase.emit,
-                on_progress=self.progress.emit,
-                on_error=self.error.emit,
-            )
-
-            # Execute business workflow
-            success_count, fail_count, success_outputs = run_video_concat_workflow(self.settings, callbacks)
-
-            # Emit finished and results back to GUI
-            self.finished.emit(success_count, fail_count)
-            try:
-                self.results.emit(success_outputs)
-            except Exception:
-                pass
-            if success_outputs:
-                self._emit("\n🎉 成功生成的文件:")
-                for p in success_outputs:
-                    try:
-                        size_mb = Path(p).stat().st_size / (1024 * 1024)
-                        self._emit(f"  - {p} ({size_mb:.1f} MB)")
-                    except Exception:
-                        self._emit(f"  - {p}")
-
-        except Exception as e:
-            self.error.emit(str(e))
-        finally:
-            # Restore stdout/stderr
-            try:
-                import sys as _sys2
-                _sys2.stdout = _orig_out
-                _sys2.stderr = _orig_err
-            except Exception:
-                pass
-
-
-class SpinnerIndicator(QtWidgets.QWidget):
-    """
-    简易菊花转圈指示器（无第三方资源），用于加载状态提示。
-
-    通过 QTimer 周期性刷新角度，使用 QPainter 绘制 12 段线条，
-    根据当前角度设置透明度生成旋转效果。
-    """
-    def __init__(self, parent: Optional[QtWidgets.QWidget] = None, size: int = 64, color: QtGui.QColor | None = None) -> None:
-        super().__init__(parent)
-        self._size = max(32, size)
-        self._angle = 0
-        self._timer = QtCore.QTimer(self)
-        self._timer.setInterval(80)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start()
-        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
-        self.setFixedSize(self._size, self._size)
-        self._color = color or QtGui.QColor("#3b82f6")
-
-    def _tick(self) -> None:
-        """推进角度并触发重绘。"""
-        self._angle = (self._angle + 1) % 12
-        self.update()
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # type: ignore[override]
-        """绘制 12 段旋转线条形成菊花效果。
-
-        注意：确保在 finally 中调用 painter.end()，避免 QBackingStore 错误。
-        """
-        painter = QtGui.QPainter(self)
-        try:
-            painter.setRenderHint(QtGui.QPainter.Antialiasing)
-            cx, cy = self.width() / 2.0, self.height() / 2.0
-            radius = self._size / 2.0 - 6.0
-            line_len = float(max(6, int(self._size * 0.20)))
-            line_w = max(2, int(self._size * 0.06))
-            # 使用更健壮的设置方式，避免枚举差异带来的异常
-            for i in range(12):
-                # 透明度随相对角度递减
-                rel = (i - self._angle) % 12
-                alpha = int(60 + (195 * (1 - rel / 12.0)))  # 60..255
-                color = QtGui.QColor(self._color)
-                color.setAlpha(alpha)
-                pen = QtGui.QPen(color)
-                pen.setWidth(line_w)
-                try:
-                    pen.setCapStyle(QtCore.Qt.RoundCap)
-                except Exception:
-                    pass
-                painter.setPen(pen)
-                # 使用 Python 内置 math 库计算坐标，避免 QtCore.qCos/qSin 不可用
-                from math import cos, sin, pi
-                theta = (i / 12.0) * 2.0 * pi
-                sx = cx + (radius - line_len) * cos(theta)
-                sy = cy + (radius - line_len) * sin(theta)
-                ex = cx + radius * cos(theta)
-                ey = cy + radius * sin(theta)
-                painter.drawLine(QtCore.QPointF(sx, sy), QtCore.QPointF(ex, ey))
-        finally:
-            # 显式结束绘制，避免活动 painter 导致 QBackingStore 报错
-            try:
-                painter.end()
-            except Exception:
-                pass
-
-
-class BusyOverlay(QtWidgets.QWidget):
-    """
-    半透明蒙层，居中显示菊花转圈与提示文本，用于遮罩“输出结果”区域。
-
-    行为：
-    - 显示时阻止底部点击（通过禁用列表实现）；
-    - 随父组件大小变化自动调整几何；
-    - 无滚动条、无边框，仅视觉遮罩。
-    """
-    def __init__(self, parent: QtWidgets.QWidget) -> None:
-        super().__init__(parent)
-        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        self.setStyleSheet("background-color: rgba(0,0,0,96);")
-        self.setVisible(False)
-        # 居中布局
-        vbox = QtWidgets.QVBoxLayout(self)
-        vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.setSpacing(10)
-        vbox.setAlignment(QtCore.Qt.AlignCenter)
-        self.spinner = SpinnerIndicator(self, size=64)
-        self.label = QtWidgets.QLabel("处理中…")
-        self.label.setStyleSheet("color: white; font-size: 14px; font-weight: 600;")
-        vbox.addWidget(self.spinner, 0, QtCore.Qt.AlignCenter)
-        vbox.addWidget(self.label, 0, QtCore.Qt.AlignCenter)
-        # 拦截父组件 resize 以随动
-        parent.installEventFilter(self)
-
-    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
-        if watched is self.parent() and event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Move):
-            try:
-                # 填满父组件内容区域
-                parent_widget = self.parentWidget()
-                if parent_widget is not None:
-                    self.setGeometry(parent_widget.rect())
-            except Exception:
-                pass
-        return super().eventFilter(watched, event)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -329,55 +84,580 @@ class MainWindow(QtWidgets.QMainWindow):
         # 设定一个较大的最小尺寸，避免窗口过小导致左侧被压缩
         self.setMinimumSize(1280, 840)
 
-        # Widgets
-        central = QtWidgets.QWidget(self)
-        self.setCentralWidget(central)
-        # 顶层采用水平布局用于左/右分布
-        root_layout = QtWidgets.QHBoxLayout(central)
+        # Widgets（改为基于 QTabWidget 的架构）
+        self.tabs = QtWidgets.QTabWidget(self)
+        self.setCentralWidget(self.tabs)
+        # 将现有的“视频混剪”面板放入一个独立的标签页（支持类封装）
+        self.concat_tab = VideoConcatTab(self)
+        root_layout = self.concat_tab.get_root_layout()
+        self.register_feature_tab("视频混剪", self.concat_tab)
+        # 构建“视频混剪”标签页的左/右面板与布局（此前代码误置于 _open_readme_v3 内导致未初始化）
+        try:
+            self._init_concat_tab_ui()
+        except Exception:
+            # 若初始化失败，不影响其他标签页；用户将看到空白页
+            pass
+        # 注册已有的“封面生成”标签页骨架（可选扩展）
+        try:
+            cover_tab = CoverGeneratorTab(self)
+            self.register_feature_tab("封面生成", cover_tab)
+        except Exception:
+            # 若加载失败，不影响主功能页
+            pass
 
-        # Video directories (multi-select via list + add/remove)
-        self.video_dirs_list = QtWidgets.QListWidget()
-        btn_add_dir = QtWidgets.QPushButton("添加目录")
-        btn_rm_dir = QtWidgets.QPushButton("移除选中")
-        dir_btns = QtWidgets.QHBoxLayout()
-        dir_btns.addWidget(btn_add_dir)
-        dir_btns.addWidget(btn_rm_dir)
-        dir_container = QtWidgets.QVBoxLayout()
-        dir_container.addWidget(self.video_dirs_list)
-        dir_container.addLayout(dir_btns)
-        dir_group = QtWidgets.QGroupBox("视频目录（可多选）")
-        dir_group.setLayout(dir_container)
+        # 注册“BGM 合并”占位标签页（规划中）
+        try:
+            bgm_tab = BgmMergeTab(self)
+            self.register_feature_tab("BGM 合并", bgm_tab)
+        except Exception:
+            pass
+
+        # 占位标签页：更多功能（开发中）
+        more_tab = QtWidgets.QWidget()
+        _more_layout = QtWidgets.QVBoxLayout(more_tab)
+        _title_label = QtWidgets.QLabel("更多功能（开发中）")
+        _title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        _desc_label = QtWidgets.QLabel(
+            "以下功能正在规划或开发中：\n"
+            "- 批量封面生成与导出\n"
+            "- BGM 智能匹配与自动淡入淡出\n"
+            "- 视频剪辑预览与快捷标注\n"
+            "- 结果表格导出 CSV/Excel\n\n"
+            "更多信息请参见 README_v3.md。"
+        )
+        _desc_label.setWordWrap(True)
+        _btn_open_doc = QtWidgets.QPushButton("查看文档（README_v3.md）")
+        _btn_open_doc.clicked.connect(self._open_readme_v3)
+        _more_layout.addWidget(_title_label)
+        _more_layout.addWidget(_desc_label)
+        _more_layout.addWidget(_btn_open_doc)
+        _more_layout.addStretch(1)
+        self.register_feature_tab("更多功能", more_tab)
+
+    def register_feature_tab(self, title: str, widget: QtWidgets.QWidget) -> int:
+        """
+        将功能页统一注册到主窗口的 QTabWidget 中，并返回注册后的索引。
+
+        Args:
+            title: 标签页标题，如 "视频混剪"。
+            widget: 需要注册的标签页小部件（QWidget 或其子类）。
+
+        Returns:
+            新增标签页在 QTabWidget 中的索引位置（int）。
+
+        Notes:
+            - 该方法用于统一标签页注册入口，便于后续添加样式或统一行为。
+            - 可在此处添加通用的边距、样式或信号连接。
+        """
+        index = self.tabs.addTab(widget, title)
+        try:
+            widget.setContentsMargins(6, 6, 6, 6)
+        except Exception:
+            pass
+        return index
+
+    def _init_concat_tab_ui(self) -> None:
+        """
+        构建“视频混剪”标签页的左侧参数区域与右侧运行/结果区域，并完成信号连接。
+
+        注意：此前由于一次误合并，页面构建代码被错误地放入 _open_readme_v3，
+        导致用户启动后该标签页为空白。此方法恢复正确的初始化位置。
+        """
+        # Video directories & path inputs (migrated: built by VideoConcatTab)
+        _inputs = self.concat_tab.build_input_widgets()
+        # Assign created widget references to MainWindow for backward-compatible handlers
+        self.video_dirs_list = _inputs["video_dirs_list"]
+        btn_add_dir = _inputs["btn_add_dir"]
+        btn_rm_dir = _inputs["btn_rm_dir"]
+        dir_group = _inputs["dir_group"]
 
         # BGM path (file or directory)
-        self.bgm_path_edit = QtWidgets.QLineEdit()
+        self.bgm_path_edit = _inputs["bgm_path_edit"]
         self.bgm_path_edit.setPlaceholderText("支持选择音频文件或目录")
         self.bgm_path_edit.setClearButtonEnabled(True)
         self.bgm_path_edit.setToolTip("选择单个音频文件（mp3/wav/aac/flac/m4a/ogg等）或包含多个音频的目录")
-        self.bgm_browse_btn = QtWidgets.QToolButton()
-        self.bgm_browse_btn.setText("浏览…")
+        self.bgm_browse_btn = _inputs["bgm_browse_btn"]
+        # 按钮文本已在 Tab 构建时设置
         self.bgm_browse_btn.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
         _bgm_menu = QtWidgets.QMenu(self)
         _bgm_act_file = _bgm_menu.addAction("选择音频文件…")
         _bgm_act_dir = _bgm_menu.addAction("选择目录…")
         self.bgm_browse_btn.setMenu(_bgm_menu)
-        # 默认点击选择文件，菜单可选择目录
-        self.bgm_browse_btn.clicked.connect(self._on_browse_bgm_file)
-        _bgm_act_file.triggered.connect(self._on_browse_bgm_file)
-        _bgm_act_dir.triggered.connect(self._on_browse_bgm_dir)
-        # 文本变化时进行路径有效性校验
-        self.bgm_path_edit.textChanged.connect(self._validate_bgm_path)
-        bgm_hbox = QtWidgets.QHBoxLayout()
-        bgm_hbox.addWidget(self.bgm_path_edit)
-        bgm_hbox.addWidget(self.bgm_browse_btn)
+        # 默认点击选择文件，目录选择通过下拉菜单触发
+        # 迁移：将 BGM 浏览与校验委托给标签页方法，逐步接管行为
+        self.bgm_browse_btn.clicked.connect(self.concat_tab.on_browse_bgm_file)
+        _bgm_act_file.triggered.connect(self.concat_tab.on_browse_bgm_file)
+        _bgm_act_dir.triggered.connect(self.concat_tab.on_browse_bgm_dir)
+        # 文本变化时进行路径有效性校验（迁移到标签页）
+        self.bgm_path_edit.textChanged.connect(self.concat_tab.validate_bgm_path)
+        bgm_hbox = _inputs["bgm_hbox"]
 
         # Output path（默认：第一个视频目录的同级目录名 + "_longvideo"）
-        self.output_edit = QtWidgets.QLineEdit()
+        self.output_edit = _inputs["output_edit"]
         self.output_edit.setPlaceholderText("默认：第一个视频目录同级的 ‘<目录名>_longvideo’")
         self.output_edit.setClearButtonEnabled(True)
-        self.output_browse_btn = QtWidgets.QPushButton("浏览…")
-        out_hbox = QtWidgets.QHBoxLayout()
-        out_hbox.addWidget(self.output_edit)
-        out_hbox.addWidget(self.output_browse_btn)
+        self.output_browse_btn = _inputs["output_browse_btn"]
+        out_hbox = _inputs["out_hbox"]
+
+        # Numeric controls
+        self.count_spin = QtWidgets.QSpinBox(); self.count_spin.setRange(1, 9999); self.count_spin.setValue(5)
+        self.outputs_spin = QtWidgets.QSpinBox(); self.outputs_spin.setRange(1, 9999); self.outputs_spin.setValue(1)
+        self.threads_spin = QtWidgets.QSpinBox(); self.threads_spin.setRange(1, 64); self.threads_spin.setValue(4)
+        self.width_spin = QtWidgets.QSpinBox(); self.width_spin.setRange(16, 20000); self.width_spin.setValue(1080)
+        self.height_spin = QtWidgets.QSpinBox(); self.height_spin.setRange(16, 20000); self.height_spin.setValue(1920)
+        self.fps_spin = QtWidgets.QSpinBox(); self.fps_spin.setRange(1, 240); self.fps_spin.setValue(25)
+        self.trim_head_dbl = QtWidgets.QDoubleSpinBox(); self.trim_head_dbl.setRange(0.0, 3600.0); self.trim_head_dbl.setDecimals(2); self.trim_head_dbl.setValue(0.0)
+        self.trim_tail_dbl = QtWidgets.QDoubleSpinBox(); self.trim_tail_dbl.setRange(0.0, 3600.0); self.trim_tail_dbl.setDecimals(2); self.trim_tail_dbl.setValue(1.0)
+        # 左侧 SpinBox 统一收紧宽度
+        self._apply_compact_field_sizes()
+
+        # Checkboxes and combos（保持与现有实现一致）
+        self.gpu_chk = QtWidgets.QCheckBox("启用GPU(NVENC)"); self.gpu_chk.setChecked(True)
+        self.clear_cache_chk = QtWidgets.QCheckBox("清理不匹配TS缓存"); self.clear_cache_chk.setChecked(False)
+        self.group_res_chk = QtWidgets.QCheckBox("分辨率分组模式"); self.group_res_chk.setChecked(True)
+        # 填充模式使用中文展示，内部代码沿用 pad/crop 以匹配后端参数
+        self.fill_combo = QtWidgets.QComboBox()
+        self._fill_display_to_code = {"居中黑边": "pad", "裁剪满屏": "crop"}
+        self._fill_code_to_display = {v: k for k, v in self._fill_display_to_code.items()}
+        for _display, _code in self._fill_display_to_code.items():
+            self.fill_combo.addItem(_display)
+            idx = self.fill_combo.count() - 1
+            self.fill_combo.setItemData(idx, _code, QtCore.Qt.UserRole)
+        for i in range(self.fill_combo.count()):
+            if self.fill_combo.itemData(i, QtCore.Qt.UserRole) == "pad":
+                self.fill_combo.setCurrentIndex(i)
+                break
+        # 质量档位使用中文显示，内部映射为英文代码，便于后端一致性
+        self.profile_combo = QtWidgets.QComboBox()
+        self._profile_display_to_code = {"均衡": "balanced", "观感优先": "visual", "压缩优先": "size"}
+        self._profile_code_to_display = {v: k for k, v in self._profile_display_to_code.items()}
+        for _display, _code in self._profile_display_to_code.items():
+            self.profile_combo.addItem(_display)
+            idx = self.profile_combo.count() - 1
+            self.profile_combo.setItemData(idx, _code, QtCore.Qt.UserRole)
+        for i in range(self.profile_combo.count()):
+            if self.profile_combo.itemData(i, QtCore.Qt.UserRole) == "balanced":
+                self.profile_combo.setCurrentIndex(i)
+                break
+        self.preset_gpu_combo = QtWidgets.QComboBox(); self.preset_gpu_combo.addItems(["", "p4", "p5", "p6", "p7"])  # empty for None
+        self.preset_cpu_combo = QtWidgets.QComboBox(); self.preset_cpu_combo.addItems(["", "ultrafast", "medium", "slow", "slower", "veryslow"])  # empty for None
+        self.nvenc_cq_spin = QtWidgets.QSpinBox(); self.nvenc_cq_spin.setRange(0, 51); self.nvenc_cq_spin.setSpecialValueText("(默认)"); self.nvenc_cq_spin.setValue(0)
+        self.x265_crf_spin = QtWidgets.QSpinBox(); self.x265_crf_spin.setRange(0, 51); self.x265_crf_spin.setSpecialValueText("(默认)"); self.x265_crf_spin.setValue(0)
+
+        # Buttons
+        self.start_btn = QtWidgets.QPushButton("开始-混剪")
+        self.stop_btn = QtWidgets.QPushButton("停止-混剪")
+        self.stop_btn.setEnabled(False)
+        try:
+            self._apply_action_buttons_style(base_h=38, base_pt=12)
+        except Exception:
+            try:
+                self.start_btn.setFixedHeight(38)
+                self.stop_btn.setFixedHeight(38)
+                _bf = self.start_btn.font(); _bf.setPointSize(max(12, _bf.pointSize())); self.start_btn.setFont(_bf)
+                _bf2 = self.stop_btn.font(); _bf2.setPointSize(max(12, _bf2.pointSize())); self.stop_btn.setFont(_bf2)
+            except Exception:
+                pass
+
+        # Progress（移除右侧日志框，仅保留阶段与进度条）
+        self.phase_label, self.progress_bar = self.concat_tab.build_progress_widgets()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        try:
+            self.progress_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        except Exception:
+            pass
+        try:
+            self.progress_bar.setAlignment(QtCore.Qt.AlignCenter)
+        except Exception:
+            pass
+        self.progress_bar.setFormat("进度: %p%")
+        try:
+            self._apply_progress_style(chunk_color="#3b82f6")
+        except Exception:
+            try:
+                self.progress_bar.setFixedHeight(40)
+                font = self.progress_bar.font()
+                font.setPointSize(max(12, font.pointSize()))
+                self.progress_bar.setFont(font)
+                self.progress_bar.setStyleSheet(
+                    "QProgressBar{min-height:40px;max-height:40px;border:1px solid #bbb;border-radius:4px;text-align:center;}"
+                    "QProgressBar::chunk{background-color:#3b82f6;margin:0px;}"
+                )
+            except Exception:
+                pass
+
+        # Layout composition — 左右分布与参数分区
+        left_scroll = QtWidgets.QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_container = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_container)
+        left_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
+        input_group = QtWidgets.QGroupBox("输入与路径")
+        input_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        input_form = QtWidgets.QFormLayout()
+        input_form.addRow(dir_group)
+        input_form.addRow("BGM路径", bgm_hbox)
+        input_form.addRow("输出路径", out_hbox)
+        input_group.setLayout(input_form)
+        left_layout.addWidget(input_group)
+
+        flow_group = QtWidgets.QGroupBox("基本流程参数")
+        flow_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        flow_grid = QtWidgets.QGridLayout()
+        flow_grid.setContentsMargins(10, 8, 10, 8)
+        flow_grid.setHorizontalSpacing(16)
+        flow_grid.setVerticalSpacing(10)
+
+        lbl_outputs = QtWidgets.QLabel("生成混剪长视频数量(m)")
+        lbl_count = QtWidgets.QLabel("混剪视频切片数量(n)")
+        lbl_threads = QtWidgets.QLabel("线程数")
+        lbl_groupres = QtWidgets.QLabel("分辨率分组模式")
+        for _lbl in (lbl_count, lbl_outputs, lbl_threads, lbl_groupres):
+            _lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        flow_grid.addWidget(lbl_count,   0, 0)
+        flow_grid.addWidget(self.count_spin,   0, 1)
+        flow_grid.addWidget(lbl_outputs, 0, 2)
+        flow_grid.addWidget(self.outputs_spin, 0, 3)
+        flow_grid.addWidget(lbl_threads, 1, 0)
+        flow_grid.addWidget(self.threads_spin, 1, 1)
+        flow_grid.addWidget(self.group_res_chk, 1, 2)
+
+        flow_grid.setColumnStretch(0, 0)
+        flow_grid.setColumnStretch(1, 1)
+        flow_grid.setColumnStretch(2, 0)
+        flow_grid.setColumnStretch(3, 1)
+
+        flow_group.setLayout(flow_grid)
+        left_layout.addWidget(flow_group)
+
+        encode_group = QtWidgets.QGroupBox("编码参数")
+        encode_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        encode_grid = QtWidgets.QGridLayout()
+        encode_grid.setContentsMargins(10, 8, 10, 8)
+        encode_grid.setHorizontalSpacing(16)
+        encode_grid.setVerticalSpacing(10)
+
+        lbl_res = QtWidgets.QLabel("分辨率 (宽/高)")
+        lbl_fps = QtWidgets.QLabel("帧率(fps)")
+        lbl_fill = QtWidgets.QLabel("填充模式")
+        lbl_profile = QtWidgets.QLabel("质量档位")
+        lbl_nvenc = QtWidgets.QLabel("NVENC CQ")
+        lbl_x265 = QtWidgets.QLabel("X265 CRF")
+        lbl_preset_gpu = QtWidgets.QLabel("GPU预设")
+        lbl_preset_cpu = QtWidgets.QLabel("CPU预设")
+        for _lbl in (lbl_res, lbl_fps, lbl_fill, lbl_profile, lbl_nvenc, lbl_x265, lbl_preset_gpu, lbl_preset_cpu):
+            _lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        encode_grid.addWidget(lbl_res, 1, 0)
+        encode_grid.addWidget(self._h(self.width_spin, self.height_spin), 1, 1)
+        
+        encode_grid.addWidget(lbl_fps, 1, 2)
+        encode_grid.addWidget(self.fps_spin, 1, 3)
+
+        encode_grid.addWidget(lbl_fill, 2, 0)
+        encode_grid.addWidget(self.fill_combo, 2, 1)
+
+        encode_grid.addWidget(self.gpu_chk, 2, 3)
+
+        preset_group = QtWidgets.QGroupBox("编码预设(推荐使用<均衡>档位即可)")
+        preset_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        try:
+            preset_group.setStyleSheet("QGroupBox::title { color: #d32f2f; font-weight: 600; }")
+        except Exception:
+            pass
+        preset_grid = QtWidgets.QGridLayout()
+        preset_grid.setContentsMargins(10, 8, 10, 8)
+        preset_grid.setHorizontalSpacing(16)
+        preset_grid.setVerticalSpacing(10)
+
+        for _lbl in (lbl_profile, lbl_nvenc, lbl_x265, lbl_preset_gpu, lbl_preset_cpu):
+            _lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        preset_grid.addWidget(lbl_profile, 0, 0)
+        preset_grid.addWidget(self.profile_combo, 0, 1)
+        preset_grid.addWidget(lbl_nvenc, 1, 0)
+        preset_grid.addWidget(self.nvenc_cq_spin, 1, 1)
+        preset_grid.addWidget(lbl_x265, 1, 2)
+        preset_grid.addWidget(self.x265_crf_spin, 1, 3)
+        preset_grid.addWidget(lbl_preset_gpu, 2, 0)
+        preset_grid.addWidget(self.preset_gpu_combo, 2, 1)
+        preset_grid.addWidget(lbl_preset_cpu, 2, 2)
+        preset_grid.addWidget(self.preset_cpu_combo, 2, 3)
+
+        preset_grid.setColumnStretch(0, 0)
+        preset_grid.setColumnStretch(1, 1)
+        preset_grid.setColumnStretch(2, 0)
+        preset_grid.setColumnStretch(3, 1)
+
+        preset_group.setLayout(preset_grid)
+
+        encode_grid.setColumnStretch(0, 0)
+        encode_grid.setColumnStretch(1, 1)
+        encode_grid.setColumnStretch(2, 0)
+        encode_grid.setColumnStretch(3, 1)
+
+        encode_group.setLayout(encode_grid)
+        left_layout.addWidget(preset_group)
+        left_layout.addWidget(encode_group)
+
+        trim_group = QtWidgets.QGroupBox("裁剪与缓存(**使用默认即可**)")
+        trim_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        try:
+            trim_group.setStyleSheet("QGroupBox::title { color: #d32f2f; font-weight: 600; }")
+        except Exception:
+            pass
+        trim_form = QtWidgets.QFormLayout()
+        trim_form.addRow("TS裁剪(头/尾, 秒)", self._h(self.trim_head_dbl, self.trim_tail_dbl))
+        trim_form.addRow("", self.clear_cache_chk)
+        trim_group.setLayout(trim_form)
+        left_layout.addWidget(trim_group)
+
+        status_group = QtWidgets.QGroupBox("环境状态")
+        status_vbox = QtWidgets.QVBoxLayout()
+        status_box = QtWidgets.QHBoxLayout()
+        self.ffmpeg_status = QtWidgets.QLabel("ffmpeg: 未检测")
+        self.nvenc_status = QtWidgets.QLabel("NVENC: 未检测")
+        status_box.addWidget(self.ffmpeg_status)
+        status_box.addWidget(self.nvenc_status)
+        self.ffmpeg_info_btn = QtWidgets.QPushButton("显示 FFmpeg 版本信息")
+        status_box.addWidget(self.ffmpeg_info_btn)
+        status_vbox.addLayout(status_box)
+        self.enc_summary_label = QtWidgets.QLabel("编码参数概览：")
+        status_vbox.addWidget(self.enc_summary_label)
+        status_group.setLayout(status_vbox)
+        
+        left_scroll.setWidget(left_container)
+        left_scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        left_container.setFont(QtWidgets.QApplication.font())
+        left_container.setStyleSheet("")
+        try:
+            left_layout.setSpacing(10)
+            left_layout.setContentsMargins(12, 12, 12, 12)
+        except Exception:
+            pass
+        left_scroll.setMinimumWidth(600)
+        left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+        right_container = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_container)
+
+        progress_group = QtWidgets.QGroupBox("运行状态")
+        try:
+            progress_group.setStyleSheet("QGroupBox::title { font-weight: 600; }")
+        except Exception:
+            pass
+        _top_v = QtWidgets.QVBoxLayout(progress_group)
+        _top_v.setContentsMargins(10, 8, 10, 8)
+        _top_v.setSpacing(8)
+        _top_v.addWidget(self.phase_label)
+        _top_v.addWidget(self.progress_bar)
+
+        btn_box = QtWidgets.QHBoxLayout()
+        try:
+            btn_box.setContentsMargins(0, 0, 0, 0)
+            btn_box.setSpacing(8)
+        except Exception:
+            pass
+        btn_box.addWidget(self.start_btn)
+        btn_box.addWidget(self.stop_btn)
+        _top_v.addLayout(btn_box)
+      
+
+        results_group, self.results_table = self.concat_tab.build_results_panel()
+        _rg_layout = results_group.layout()
+        if isinstance(_rg_layout, QtWidgets.QVBoxLayout):
+            try:
+                _rg_layout.setContentsMargins(10, 8, 10, 8)
+                _rg_layout.setSpacing(8)
+            except Exception:
+                pass
+        ensure_table_headers(self.results_table, ["序号", "文件名", "大小(MB)", "输出路径"])
+        self._RESULTS_PATH_COL = 3
+        self._RESULTS_SIZE_COL = 2
+        try:
+            self.results_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+            self.results_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+            self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        except Exception:
+            pass
+        try:
+            header = self.results_table.horizontalHeader()
+            header.setMinimumSectionSize(80)
+            self.results_table.verticalHeader().setVisible(False)
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
+            header.setSectionResizeMode(self._RESULTS_SIZE_COL, QtWidgets.QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(self._RESULTS_PATH_COL, QtWidgets.QHeaderView.Stretch)
+        except Exception:
+            pass
+        self.results_table.itemDoubleClicked.connect(self.concat_tab.on_results_table_double_clicked)
+
+        actions_bar = QtWidgets.QHBoxLayout()
+        actions_bar.setContentsMargins(0, 0, 0, 0)
+        actions_bar.setSpacing(6)
+        self.open_selected_btn = QtWidgets.QPushButton("打开文件")
+        self.copy_selected_path_btn = QtWidgets.QPushButton("复制路径")
+        actions_bar.addWidget(self.open_selected_btn)
+        actions_bar.addWidget(self.copy_selected_path_btn)
+        actions_bar.addStretch(1)
+        _rg_layout.addLayout(actions_bar)
+        try:
+            self._results_overlay = self.concat_tab.build_results_overlay(results_group)
+        except Exception:
+            self._results_overlay = None
+        try:
+            progress_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            results_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            try:
+                self.concat_tab.attach_right_panel_controls(
+                    phase_label=self.phase_label,
+                    progress_bar=self.progress_bar,
+                    results_table=self.results_table,
+                    results_overlay=self._results_overlay,
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right_splitter.setChildrenCollapsible(False)
+        right_splitter.addWidget(progress_group)
+        right_splitter.addWidget(results_group)
+        right_splitter.setStretchFactor(0, 2)
+        right_splitter.setStretchFactor(1, 8)
+        try:
+            right_splitter.setSizes([200, 800])
+        except Exception:
+            pass
+        right_layout.addWidget(right_splitter)
+        right_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(left_scroll)
+        splitter.addWidget(right_container)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        try:
+            splitter.setSizes([400, 700])
+        except Exception:
+            pass
+        try:
+            QtCore.QTimer.singleShot(0, lambda: splitter.setSizes([int(self.width() * 0.30), int(self.width() * 0.70)]))
+        except Exception:
+            pass
+        root_layout = self.concat_tab.get_root_layout()
+        root_layout.addWidget(splitter)
+
+        btn_add_dir.clicked.connect(self.concat_tab.on_add_dir)
+        btn_rm_dir.clicked.connect(self.concat_tab.on_rm_dir)
+        try:
+            self.concat_tab._output_autofill = True
+        except Exception:
+            self._output_autofill = True
+        self.output_edit.textEdited.connect(self.concat_tab.on_output_text_edited)
+        self.output_browse_btn.clicked.connect(self.concat_tab.on_browse_output)
+        self.start_btn.clicked.connect(lambda: self.concat_tab.start_requested.emit(self.concat_tab.collect_settings()))
+        self.stop_btn.clicked.connect(lambda: self.concat_tab.stop_requested.emit())
+        try:
+            self.concat_tab.start_requested.connect(self._on_start_with_settings)
+            self.concat_tab.stop_requested.connect(self._on_stop)
+        except Exception:
+            self.start_btn.clicked.connect(self._on_start)
+            self.stop_btn.clicked.connect(self._on_stop)
+      
+        self.open_selected_btn.clicked.connect(self._on_open_selected_files)
+        self.copy_selected_path_btn.clicked.connect(self._copy_selected_paths)
+        self.ffmpeg_info_btn.clicked.connect(self._on_show_ffmpeg_info)
+
+        for w in [
+            self.profile_combo,
+            self.nvenc_cq_spin,
+            self.x265_crf_spin,
+            self.preset_gpu_combo,
+            self.preset_cpu_combo,
+        ]:
+            try:
+                if hasattr(w, "currentIndexChanged"):
+                    w.currentIndexChanged.connect(self._update_enc_summary)
+                if hasattr(w, "valueChanged"):
+                    w.valueChanged.connect(self._update_enc_summary)
+            except Exception:
+                pass
+
+        try:
+            self.profile_combo.currentTextChanged.connect(self._on_profile_changed)
+        except Exception:
+            pass
+
+        self._detect_env()
+        try:
+            self._on_profile_changed(self.profile_combo.currentText())
+        except Exception:
+            pass
+        self._update_enc_summary()
+
+    def _open_readme_v3(self) -> None:
+        """
+        在系统默认文件管理器中打开 README_v3.md，便于用户查看开发计划。
+        """
+        import os
+        import subprocess
+        readme_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "README_v3.md")
+        try:
+            if os.path.exists(readme_path):
+                if os.name == "nt":
+                    subprocess.Popen(["explorer", readme_path])
+                else:
+                    subprocess.Popen(["open", readme_path])
+            else:
+                QtWidgets.QMessageBox.information(self, "提示", f"未找到文档：{readme_path}")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "错误", f"打开文档失败：{e}")
+        # 仅负责打开文档，不在此处构建“视频混剪”页面
+        return
+
+        # Video directories & path inputs (migrated: built by VideoConcatTab)
+        _inputs = self.concat_tab.build_input_widgets()
+        # Assign created widget references to MainWindow for backward-compatible handlers
+        self.video_dirs_list = _inputs["video_dirs_list"]
+        btn_add_dir = _inputs["btn_add_dir"]
+        btn_rm_dir = _inputs["btn_rm_dir"]
+        dir_group = _inputs["dir_group"]
+
+        # BGM path (file or directory)
+        self.bgm_path_edit = _inputs["bgm_path_edit"]
+        self.bgm_path_edit.setPlaceholderText("支持选择音频文件或目录")
+        self.bgm_path_edit.setClearButtonEnabled(True)
+        self.bgm_path_edit.setToolTip("选择单个音频文件（mp3/wav/aac/flac/m4a/ogg等）或包含多个音频的目录")
+        self.bgm_browse_btn = _inputs["bgm_browse_btn"]
+        # 按钮文本已在 Tab 构建时设置
+        self.bgm_browse_btn.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        _bgm_menu = QtWidgets.QMenu(self)
+        _bgm_act_file = _bgm_menu.addAction("选择音频文件…")
+        _bgm_act_dir = _bgm_menu.addAction("选择目录…")
+        self.bgm_browse_btn.setMenu(_bgm_menu)
+        # 默认点击选择文件，目录选择通过下拉菜单触发
+        # 迁移：将 BGM 浏览与校验委托给标签页方法，逐步接管行为
+        self.bgm_browse_btn.clicked.connect(self.concat_tab.on_browse_bgm_file)
+        _bgm_act_file.triggered.connect(self.concat_tab.on_browse_bgm_file)
+        _bgm_act_dir.triggered.connect(self.concat_tab.on_browse_bgm_dir)
+        # 文本变化时进行路径有效性校验（迁移到标签页）
+        self.bgm_path_edit.textChanged.connect(self.concat_tab.validate_bgm_path)
+        bgm_hbox = _inputs["bgm_hbox"]
+
+        # Output path（默认：第一个视频目录的同级目录名 + "_longvideo"）
+        self.output_edit = _inputs["output_edit"]
+        self.output_edit.setPlaceholderText("默认：第一个视频目录同级的 ‘<目录名>_longvideo’")
+        self.output_edit.setClearButtonEnabled(True)
+        self.output_browse_btn = _inputs["output_browse_btn"]
+        out_hbox = _inputs["out_hbox"]
 
         # Numeric controls
         self.count_spin = QtWidgets.QSpinBox(); self.count_spin.setRange(1, 9999); self.count_spin.setValue(5)
@@ -445,9 +725,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
         # Progress（移除右侧日志框，仅保留阶段与进度条）
-        self.phase_label = QtWidgets.QLabel("阶段: ")
-        # 进度条：显示百分比文本，并加大高度便于观察
-        self.progress_bar = QtWidgets.QProgressBar()
+        # 迁移：通过标签页构建阶段标签与进度条，并继续使用 MainWindow 的样式与布局
+        self.phase_label, self.progress_bar = self.concat_tab.build_progress_widgets()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
@@ -705,21 +984,26 @@ class MainWindow(QtWidgets.QMainWindow):
       
 
         # Results table group（右下：结果以表格形式展示，支持多选与右键菜单）
-        results_group = QtWidgets.QGroupBox("混剪长视频的结果")
-        _rg_layout = QtWidgets.QVBoxLayout(results_group)
-        _rg_layout.setContentsMargins(10, 8, 10, 8)
-        _rg_layout.setSpacing(8)
-
-        # 表格：序号、文件名、输出路径、大小(MB)
-        self.results_table = QtWidgets.QTableWidget(0, 4, results_group)
-        # 列顺序调整：将“大小(MB)”与“输出路径”位置互换为：序号、文件名、大小(MB)、输出路径
-        self.results_table.setHorizontalHeaderLabels(["序号", "文件名", "大小(MB)", "输出路径"])
+        # 迁移：由标签页构建结果分组与表格，MainWindow 仅获取引用并完成剩余装饰
+        results_group, self.results_table = self.concat_tab.build_results_panel()
+        _rg_layout = results_group.layout()
+        if isinstance(_rg_layout, QtWidgets.QVBoxLayout):
+            try:
+                _rg_layout.setContentsMargins(10, 8, 10, 8)
+                _rg_layout.setSpacing(8)
+            except Exception:
+                pass
+        # 列顺序调整：将“大小(MB)”与“输出路径”位置互换为：序号、文件名、大小(MB)、输出路径（Tab 已设置表头，此处重申以保证一致）
+        ensure_table_headers(self.results_table, ["序号", "文件名", "大小(MB)", "输出路径"])
         # 记录列索引，避免后续读写错列
         self._RESULTS_PATH_COL = 3
         self._RESULTS_SIZE_COL = 2
-        self.results_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.results_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        try:
+            self.results_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+            self.results_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+            self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        except Exception:
+            pass
         try:
             header = self.results_table.horizontalHeader()
             # 对齐头和列显示策略：序号/大小按内容自适应，文件名固定较宽，路径尽量拉伸
@@ -732,8 +1016,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         # 双击打开文件
-        self.results_table.itemDoubleClicked.connect(self._on_results_table_double_clicked)
-        _rg_layout.addWidget(self.results_table)
+        # 迁移：双击事件路由到标签页的槽函数（内部仍委托到 MainWindow 旧处理器）
+        self.results_table.itemDoubleClicked.connect(self.concat_tab.on_results_table_double_clicked)
 
         # 结果区操作栏（打开文件/目录、复制路径）
         actions_bar = QtWidgets.QHBoxLayout()
@@ -745,21 +1029,25 @@ class MainWindow(QtWidgets.QMainWindow):
         actions_bar.addWidget(self.copy_selected_path_btn)
         actions_bar.addStretch(1)
         _rg_layout.addLayout(actions_bar)
-        # 创建“输出结果”蒙层与菊花转圈指示器（默认隐藏）
+        # 创建“输出结果”蒙层（由标签页负责所有权与构建）
         try:
-            self._results_overlay = BusyOverlay(results_group)
-            # 初始化几何尺寸为父组件当前矩形
-            try:
-                self._results_overlay.setGeometry(results_group.rect())
-            except Exception:
-                pass
-            self._results_overlay.hide()
+            self._results_overlay = self.concat_tab.build_results_overlay(results_group)
         except Exception:
             self._results_overlay = None
         # 统一设置两组的尺寸策略为横向扩展，保持同宽
         try:
             progress_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
             results_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            # 注入右侧面板控件到标签页，便于标签页的 update_* 直接操作这些控件
+            try:
+                self.concat_tab.attach_right_panel_controls(
+                    phase_label=self.phase_label,
+                    progress_bar=self.progress_bar,
+                    results_table=self.results_table,
+                    results_overlay=self._results_overlay,
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -801,16 +1089,31 @@ class MainWindow(QtWidgets.QMainWindow):
         root_layout.addWidget(splitter)
 
         # Signals
-        btn_add_dir.clicked.connect(self._on_add_dir)
-        btn_rm_dir.clicked.connect(self._on_rm_dir)
-        # 用户手动编辑输出路径后，停止自动填充默认值
-        self._output_autofill = True
-        self.output_edit.textEdited.connect(self._on_output_text_edited)
+        # 迁移：将“添加/移除目录”点击事件绑定到标签页方法，逐步接管行为
+        btn_add_dir.clicked.connect(self.concat_tab.on_add_dir)
+        btn_rm_dir.clicked.connect(self.concat_tab.on_rm_dir)
+        # 用户手动编辑输出路径后，停止自动填充默认值（迁移到 Tab 管理状态）
+        try:
+            self.concat_tab._output_autofill = True
+        except Exception:
+            # 兜底：保留旧状态变量，不影响运行
+            self._output_autofill = True
+        self.output_edit.textEdited.connect(self.concat_tab.on_output_text_edited)
         # 默认按钮行为为选择音频文件，目录选择通过下拉菜单触发
         # 注意：上方已连接 clicked 到 _on_browse_bgm_file，此处无需重复连接到旧方法
-        self.output_browse_btn.clicked.connect(self._on_browse_output)
-        self.start_btn.clicked.connect(self._on_start)
-        self.stop_btn.clicked.connect(self._on_stop)
+        self.output_browse_btn.clicked.connect(self.concat_tab.on_browse_output)
+        # 迁移：按钮点击经由 VideoConcatTab 暴露的信号上报
+        # 使用标签页提供的采集方法，以便后续完全迁移到标签页
+        self.start_btn.clicked.connect(lambda: self.concat_tab.start_requested.emit(self.concat_tab.collect_settings()))
+        self.stop_btn.clicked.connect(lambda: self.concat_tab.stop_requested.emit())
+        # MainWindow 连接到 VideoConcatTab 的接口，逐步迁移业务逻辑
+        try:
+            self.concat_tab.start_requested.connect(self._on_start_with_settings)
+            self.concat_tab.stop_requested.connect(self._on_stop)
+        except Exception:
+            # 兜底：保留旧行为，避免运行时错误
+            self.start_btn.clicked.connect(self._on_start)
+            self.stop_btn.clicked.connect(self._on_stop)
       
         # self.open_out_dir_btn.clicked.connect(self._on_open_default_output_dir)
         self.open_selected_btn.clicked.connect(self._on_open_selected_files)
@@ -883,15 +1186,22 @@ class MainWindow(QtWidgets.QMainWindow):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择视频目录")
         if d:
             self.video_dirs_list.addItem(d)
-            # 添加目录后更新输出路径默认值
-            self._update_output_default()
+            # 添加目录后更新输出路径默认值（迁移到 Tab 管理）
+            try:
+                self.concat_tab.update_output_default()
+            except Exception:
+                # 兜底：回退到旧实现，避免异常导致未填充默认值
+                self._update_output_default()
 
     def _on_rm_dir(self) -> None:
         """Remove selected directory entries from the list."""
         for item in self.video_dirs_list.selectedItems():
             self.video_dirs_list.takeItem(self.video_dirs_list.row(item))
-        # 删除目录后也更新输出路径默认值
-        self._update_output_default()
+        # 删除目录后也更新输出路径默认值（迁移到 Tab 管理）
+        try:
+            self.concat_tab.update_output_default()
+        except Exception:
+            self._update_output_default()
 
     def _on_browse_bgm_file(self) -> None:
         """选择单个 BGM 音频文件并填充到输入框。
@@ -986,12 +1296,19 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _on_output_text_edited(self, _text: str) -> None:
-        """当用户编辑输出路径时，关闭自动填充默认值。"""
-        self._output_autofill = False
+        """当用户编辑输出路径时，关闭自动填充默认值（迁移到 Tab 管理）。"""
+        try:
+            # 优先委托到标签页，标签页将维护自身的 _output_autofill 状态
+            self.concat_tab.on_output_text_edited(_text)
+        except Exception:
+            # 兜底：保留旧状态变量
+            self._output_autofill = False
 
     def _update_output_default(self) -> None:
-        """根据第一个视频目录自动生成输出路径默认值并填充到输入框。
+        """根据第一个视频目录自动生成输出路径默认值并填充到输入框（Deprecated）。
 
+        请使用 VideoConcatTab.update_output_default()。本方法仅作为兜底保留，
+        以避免迁移期间出现异常时无法填充默认值。
         规则：
         - 若列表中存在至少一个目录，默认值为：第一个目录的同级目录下的 “<目录名>_longvideo”。
           例如：C:/videos/input1 -> C:/videos/input1_longvideo
@@ -1083,10 +1400,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.bgm_path_edit.setText(str(data.get("bgm_path", "")))
                 out_val = str(data.get("output", ""))
                 self.output_edit.setText(out_val)
-                # 若导入的配置中未提供输出路径，则根据当前视频目录自动填充默认值
+                # 若导入的配置中未提供输出路径，则根据当前视频目录自动填充默认值（迁移到 Tab 方法）
                 if not out_val:
-                    self._output_autofill = True
-                    self._update_output_default()
+                    try:
+                        self.concat_tab._output_autofill = True
+                        self.concat_tab.update_output_default()
+                    except Exception:
+                        # 兜底：回退到旧实现，避免异常导致未填充默认值
+                        self._output_autofill = True
+                        self._update_output_default()
                 self.count_spin.setValue(int(data.get("count", 5)))
                 self.outputs_spin.setValue(int(data.get("outputs", 1)))
                 self.gpu_chk.setChecked(bool(data.get("gpu", True)))
@@ -1411,7 +1733,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # 显示右下“输出结果”蒙层并禁用列表交互
         try:
-            self._show_results_overlay()
+        # 使用标签页的覆盖层 API（内部仍委托到 MainWindow 实现，迁移阶段保持行为不变）
+            self.concat_tab.show_results_overlay()
         except Exception:
             pass
         # 新任务开始前重置进度条到 0%，本次任务期间不再自动重置
@@ -1427,10 +1750,82 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker = VideoConcatWorker(settings)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.phase.connect(self._on_phase)
-        self._worker.progress.connect(self._on_progress)
+        # 路由工作者信号到标签页的更新接口（标签页在迁移阶段会委托回 MainWindow）
+        try:
+            self._worker.phase.connect(self.concat_tab.update_phase)
+            self._worker.progress.connect(self.concat_tab.update_progress)
+        except Exception:
+            # 兜底：保持旧连接，避免运行时错误
+            self._worker.phase.connect(self._on_phase)
+            self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
-        self._worker.results.connect(self._on_results_ready)
+        try:
+            self._worker.results.connect(self.concat_tab.update_results)
+        except Exception:
+            self._worker.results.connect(self._on_results_ready)
+        self._worker.error.connect(self._on_error)
+        self._thread.finished.connect(self._cleanup_thread)
+        self._thread.start()
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+
+    def _on_start_with_settings(self, settings: Settings) -> None:
+        """
+        Start the background worker using a Settings object provided by the tab.
+
+        This method mirrors `_on_start` but accepts an already collected
+        Settings instance. It enables a clearer separation where the
+        VideoConcatTab is responsible for collecting form values and
+        MainWindow is responsible for orchestrating the worker lifecycle.
+
+        Parameters
+        ----------
+        settings : Settings
+            The collected parameters for the concat task.
+        """
+        if self._thread is not None:
+            QtWidgets.QMessageBox.warning(self, "提示", "已有任务在运行")
+            return
+        # 基础校验：视频目录与 BGM 路径必须填写
+        try:
+            if not getattr(settings, "video_dirs", None):
+                QtWidgets.QMessageBox.warning(self, "提示", "请先选择至少一个视频目录")
+                return
+            if not getattr(settings, "bgm_path", None):
+                QtWidgets.QMessageBox.warning(self, "提示", "请先选择 BGM 路径（文件或目录）")
+                return
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "提示", "采集参数失败，请检查表单输入")
+            return
+        # 显示右下“输出结果”蒙层并禁用列表交互
+        try:
+            self.concat_tab.show_results_overlay()
+        except Exception:
+            pass
+        # 新任务开始前重置进度条到 0%
+        try:
+            self.progress_bar.setMaximum(100)
+            self.progress_bar.setValue(0)
+        except Exception:
+            pass
+        # 启动线程与工作者
+        self._thread = QtCore.QThread(self)
+        self._worker = VideoConcatWorker(settings)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        # 路由工作者信号到标签页的更新接口（标签页在迁移阶段会委托回 MainWindow）
+        try:
+            self._worker.phase.connect(self.concat_tab.update_phase)
+            self._worker.progress.connect(self.concat_tab.update_progress)
+        except Exception:
+            # 兜底：保持旧连接，避免运行时错误
+            self._worker.phase.connect(self._on_phase)
+            self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        try:
+            self._worker.results.connect(self.concat_tab.update_results)
+        except Exception:
+            self._worker.results.connect(self._on_results_ready)
         self._worker.error.connect(self._on_error)
         self._thread.finished.connect(self._cleanup_thread)
         self._thread.start()
@@ -1474,7 +1869,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         # 关闭蒙层，恢复交互
         try:
-            self._hide_results_overlay()
+            self.concat_tab.hide_results_overlay()
         except Exception:
             pass
         self._cleanup_thread()
@@ -1496,17 +1891,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 # 兼容：有些结果字符串可能携带尾随的"(xx MB)"展示信息，这里先规范化为纯路径
                 normalized_p = self._normalize_result_path(p)
                 from pathlib import Path as _P
-                st_size = _P(normalized_p).stat().st_size if _P(normalized_p).exists() else 0
+                exists_flag = _P(normalized_p).exists()
+                st_size = _P(normalized_p).stat().st_size if exists_flag else 0
                 size_mb = st_size / (1024 * 1024) if st_size else 0.0
             except Exception:
+                # 兜底：若规范化失败，使用原始值并标记不存在
+                normalized_p = str(p)
                 size_mb = 0.0
+                exists_flag = False
             row = self.results_table.rowCount()
             self.results_table.insertRow(row)
             # 序号
             idx_item = QtWidgets.QTableWidgetItem(str(idx))
             idx_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            # 文件名（优化显示：去除后缀与末尾括号内容，如 "abc (123)" -> "abc"；支持全角括号）
-            name_item = QtWidgets.QTableWidgetItem(self._display_file_name_from_path(normalized_p))
+            # 文件名（统一使用 table_helpers.resolve_display_name 简化为 basename）
+            name_item = QtWidgets.QTableWidgetItem(resolve_display_name(normalized_p))
             # 大小(MB)
             size_item = QtWidgets.QTableWidgetItem(f"{size_mb:.1f}")
             size_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -1523,6 +1922,11 @@ class MainWindow(QtWidgets.QMainWindow):
             # 列位置调整：第2列为大小(MB)，第3列为输出路径
             self.results_table.setItem(row, self._RESULTS_SIZE_COL, size_item)
             self.results_table.setItem(row, self._RESULTS_PATH_COL, path_item)
+            # 行颜色：存在视为成功(绿色)，不存在视为失败(红色)
+            try:
+                set_table_row_colors(self.results_table, row, ok=bool(exists_flag))
+            except Exception:
+                pass
         # 自适应列宽（文件名和路径更宽，序号和大小适度；输出路径位于最后一列并可适度拉伸）
         try:
             self.results_table.resizeColumnToContents(0)
@@ -1853,7 +2257,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         QtWidgets.QMessageBox.critical(self, "错误", msg)
         try:
-            self._hide_results_overlay()
+            self.concat_tab.hide_results_overlay()
         except Exception:
             pass
         self._cleanup_thread()
@@ -2054,7 +2458,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Long-running ffmpeg subprocesses will finish their current item.
         """
         try:
-            self._hide_results_overlay()
+            self.concat_tab.hide_results_overlay()
         except Exception:
             pass
         self._cleanup_thread()
