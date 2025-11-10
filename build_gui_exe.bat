@@ -1,4 +1,6 @@
 @echo off
+REM Ensure console uses UTF-8 to avoid mojibake when echoing Unicode
+chcp 65001 >nul
 REM Build Windows .exe for Video Concat GUI using PyInstaller
 REM Prerequisites: Python, pip install -r requirements_gui.txt
 
@@ -117,14 +119,19 @@ if "%USE_UPX%"=="1" (
 REM Show the exact command being executed for diagnostics
 REM Security: use --collect-submodules for concat_tool to avoid bundling .py sources as data.
 set PYTHONOPTIMIZE=%STABLE_PYOPT%
-set BUILD_CMD=python -m PyInstaller -F -w -n VideoConcatGUI --runtime-tmpdir "%RUNTIME_TMPDIR%" %PYI_UPX% %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --hidden-import pytransform --hidden-import pyarmor_runtime --collect-submodules concat_tool --collect-all pyarmor_runtime %ENTRY_SCRIPT%
+REM Hidden imports for PyArmor should only be included when obfuscation actually succeeded
+set HID_IMPORTS=
+if exist "%OBF_DIR%\gui\main_gui.py" (
+  set HID_IMPORTS=--hidden-import pytransform --hidden-import pyarmor_runtime --collect-all pyarmor_runtime
+)
+set BUILD_CMD=python -m PyInstaller -F -w -n VideoConcatGUI --runtime-tmpdir "%RUNTIME_TMPDIR%" %PYI_UPX% %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --collect-submodules concat_tool %HID_IMPORTS% %ENTRY_SCRIPT%
 echo Running: %BUILD_CMD%
 %BUILD_CMD%
 
 echo.
 echo Building debug variant with console...
 set PYTHONOPTIMIZE=%DEBUG_PYOPT%
-set BUILD_CMD_DEBUG=python -m PyInstaller -F -n VideoConcatGUI_debug --runtime-tmpdir "%RUNTIME_TMPDIR%" %PYI_UPX% %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --hidden-import pytransform --hidden-import pyarmor_runtime --collect-submodules concat_tool --collect-all pyarmor_runtime %ENTRY_SCRIPT%
+set BUILD_CMD_DEBUG=python -m PyInstaller -F -n VideoConcatGUI_debug --runtime-tmpdir "%RUNTIME_TMPDIR%" %PYI_UPX% %ADD_DATA% %PYI_PATHS% --hidden-import concat_tool.video_concat --collect-submodules concat_tool %HID_IMPORTS% %ENTRY_SCRIPT%
 echo Running: %BUILD_CMD_DEBUG%
 %BUILD_CMD_DEBUG%
 
@@ -153,21 +160,12 @@ if "%ENABLE_SIGN%"=="1" (
   )
 )
 
-REM Rename executables to requested APP_NAME (safe for names with spaces/parentheses)
+REM Rename executables to requested APP_NAME using PowerShell to preserve Unicode correctly
 set "APP_NAME=短视频搬运工具v1.0(NVIDIA GPU版本)"
-set "APP_NAME_DEBUG=%APP_NAME%_debug"
-pushd "dist"
-if exist "VideoConcatGUI.exe" ren "VideoConcatGUI.exe" "%APP_NAME%.exe"
-if exist "VideoConcatGUI_debug.exe" ren "VideoConcatGUI_debug.exe" "%APP_NAME_DEBUG%.exe"
-popd
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $name=$env:APP_NAME; $dist='dist'; if (Test-Path (Join-Path $dist 'VideoConcatGUI.exe')) { Rename-Item -LiteralPath (Join-Path $dist 'VideoConcatGUI.exe') -NewName ($name + '.exe') } if (Test-Path (Join-Path $dist 'VideoConcatGUI_debug.exe')) { Rename-Item -LiteralPath (Join-Path $dist 'VideoConcatGUI_debug.exe') -NewName ($name + '_debug.exe') }"
 
 REM Package release zip using PowerShell (built-in) instead of rar
 set "RELEASE_DIR=release"
+
 if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%"
-set "ZIP_FILE=%RELEASE_DIR%\%APP_NAME%.zip"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Force -DestinationPath '%ZIP_FILE%' -Path 'dist\%APP_NAME%.exe'"
-if exist "%ZIP_FILE%" (
-  echo Created release package: %ZIP_FILE%
-) else (
-  echo WARNING: Failed to create release zip: %ZIP_FILE%
-)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $name=$env:APP_NAME; $releaseDir='%RELEASE_DIR%'; $dst=Join-Path $releaseDir ($name + '.zip'); $src=Join-Path 'dist' ($name + '.exe'); Compress-Archive -Force -DestinationPath $dst -Path $src; if (Test-Path $dst) { Write-Host ('Created release package: ' + $dst) } else { Write-Warning ('Failed to create release zip: ' + $dst) }"
