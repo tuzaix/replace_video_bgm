@@ -4,7 +4,7 @@ set -e  # 遇到任何错误立即退出
 
 # -------------------------- 变量定义 ---------------------------
 # 定义FTP的根目录
-FTP_BASE="/home"
+FTP_BASE="/home/ftp"
 # 定义共享用户组名，所有新建的FTP用户和work用户都会加入此组
 SHARED_GROUP="ftp_shared_workgroup"
 # 随机密码长度
@@ -18,8 +18,26 @@ NEW_USER="$1"
 VSFTPD_CONF="/etc/vsftpd.conf"
 # 用户禁锢列表文件路径
 CHROOT_LIST_FILE="/etc/vsftpd.chroot_list"
+# 修改pam严重，对于vsftpd只支持nologin的账号
+PAM_FTPD_FILE='/etc/pam.d/vsftpd'
 
 # -------------------------- 函数定义 ---------------------------
+# 跟新pam的vsftpd配置
+update_pam_vsftpd() {
+    cat > "$PAM_FTPD_FILE" << 'EOF'
+# Standard behaviour for ftpd(8).
+auth	required	pam_listfile.so item=user sense=deny file=/etc/ftpusers onerr=succeed
+
+# Note: vsftpd handles anonymous logins on its own. Do not enable pam_ftp.so.
+
+# Standard pam includes
+@include common-account
+@include common-session
+@include common-auth
+# 重点参数: pam_nologin.so，而不是pam_shells.so
+auth	required	pam_nologin.so
+EOF
+}
 
 # 检查是否以root权限运行
 check_root() {
@@ -72,36 +90,62 @@ setup_vsftpd() {
 
     # 使用cat和EOF覆盖写入正确的配置
     cat > "$VSFTPD_CONF" << 'EOF'
-# 基本设置
+# ===== 核心连接与模式配置 =====
+# 以独立守护进程模式运行（关键设置）
 listen=YES
+listen_ipv6=NO
+
+# ===== 登录与控制配置 =====
+# 禁用匿名登录，更安全
 anonymous_enable=NO
+# 允许本地系统用户登录（必须为YES）
 local_enable=YES
+# 启用写权限（如上传、删除等）
 write_enable=YES
+
+# 禁止匿名用户登录
+anonymous_enable=NO
+# 允许本地用户登录
+local_enable=YES
+# 开启写权限
+write_enable=YES
+# 设置本地用户创建文件的默认权限掩码
 local_umask=022
+# 启用目录切换消息
 dirmessage_enable=YES
+# 启用传输日志
 xferlog_enable=YES
+# 确保使用20端口进行数据连接（主动模式）
 connect_from_port_20=YES
 
-# 用户禁锢（隔离）核心配置 [2,3,6](@ref)
-# 关键配置：将所有本地用户限制在其主目录内（实现用户间隔离）
+# ===== 用户禁锢与目录限制（重要安全设置） =====
+# 将所有本地用户限制在其家目录内（chroot）
 chroot_local_user=YES
-# 允许被禁锢的目录有写权限
+# 允许被chroot禁锢的目录具有写权限（关键参数）
 allow_writeable_chroot=YES
-# 启用一个例外列表，但结合chroot_local_user=YES，列表中的用户反而“不被”禁锢
-chroot_list_enable=YES
-chroot_list_file=/etc/vsftpd.chroot_list
 
-# 被动模式设置
+# ===== 被动模式配置（适用于客户端在防火墙/NAT后的情况） =====
+# 启用被动模式连接
 pasv_enable=YES
+# 设置被动模式使用的端口范围（建议设置并按需开放防火墙）
 pasv_min_port=40000
 pasv_max_port=50000
 
-# 其他设置
-secure_chroot_dir=/var/run/vsftpd/empty
+# ===== 用户列表访问控制 =====
+# 启用用户列表功能
+userlist_enable=NO
+# 当为NO时，仅允许在user_list文件中的用户登录（白名单模式）
+
+# 设置为标准日志格式
+xferlog_std_format=YES
+
+# ===== PAM认证服务名称（关键，与530错误密切相关） =====
+# 指定PAM认证配置文件名[1,6](@ref)
 pam_service_name=vsftpd
-rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
-rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
-ssl_enable=NO
+
+# ===== 其他安全与功能设置 =====
+# 启用tcp包装器进行额外访问控制
+tcp_wrappers=YES
 EOF
 
     # 确保chroot列表文件存在
@@ -138,7 +182,8 @@ create_shared_group() {
 create_ftp_user() {
     local username=$1
     # 使用openssl生成随机密码
-    local user_password=$(openssl rand -base64 "$PASSWORD_LENGTH")
+    # local user_password=$(openssl rand -base64 "$PASSWORD_LENGTH")
+    local user_password="Besteffie@2025"
 
     # 创建用户，将其家目录设置为FTP根目录下的子目录，并禁止其登录shell [2,5](@ref)
     useradd -m -d "$FTP_BASE/$username" -s /sbin/nologin -G "$SHARED_GROUP" "$username"
@@ -220,7 +265,9 @@ main() {
     check_user_existence "$NEW_USER"
 
     # 执行流程
-    # setup_vsftpd
+    setup_vsftpd
+    # 更新pam vsftpd的配置，避免登陆530问题
+    update_pam_vsftpd 
     create_shared_group
     USER_PASSWORD=$(create_ftp_user "$NEW_USER")
     setup_ftp_directory "$NEW_USER"
