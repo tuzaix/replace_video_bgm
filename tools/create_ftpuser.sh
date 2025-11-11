@@ -73,6 +73,7 @@ setup_vsftpd() {
     # 使用cat和EOF覆盖写入正确的配置
     cat > "$VSFTPD_CONF" << 'EOF'
 # 基本设置
+listen=YES
 anonymous_enable=NO
 local_enable=YES
 write_enable=YES
