@@ -4,7 +4,7 @@ set -e  # 遇到任何错误立即退出
 
 # -------------------------- 变量定义 ---------------------------
 # 定义FTP的根目录
-FTP_BASE="/home/ftp"
+FTP_BASE="/home"
 # 定义共享用户组名，所有新建的FTP用户和work用户都会加入此组
 SHARED_GROUP="ftp_shared_workgroup"
 # 随机密码长度
