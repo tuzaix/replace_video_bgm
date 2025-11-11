@@ -26,6 +26,13 @@ sudo ufw allow 40000:50000/tcp
 sudo ufw reload
 sudo cp /etc/vsftpd.conf /etc/vsftpd.conf.original
 
+sudo adduser ftpuser_hostinger
+sudo chown root:root /home/ftpuser_hostinger
+sudo chmod 755 /home/ftpuser_hostinger
+sudo mkdir /home/ftpuser_hostinger/files
+sudo chown ftpuser_hostinger:ftpuser_hostinger /home/ftpuser_hostinger/files
+/usr/bin/chmod -R 777 /home/ftpuser_hostinger
+
 cat > /etc/vsftpd.conf << 'EOF'
 listen=NO
 listen_ipv6=YES
@@ -49,7 +56,7 @@ sudo systemctl restart vsftpd
 sudo systemctl status  vsftpd
 echo "==========success install ftp server==============="
 sudo timedatectl set-timezone Asia/Shanghai
-/usr/bin/chmod -R 777 /home/ftpuser_hostinger
+
 
 sudo useradd -m -s /bin/bash work
 sudo passwd work
