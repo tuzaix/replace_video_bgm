@@ -54,18 +54,23 @@ class MainWindow(QtWidgets.QMainWindow):
         # 初始窗口尺寸加大，尽量使左侧参数全部可见
         try:
             screen = QtWidgets.QApplication.primaryScreen()
-            w, h = 960, 630 # 按比例缩小，如之前是1280, 840, 那么960对应的高度比例是630/840=0.75
+            # 缩小整体窗口初始高度，默认约 900x560
+            w, h = 900, 560
             if screen:
                 r = screen.availableGeometry()
-                w = max(w, int(r.width() * 0.5))
-                h = max(h, int(r.height() * 0.5))
+                # 初始尺寸按屏幕宽度50%、高度45% 计算，整体更紧凑
+                w = max(w, int(r.width() * 0.50))
+                h = max(h, int(r.height() * 0.45))
                 self.resize(w, h)
             else:
                 self.resize(w, h)
         except Exception:
             self.resize(w, h)
-        # 设定一个较大的最小尺寸，避免窗口过小导致左侧被压缩
-        self.setMinimumSize(w, h)
+        # 下调最小尺寸，允许用户将窗口缩到更小高度
+        try:
+            self.setMinimumSize(720, 480)
+        except Exception:
+            pass
 
         # Widgets（改为基于 QTabWidget 的架构）
         self.tabs = QtWidgets.QTabWidget(self)

@@ -208,7 +208,8 @@ class VideoConcatTab(QtWidgets.QWidget):
         left_layout.addWidget(_enc["group"])   # 编码参数分组
 
         try:
-            left_container.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+            # 与右侧保持一致的尺寸策略，确保左右面板高度一致填充
+            left_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
             # 更贴近 35:65 比例，同时兼顾较小窗口的显示
             left_container.setMinimumWidth(500)
         except Exception:
@@ -582,7 +583,8 @@ class VideoConcatTab(QtWidgets.QWidget):
         # 缩小文件列表的默认高度，以匹配上侧分组高度
         # 原为 180，后调 140；进一步按用户要求压缩到 120
         try:
-            self.results_table.setMinimumHeight(120)
+            # 进一步压缩右侧结果区的初始最小高度，使整体更紧凑
+            self.results_table.setMinimumHeight(100)
         except Exception:
             pass
         # 选择与编辑行为保持与现有一致
@@ -1793,7 +1795,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         group_res_chk = QtWidgets.QCheckBox("同分辨率视频拼接（默认即可）"); group_res_chk.setChecked(True)
 
         # 分组与布局
-        flow_group = QtWidgets.QGroupBox("基本流程参数")
+        flow_group = QtWidgets.QGroupBox("流程参数")
         flow_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         flow_grid = QtWidgets.QGridLayout()
         flow_grid.setContentsMargins(10, 8, 10, 8)
@@ -1925,10 +1927,11 @@ class VideoConcatTab(QtWidgets.QWidget):
         encode_grid.setHorizontalSpacing(16)
         encode_grid.setVerticalSpacing(10)
 
-        lbl_profile = QtWidgets.QLabel("质量档位")
+        lbl_profile = QtWidgets.QLabel("拼接视频输出质量档位")
         lbl_res = QtWidgets.QLabel("分辨率 (宽/高)")
         lbl_fill = QtWidgets.QLabel("填充模式")
-        lbl_trim = QtWidgets.QLabel("TS裁剪(头/尾, 秒)")
+        lbl_trim = QtWidgets.QLabel("素材裁剪(头/尾, 秒)")
+        
         for _lbl in (lbl_profile, lbl_res, lbl_fill, lbl_trim):
             _lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
