@@ -1787,10 +1787,10 @@ class VideoConcatTab(QtWidgets.QWidget):
         - 与 MainWindow 原有布局保持一致，便于迁移与复用。
         """
         # 数值控件
-        count_spin = QtWidgets.QSpinBox(); count_spin.setRange(1, 9999); count_spin.setValue(5)
-        outputs_spin = QtWidgets.QSpinBox(); outputs_spin.setRange(1, 9999); outputs_spin.setValue(1)
+        count_spin = QtWidgets.QSpinBox(); count_spin.setRange(1, 9999); count_spin.setValue(10)
+        outputs_spin = QtWidgets.QSpinBox(); outputs_spin.setRange(1, 9999); outputs_spin.setValue(5)
         threads_spin = QtWidgets.QSpinBox(); threads_spin.setRange(1, 64); threads_spin.setValue(4)
-        group_res_chk = QtWidgets.QCheckBox("分辨率分组模式"); group_res_chk.setChecked(True)
+        group_res_chk = QtWidgets.QCheckBox("同分辨率视频拼接（默认即可）"); group_res_chk.setChecked(True)
 
         # 分组与布局
         flow_group = QtWidgets.QGroupBox("基本流程参数")
@@ -1803,7 +1803,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         lbl_outputs = QtWidgets.QLabel("生成混剪长视频数量(m)")
         lbl_count = QtWidgets.QLabel("混剪视频切片数量(n)")
         lbl_threads = QtWidgets.QLabel("线程数")
-        lbl_groupres = QtWidgets.QLabel("分辨率分组模式")
+        lbl_groupres = QtWidgets.QLabel("同分辨率视频拼接")
         for _lbl in (lbl_count, lbl_outputs, lbl_threads, lbl_groupres):
             _lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
@@ -1813,7 +1813,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         flow_grid.addWidget(outputs_spin, 0, 3)
         flow_grid.addWidget(lbl_threads, 1, 0)
         flow_grid.addWidget(threads_spin, 1, 1)
-        flow_grid.addWidget(group_res_chk, 1, 2)
+        # flow_grid.addWidget(group_res_chk, 1, 2)
 
         flow_grid.setColumnStretch(0, 0)
         flow_grid.setColumnStretch(1, 1)
@@ -1935,12 +1935,12 @@ class VideoConcatTab(QtWidgets.QWidget):
         # 第 0 行：质量档位
         encode_grid.addWidget(lbl_profile, 0, 0)
         encode_grid.addWidget(profile_combo, 0, 1)
-        # 第 1 行：分辨率
-        encode_grid.addWidget(lbl_res, 1, 0)
-        encode_grid.addWidget(_h(width_spin, height_spin), 1, 1)
-        # 第 2 行：填充模式
-        encode_grid.addWidget(lbl_fill, 2, 0)
-        encode_grid.addWidget(fill_combo, 2, 1)
+        # # 第 1 行：分辨率
+        # encode_grid.addWidget(lbl_res, 1, 0)
+        # encode_grid.addWidget(_h(width_spin, height_spin), 1, 1)
+        # # 第 2 行：填充模式
+        # encode_grid.addWidget(lbl_fill, 2, 0)
+        # encode_grid.addWidget(fill_combo, 2, 1)
         # 第 3 行：TS裁剪（头/尾）
         encode_grid.addWidget(lbl_trim, 3, 0)
         encode_grid.addWidget(_h(trim_head_dbl, trim_tail_dbl), 3, 1)
