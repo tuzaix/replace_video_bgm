@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+# typing.Optional 未使用，移除以保持导入整洁
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtWidgets
 
 # Ensure imports work both in development and PyInstaller-frozen runtime.
 # In frozen mode, bundled packages are available without modifying sys.path.

@@ -198,6 +198,97 @@ python video_bgm_replacer_v3.py videos/ bgm/ --strategy vocals_and_other --overl
 ### 错误代码
 
 - `质量分数 < 阈值`: 分离质量不达标，建议调整参数
+
+---
+
+## 🧭 GUI 标签页扩展规范（Tab Architecture）
+
+为了便于在桌面 GUI 中整合不同功能模块（如视频混剪、封面生成、BGM 合并、音视频分离等），本项目采用标签页（QTabWidget）架构进行组织。
+
+### 结构概览
+
+- MainWindow（gui/main_gui.py）
+  - 使用 QTabWidget 作为中央控件。
+  - 当前已有标签：
+    - “视频混剪”：原主面板迁移至该标签。
+    - “封面生成”：提供 cover_tool.generate_cover 的骨架页面（参数输入与占位交互）。
+    - “更多功能”：占位页，用于后续扩展说明。
+
+### 统一注册方法（register_feature_tab）
+
+为保持一致的样式与行为，主窗口提供统一的标签页注册入口：
+
+```python
+def register_feature_tab(self, title: str, widget: QtWidgets.QWidget) -> int:
+    """
+    将功能页统一注册到主窗口的 QTabWidget 中，并返回注册后的索引。
+    """
+    index = self.tabs.addTab(widget, title)
+    try:
+        widget.setContentsMargins(6, 6, 6, 6)
+    except Exception:
+        pass
+    return index
+```
+
+使用示例：
+
+```python
+concat_tab, root_layout = create_concat_tab(self)
+self.register_feature_tab("视频混剪", concat_tab)
+
+cover_tab = CoverGeneratorTab(self)
+self.register_feature_tab("封面生成", cover_tab)
+```
+
+### 工厂与类的约定
+
+- 工厂函数：
+  - `gui/tabs/video_concat_tab.py:create_concat_tab(parent) -> (tab_widget, root_layout)`
+  - 适用于最小侵入的迁移方案，保持 MainWindow 中既有变量与事件处理方式。
+- 类封装：
+  - `gui/tabs/video_concat_tab.py:VideoConcatTab(QWidget)`（已提供骨架）
+  - 适用于逐步迁移控件与事件绑定到页内，MainWindow 通过清晰接口进行交互。
+
+### 占位页与文档入口
+
+新增“更多功能（开发中）”标签页，包含文档入口按钮以打开 `README_v3.md`，展示规划中的模块：
+
+- 批量封面生成与导出
+- BGM 智能匹配与自动淡入淡出
+- 视频剪辑预览与快捷标注
+- 结果表格导出 CSV/Excel
+
+
+### 新增功能页的约定
+
+1. 每个功能页应封装为一个 QWidget 子类（示例：CoverGeneratorTab）。
+2. 尽量在功能页内部完成 UI 搭建与事件绑定，避免修改全局状态。
+3. 使用 MainWindow.register_feature_tab(title, widget) 将功能页注册为新的标签。
+4. 业务代码应放置在相应的工具模块中（如 cover_tool/generate_cover.py），GUI 通过线程安全的方式调用。
+
+### 开发流程建议（Iterative）
+
+1. 核心逻辑：先实现最核心的业务函数（CLI 已存在可复用）。
+2. 错误处理：补充边界检查、异常捕获、日志输出。
+3. 文档注释：为关键函数撰写 Docstring（Google/Numpy 风格），适当增加行内注释。
+
+### 统一风格与一致性
+
+- 代码需通过项目的格式化与 Lint（如 Black/Flake8 等，如已配置）。
+- 避免使用过于晦涩的模式；优先可读性与一致性。
+- 若功能页涉及 FFmpeg，则沿用统一的 bootstrap_ffmpeg_env 策略进行环境初始化。
+
+### 示例：封面生成页参数
+
+- images_dir（图片目录）
+- caption（字幕文本，可选）
+- per_cover（每个封面图片数）
+- count（生成数量）
+- workers（并发线程数）
+- color（字幕颜色）
+
+后续可将封面生成页接入 cover_tool.generate_cover.generate_covers_concurrently，实现并发生成与结果展示。该页目前为骨架实现，在 GUI 中已可见并可输入参数。
 - `GPU内存不足`: 减少batch size或使用CPU
 - `模型加载失败`: 检查网络连接和模型文件
 

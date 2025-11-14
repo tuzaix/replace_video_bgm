@@ -1,7 +1,6 @@
 import wmi
 import hashlib
 import subprocess
-import sys
 import json
 from typing import Optional
 

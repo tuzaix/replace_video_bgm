@@ -32,3 +32,60 @@ BUTTON_HEIGHT = 30
 BUTTON_RADIUS = 6
 BUTTON_PADDING_HORIZONTAL = 14
 BUTTON_PADDING_VERTICAL = 6
+
+# Stage text and color mappings
+# These mappings centralize the relationship between normalized stage keys
+# and user-visible texts/colors to keep UI semantics consistent across tabs.
+STAGE_TEXT_MAP = {
+    "idle": "空闲",
+    "preprocess": "预处理",
+    "concat": "拼接",
+    "finished": "完成",
+}
+
+STAGE_COLOR_MAP = {
+    "idle": PRIMARY_BLUE,       # Default visual when idle
+    "preprocess": "#f59e0b",   # Tailwind amber-500
+    "concat": "#3b82f6",       # Tailwind blue-500
+    "finished": "#22c55e",     # Tailwind green-500
+}
+
+# Common dialog titles and message formatters
+MISSING_PATHS_WARNING_TITLE = "提示"
+
+def format_missing_paths_warning(paths) -> str:
+    """构造缺失/不可访问路径的汇总警告消息。
+
+    Parameters
+    ----------
+    paths : Iterable[Union[str, pathlib.Path]]
+        待汇总展示的路径列表，接受字符串或 Path 对象。
+
+    Returns
+    -------
+    str
+        适用于 QMessageBox 的多行文本，形如：
+        "以下文件不存在或不可访问:\n<path1>\n<path2>\n..."
+
+    Notes
+    -----
+    - 该函数不做存在性判断，仅负责格式化已标记为缺失/不可访问的路径。
+    - 避免跨模块强依赖 Qt，保持为纯字符串格式化函数。
+    """
+    try:
+        from pathlib import Path  # 局部导入以避免在非路径场景下的开销
+    except Exception:
+        Path = None
+    try:
+        lines = []
+        for p in (paths or []):
+            try:
+                if Path is not None and isinstance(p, Path):
+                    lines.append(str(p))
+                else:
+                    lines.append(str(p))
+            except Exception:
+                pass
+        return "以下文件不存在或不可访问:\n" + "\n".join(lines)
+    except Exception:
+        return "以下文件不存在或不可访问:\n"

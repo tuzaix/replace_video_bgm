@@ -13,7 +13,7 @@ Design goals
   dedicated class without breaking existing behavior.
 """
 
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Literal
 import re
 from pathlib import Path
 from PySide6 import QtWidgets, QtCore, QtGui
@@ -147,13 +147,12 @@ class VideoConcatTab(QtWidgets.QWidget):
         """
         return
 
-    def build_left_panel(self) -> QtWidgets.QScrollArea:
+    def build_left_panel(self) -> QtWidgets.QWidget:
         """
-        构建并返回左侧面板（输入与参数区域）。
+        构建并返回左侧面板（输入与参数区域，普通面板）。
 
         结构
         ----
-        - QScrollArea(left_scroll) 包裹 left_container，支持内容滚动；
         - left_container 使用 QVBoxLayout(left_layout) 依次加入：
           1) 输入与路径分组（视频目录、BGM路径、输出路径）
           2) 基本流程参数分组
@@ -167,17 +166,15 @@ class VideoConcatTab(QtWidgets.QWidget):
 
         返回
         ----
-        QtWidgets.QScrollArea
-            左侧滚动面板（包含输入与参数分组），可直接加入主分割器。
+        QtWidgets.QWidget
+            左侧普通面板（包含输入与参数分组），可直接加入主分割器。
         """
         # 先构建各控件/分组（沿用现有方法，保持引用与行为兼容）
         _inputs = self.build_input_widgets()
         _flow = self.build_flow_params_group()
         _enc = self.build_encoding_params_group()
 
-        # 左侧容器与布局
-        left_scroll = QtWidgets.QScrollArea()
-        left_scroll.setWidgetResizable(True)
+        # 左侧容器与布局（普通 QWidget，不使用滚动面板）
         left_container = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left_container)
         try:
@@ -210,12 +207,10 @@ class VideoConcatTab(QtWidgets.QWidget):
         left_layout.addWidget(_flow["group"])  # 基本流程参数
         left_layout.addWidget(_enc["group"])   # 编码参数分组
 
-        # ScrollArea 包裹
-        left_scroll.setWidget(left_container)
         try:
-            left_scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-            left_scroll.setMinimumWidth(600)
-            left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            left_container.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+            # 更贴近 35:65 比例，同时兼顾较小窗口的显示
+            left_container.setMinimumWidth(500)
         except Exception:
             pass
 
@@ -270,7 +265,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         except Exception:
             pass
 
-        return left_scroll
+        return left_container
 
     def apply_compact_field_sizes(self) -> None:
         """
@@ -341,10 +336,11 @@ class VideoConcatTab(QtWidgets.QWidget):
         # 容器与布局
         right_container = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_container)
+          # 左侧容器边距为 0，布局间距为 4，更紧凑以匹配左侧整体高度
         try:
             # 缩小右侧容器的内边距与间距，以减少整体占用高度
             right_layout.setContentsMargins(0, 0, 0, 0)
-            right_layout.setSpacing(6)
+            right_layout.setSpacing(4)
         except Exception:
             pass
 
@@ -357,42 +353,60 @@ class VideoConcatTab(QtWidgets.QWidget):
         _top_v = QtWidgets.QVBoxLayout(progress_group)
         try:
             # 缩小运行状态分组的内边距与间距，压缩垂直高度
-            _top_v.setContentsMargins(4, 4, 4, 4)
-            _top_v.setSpacing(4)
+            _top_v.setContentsMargins(2, 2, 2, 2)
+            _top_v.setSpacing(6)
         except Exception:
             pass
 
-        # 阶段与进度条
+        # 阶段与进度条 + 单一动作按钮（右侧）
         try:
+            # 构建进度控件；阶段标签不再加入布局，改为将阶段文本展示到进度条上
             self.phase_label, self.progress_bar = self.build_progress_widgets()
-            _top_v.addWidget(self.phase_label)
-            _top_v.addWidget(self.progress_bar)
-            # 应用进度条自适应样式
-            self.apply_progress_style(chunk_color="#3b82f6")
-        except Exception:
-            pass
-
-        # 开始/停止按钮
-        try:
-            self.start_btn = QtWidgets.QPushButton("开始-混剪")
-            self.stop_btn = QtWidgets.QPushButton("停止-混剪")
-            self.stop_btn.setEnabled(False)
-            btn_box = QtWidgets.QHBoxLayout()
-            btn_box.setContentsMargins(0, 0, 0, 0)
-            btn_box.setSpacing(8)
-            btn_box.addWidget(self.start_btn)
-            btn_box.addWidget(self.stop_btn)
-            _top_v.addLayout(btn_box)
-            # 样式统一
-            # 缩小按钮高度与字号，进一步压缩右侧上半部分高度
-            self.apply_action_buttons_style(self.start_btn, self.stop_btn, base_h=32, base_pt=11)
-            # 接入 Tab 内事件
+            # 进度行：进度条 + 动作按钮（开始/结束切换）
+            bar_row = QtWidgets.QHBoxLayout()
+            bar_row.setContentsMargins(0, 0, 0, 0)
+            # 收紧行内间距，使整体更紧凑
+            bar_row.setSpacing(4)
+            bar_row.addWidget(self.progress_bar, 1)
+            # 单一动作按钮，默认“开始”，点击后切换为“结束”
+            self.action_btn = QtWidgets.QPushButton("开始")
             try:
-                self.start_btn.clicked.connect(self._on_start_clicked)
+                # 固定宽度，避免与进度条竞争空间
+                self.action_btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                # self.action_btn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+                # 根据 DPI 自适应宽度，保证在高分辨率下也易点
+                screen = QtWidgets.QApplication.primaryScreen()
+                dpi = screen.logicalDotsPerInch() if screen else 96.0
+                scale = max(1.0, dpi / 96.0)
+                # min_w = int(max(100, min(140, 110 * scale)))
+                # self.action_btn.setMinimumWidth(min_w)
+                # 初始提示：空闲态下提示
+                self.action_btn.setToolTip("点击开始")
             except Exception:
                 pass
+            # 初始运行态标记
+            self._is_running = False
             try:
-                self.stop_btn.clicked.connect(self._on_stop_clicked)
+                self.action_btn.clicked.connect(self._on_action_clicked)
+            except Exception:
+                pass
+            # 无障碍：为关键控件设置可访问名称，便于读屏与自动化测试识别
+            try:
+                self.action_btn.setAccessibleName("concat_action_button")
+                if getattr(self, "progress_bar", None) is not None:
+                    self.progress_bar.setAccessibleName("concat_progress_bar")
+            except Exception:
+                pass
+            
+            bar_row.addWidget(self.action_btn)
+            _top_v.addLayout(bar_row)
+            # 应用进度条自适应样式
+            self.apply_progress_style(chunk_color="#3b82f6")
+            # 样式统一（适配单按钮）
+            self.apply_action_buttons_style(self.action_btn, None, base_h=28, base_pt=11)
+            # 初始化为空闲态样式，使“开始”按钮外观与任务完成后保持一致
+            try:
+                self.set_running_ui_state(False)
             except Exception:
                 pass
         except Exception:
@@ -403,8 +417,9 @@ class VideoConcatTab(QtWidgets.QWidget):
         _rg_layout = results_group.layout()
         if isinstance(_rg_layout, QtWidgets.QVBoxLayout):
             try:
-                _rg_layout.setContentsMargins(10, 8, 10, 8)
-                _rg_layout.setSpacing(8)
+                # 统一为更紧凑的边距与间距，匹配左侧分组的视觉密度
+                _rg_layout.setContentsMargins(6, 4, 6, 4)
+                _rg_layout.setSpacing(6)
             except Exception:
                 pass
         try:
@@ -417,7 +432,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         try:
             actions_bar = QtWidgets.QHBoxLayout()
             actions_bar.setContentsMargins(0, 0, 0, 0)
-            actions_bar.setSpacing(6)
+            actions_bar.setSpacing(4)
             open_selected_btn = QtWidgets.QPushButton("打开文件")
             copy_selected_path_btn = QtWidgets.QPushButton("复制路径")
             actions_bar.addWidget(open_selected_btn)
@@ -455,11 +470,11 @@ class VideoConcatTab(QtWidgets.QWidget):
         right_splitter.addWidget(progress_group)
         right_splitter.addWidget(results_group)
         try:
-            # 调整上下分组的伸缩因子为 3:7（上:下），使上半部分更小、下半部分更大
-            right_splitter.setStretchFactor(0, 3)
-            right_splitter.setStretchFactor(1, 7)
-            # 初始高度分配按照约 3:7 进行（例如 240:560）
-            right_splitter.setSizes([240, 560])
+            # 根据用户要求调整为 1:9（上:下），强调下半部分结果区域
+            right_splitter.setStretchFactor(0, 1)
+            right_splitter.setStretchFactor(1, 9)
+            # 可选：提供初始高度，便于默认布局体现 1:9 的视觉倾向
+            # right_splitter.setSizes([160, 640])
         except Exception:
             pass
         right_layout.addWidget(right_splitter)
@@ -471,7 +486,6 @@ class VideoConcatTab(QtWidgets.QWidget):
         # 最后，确保 Tab 拥有这些控件的引用（供 MainWindow 继续使用）
         try:
             self.attach_right_panel_controls(
-                phase_label=self.phase_label,
                 progress_bar=self.progress_bar,
                 results_table=self.results_table,
                 results_overlay=self._results_overlay,
@@ -500,18 +514,23 @@ class VideoConcatTab(QtWidgets.QWidget):
         - 控件引用（如 self.count_spin 等）在前面的构建过程中已写入到 Tab 实例属性中。
         """
         # 左右面板
-        left_scroll = self.build_left_panel()
+        left_panel = self.build_left_panel()
         right_container = self.build_right_panel()
 
         # 分割器（水平）
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
-        splitter.addWidget(left_scroll)
+        splitter.addWidget(left_panel)
         splitter.addWidget(right_container)
         try:
-            splitter.setStretchFactor(0, 1)
-            splitter.setStretchFactor(1, 2)
-            splitter.setSizes([400, 500])
+            # 优化左右比例为 30:70（左:右）。
+            # 说明：
+            # - setStretchFactor 控制调整大小时的权重；
+            # - setSizes 仅作为初始尺寸的建议，后续以 stretch 因子为主；
+            # - 若窗口总宽度较小，左侧的最小宽度（600）可能导致初始实际比例略有偏差。
+            splitter.setStretchFactor(0, 30)
+            splitter.setStretchFactor(1, 70)
+            splitter.setSizes([300, 700])
         except Exception:
             pass
         # 将分割器加入 Tab 的根布局
@@ -561,8 +580,9 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.results_table = QtWidgets.QTableWidget(0, 4, results_group)
         ensure_table_headers(self.results_table, ["序号", "文件名", "大小(MB)", "输出路径"])  # 列头与现有逻辑保持一致
         # 缩小文件列表的默认高度，以匹配上侧分组高度
+        # 原为 180，后调 140；进一步按用户要求压缩到 120
         try:
-            self.results_table.setMinimumHeight(180)
+            self.results_table.setMinimumHeight(120)
         except Exception:
             pass
         # 选择与编辑行为保持与现有一致
@@ -573,7 +593,7 @@ class VideoConcatTab(QtWidgets.QWidget):
             header = self.results_table.horizontalHeader()
             self.results_table.verticalHeader().setVisible(False)
             # 列宽策略迁移至 Tab 内部，保持与 MainWindow 原有设置一致
-            header.setMinimumSectionSize(80)
+            header.setMinimumSectionSize(60)
             header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
             header.setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
             header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
@@ -594,7 +614,7 @@ class VideoConcatTab(QtWidgets.QWidget):
             pass
         return results_group, self.results_table
 
-    def build_progress_widgets(self) -> tuple[QtWidgets.QLabel, QtWidgets.QProgressBar]:
+    def build_progress_widgets(self) -> tuple[Optional[QtWidgets.QLabel], QtWidgets.QProgressBar]:
         """
         Build phase label and progress bar widgets for the top-right progress area.
 
@@ -608,7 +628,9 @@ class VideoConcatTab(QtWidgets.QWidget):
         - The caller (MainWindow) may further adjust DPI-aware styling
           and layout placement. This method ensures sensible defaults.
         """
-        self.phase_label = QtWidgets.QLabel("阶段: ")
+        # 阶段标签仅保留引用，不再显示在界面；阶段文本改为显示在进度条上
+        # 不再创建阶段标签（统一在进度条文字中展示阶段信息）
+        self.phase_label = None
         self.progress_bar = QtWidgets.QProgressBar()
         try:
             self.progress_bar.setMinimum(0)
@@ -616,7 +638,8 @@ class VideoConcatTab(QtWidgets.QWidget):
             self.progress_bar.setValue(0)
             self.progress_bar.setTextVisible(True)
             self.progress_bar.setAlignment(QtCore.Qt.AlignCenter)
-            self.progress_bar.setFormat("进度: %p%")
+            # 默认展示“状态: 空闲 | 进度: %p%”，运行时通过 update_phase() 动态更新阶段文本
+            self.progress_bar.setFormat("状态: 空闲 | 进度: %p%")
             self.progress_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         except Exception:
             pass
@@ -666,7 +689,6 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     def attach_right_panel_controls(
         self,
-        phase_label: QtWidgets.QLabel,
         progress_bar: QtWidgets.QProgressBar,
         results_table: QtWidgets.QTableWidget,
         results_overlay: Optional[QtWidgets.QWidget] = None,
@@ -683,7 +705,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         Parameters
         ----------
         phase_label : QtWidgets.QLabel
-            The phase label widget.
+            Deprecated. 阶段文本已并入进度条文字，不再使用独立标签。
         progress_bar : QtWidgets.QProgressBar
             The progress bar widget.
         results_table : QtWidgets.QTableWidget
@@ -695,7 +717,6 @@ class VideoConcatTab(QtWidgets.QWidget):
         stop_btn : Optional[QtWidgets.QPushButton]
             The "Stop" action button.
         """
-        self.phase_label = phase_label
         self.progress_bar = progress_bar
         self.results_table = results_table
         self._results_overlay = results_overlay
@@ -715,7 +736,7 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     def _on_start_clicked(self) -> None:
         """
-        处理“开始-混剪”按钮点击事件。
+        处理“开始”按钮点击事件。
 
         职责：采集当前表单设置并通过 start_requested 信号通知 MainWindow。
 
@@ -734,7 +755,7 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     def _on_stop_clicked(self) -> None:
         """
-        处理“停止-混剪”按钮点击事件。
+        处理“结束”按钮点击事件。
 
         职责：通知 MainWindow 执行软停止或清理线程资源。
         """
@@ -742,6 +763,67 @@ class VideoConcatTab(QtWidgets.QWidget):
             self.stop_requested.emit()
         except Exception:
             pass
+
+    def _on_action_clicked(self) -> None:
+        """单一动作按钮点击事件处理。
+
+        逻辑互斥：
+        - 若当前为空闲（未运行），则触发“开始”，并将按钮文案切换为“结束”；
+        - 若当前为运行中，则触发“结束”，并将按钮文案切换为“开始”。
+
+        注意：实际运行态以 MainWindow 的生命周期控制为准；本方法仅发出请求信号，
+        UI 的最终状态由 set_running_ui_state 同步更新，确保一致性。
+        """
+        try:
+            running = bool(getattr(self, "_is_running", False))
+        except Exception:
+            running = False
+        if not running:
+            # 触发开始
+            try:
+                # 临时禁用，防止快速连击造成重复请求；最终由 set_running_ui_state 统一恢复
+                if getattr(self, "action_btn", None) is not None:
+                    self.action_btn.setEnabled(False)
+                self._on_start_clicked()
+            except Exception:
+                pass
+            # 先行切换文案，最终状态由 MainWindow 回调 set_running_ui_state 确认
+            try:
+                self._is_running = True
+                if getattr(self, "action_btn", None) is not None:
+                    self.action_btn.setText("结束")
+            except Exception:
+                pass
+            # 兜底：若 2.5 秒内未收到运行态更新，则重新启用按钮
+            try:
+                timer = QtCore.QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(lambda: self.action_btn.setEnabled(True) if getattr(self, "action_btn", None) is not None else None)
+                timer.start(2500)
+            except Exception:
+                pass
+        else:
+            # 触发停止
+            try:
+                if getattr(self, "action_btn", None) is not None:
+                    self.action_btn.setEnabled(False)
+                self._on_stop_clicked()
+            except Exception:
+                pass
+            try:
+                self._is_running = False
+                if getattr(self, "action_btn", None) is not None:
+                    self.action_btn.setText("开始")
+            except Exception:
+                pass
+            # 兜底：若 2.5 秒内未收到空闲态更新，则重新启用按钮
+            try:
+                timer = QtCore.QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(lambda: self.action_btn.setEnabled(True) if getattr(self, "action_btn", None) is not None else None)
+                timer.start(2500)
+            except Exception:
+                pass
 
     def set_running_ui_state(self, running: bool) -> None:
         """
@@ -759,11 +841,40 @@ class VideoConcatTab(QtWidgets.QWidget):
         便于后续统一应用样式或动画反馈。
         """
         try:
+            # 同步内部运行态标记
+            self._is_running = bool(running)
+            # 传统双按钮：互斥启停
             if self.start_btn is not None:
                 self.start_btn.setEnabled(not running)
             if self.stop_btn is not None:
                 self.stop_btn.setEnabled(running)
-            # 同步应用样式反馈（方案 B）
+            # 单一动作按钮：切换文案与提示
+            if getattr(self, "action_btn", None) is not None:
+                try:
+                    self.action_btn.setText("结束" if running else "开始")
+                    # 单按钮始终可点，由主线程生命周期保证互斥，不在此禁用
+                    self.action_btn.setEnabled(True)
+                    # 根据状态更新提示（移除快捷键说明）
+                    if running:
+                        self.action_btn.setToolTip("点击结束")
+                    else:
+                        self.action_btn.setToolTip("点击开始")
+                except Exception:
+                    pass
+            # 进度条颜色反馈：运行中为蓝色；非运行时若未完成则置灰
+            try:
+                if getattr(self, "progress_bar", None) is not None:
+                    if running:
+                        self.apply_progress_style(chunk_color="#3b82f6")
+                    else:
+                        # 若已达成最大值（完成），保留当前样式（通常为绿色）；否则置灰
+                        val = self.progress_bar.value()
+                        mx = self.progress_bar.maximum()
+                        if isinstance(val, int) and isinstance(mx, int) and val < mx:
+                            self.apply_progress_style(chunk_color="#9ca3af")  # gray-400
+            except Exception:
+                pass
+            # 同步应用样式反馈
             self._apply_start_stop_styles(running)
         except Exception:
             pass
@@ -781,8 +892,12 @@ class VideoConcatTab(QtWidgets.QWidget):
             - 停止按钮：强调色背景、白色文字。
         """
         try:
-            # 基础尺寸，尽量与现有布局保持一致
-            height = theme.BUTTON_HEIGHT
+            # 高度与进度条保持一致，若不可用则回退到主题高度
+            try:
+                pb_h = self.progress_bar.height() if getattr(self, "progress_bar", None) is not None else 0
+            except Exception:
+                pb_h = 0
+            height = pb_h if isinstance(pb_h, int) and pb_h > 0 else theme.BUTTON_HEIGHT
             # 颜色配置（来自统一主题）
             primary_bg = theme.PRIMARY_BLUE
             primary_bg_hover = theme.PRIMARY_BLUE_HOVER
@@ -796,14 +911,14 @@ class VideoConcatTab(QtWidgets.QWidget):
                 f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{theme.BUTTON_PADDING_VERTICAL}px {theme.BUTTON_PADDING_HORIZONTAL}px;"
                 f"border:none;border-radius:{theme.BUTTON_RADIUS}px;color:#ffffff;background-color:{primary_bg};}}"
                 f"QPushButton:hover{{background-color:{primary_bg_hover};}}"
-                f"QPushButton:pressed{{filter: brightness(0.95);}}"
+                f"QPushButton:pressed{{background-color:{primary_bg_hover};}}"
                 f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#93c5fd;}}"  # blue-300
             )
             idle_stop = (
                 f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{theme.BUTTON_PADDING_VERTICAL}px {theme.BUTTON_PADDING_HORIZONTAL}px;"
                 f"border:1px solid #d1d5db;border-radius:{theme.BUTTON_RADIUS}px;color:{gray_text};background-color:{gray_bg};}}"
                 f"QPushButton:hover{{background-color:#d1d5db;}}"
-                f"QPushButton:pressed{{filter: brightness(0.97);}}"
+                f"QPushButton:pressed{{background-color:#d1d5db;}}"
                 f"QPushButton:disabled{{color: rgba(55,65,81,0.6);background-color:#f3f4f6;border:1px solid #e5e7eb;}}"
             )
 
@@ -812,14 +927,14 @@ class VideoConcatTab(QtWidgets.QWidget):
                 f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{theme.BUTTON_PADDING_VERTICAL}px {theme.BUTTON_PADDING_HORIZONTAL}px;"
                 f"border:1px solid #e5e7eb;border-radius:{theme.BUTTON_RADIUS}px;color: rgba(55,65,81,0.7);background-color:#f3f4f6;}}"
                 f"QPushButton:hover{{background-color:#e5e7eb;}}"
-                f"QPushButton:pressed{{filter: brightness(0.97);}}"
+                f"QPushButton:pressed{{background-color:#d1d5db;}}"
                 f"QPushButton:disabled{{color: rgba(55,65,81,0.6);background-color:#f9fafb;border:1px solid #e5e7eb;}}"
             )
             running_stop = (
                 f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{theme.BUTTON_PADDING_VERTICAL}px {theme.BUTTON_PADDING_HORIZONTAL}px;"
                 f"border:none;border-radius:{theme.BUTTON_RADIUS}px;color:#ffffff;background-color:{danger_bg};}}"
                 f"QPushButton:hover{{background-color:{danger_bg_hover};}}"
-                f"QPushButton:pressed{{filter: brightness(0.95);}}"
+                f"QPushButton:pressed{{background-color:{danger_bg_hover};}}"
                 f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#fca5a5;}}"  # red-300
             )
 
@@ -827,6 +942,14 @@ class VideoConcatTab(QtWidgets.QWidget):
                 self.start_btn.setStyleSheet(running_start if running else idle_start)
             if self.stop_btn is not None:
                 self.stop_btn.setStyleSheet(running_stop if running else idle_stop)
+            # 单按钮样式：根据运行态选择开始或停止样式
+            if getattr(self, "action_btn", None) is not None:
+                self.action_btn.setStyleSheet(running_stop if running else idle_start)
+                # 同步按钮的固定高度以匹配进度条
+                try:
+                    self.action_btn.setFixedHeight(height)
+                except Exception:
+                    pass
         except Exception:
             # 样式失败不影响功能
             pass
@@ -858,27 +981,29 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     def update_phase(self, phase_text: str) -> None:
         """
-        Update phase label and progress styling.
+        更新进度条文字中的阶段文本，并应用对应的配色样式。
 
-        在迁移阶段，优先在 Tab 内更新阶段文本，并应用进度条配色策略；
-        若控件未注入，则回退到 MainWindow 的处理器。
+        说明：
+        - 原先显示在独立 QLabel 的阶段文字，现统一并入进度条的文字中；
+        - 颜色样式依旧根据阶段键应用，保证运行态的视觉反馈一致；
+        - 若进度条不可用，则回退到 MainWindow 的处理器。
         """
+        # 归一化阶段键与展示文本
+        try:
+            stage_key = self._normalize_stage_key(phase_text)
+        except Exception:
+            stage_key = "idle"
+        try:
+            display_text = theme.STAGE_TEXT_MAP.get(stage_key, phase_text)
+        except Exception:
+            display_text = phase_text
         # 优先更新注入到 Tab 的控件
-        if self.phase_label is not None:
+        if self.progress_bar is not None:
             try:
-                self.phase_label.setText(f"阶段: {phase_text}")
-            except Exception:
-                pass
-            # 颜色样式迁移至 Tab：根据阶段关键字选择颜色并应用
-            try:
-                pt = (phase_text or "").lower()
-                color = "#3b82f6"  # 默认蓝色
-                if "预处理" in phase_text or "pre" in pt or "scan" in pt:
-                    color = "#f59e0b"  # 橙色：预处理/扫描
-                elif "混合" in phase_text or "concat" in pt or "merge" in pt:
-                    color = "#3b82f6"  # 蓝色：合并/混合
-                elif "完成" in phase_text or "finish" in pt or "done" in pt:
-                    color = "#22c55e"  # 绿色：完成
+                # 将阶段文本合并到进度条的显示文字中
+                self.progress_bar.setFormat(f"状态: {display_text} | 进度: %p%")
+                # 颜色样式迁移至 Tab：根据阶段键选择颜色并应用
+                color = theme.STAGE_COLOR_MAP.get(stage_key, "#3b82f6")
                 self.apply_progress_style(chunk_color=color)
             except Exception:
                 pass
@@ -887,7 +1012,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         try:
             mw = self._get_main_window()
             if mw and hasattr(mw, "_on_phase"):
-                mw._on_phase(phase_text)
+                mw._on_phase(display_text)
         except Exception:
             pass
 
@@ -946,6 +1071,74 @@ class VideoConcatTab(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _color_for_stage(self, phase_text: str) -> str:
+        """
+        Map phase text to a progress chunk color.
+
+        Parameters
+        ----------
+        phase_text : str
+            阶段文本（来自工作者信号或主窗口路由）。
+
+        Returns
+        -------
+        str
+            十六进制颜色字符串，用于进度条块颜色。
+
+        Rules
+        -----
+        - 预处理/扫描：橙色 (#f59e0b)
+        - 合并/混合：蓝色 (#3b82f6)
+        - 完成/结束：绿色 (#22c55e)
+        - 默认：蓝色 (#3b82f6)
+        """
+        try:
+            pt = (phase_text or "").lower()
+            # Normalize to stage keys based on keywords
+            if "预处理" in phase_text or "pre" in pt or "scan" in pt:
+                return theme.STAGE_COLOR_MAP.get("preprocess", "#f59e0b")
+            if "混合" in phase_text or "concat" in pt or "merge" in pt:
+                return theme.STAGE_COLOR_MAP.get("concat", "#3b82f6")
+            if "完成" in phase_text or "finish" in pt or "done" in pt:
+                return theme.STAGE_COLOR_MAP.get("finished", "#22c55e")
+        except Exception:
+            pass
+        return theme.STAGE_COLOR_MAP.get("idle", "#3b82f6")
+
+    def _normalize_stage_key(self, phase_text: str) -> Literal["idle", "preprocess", "concat", "finished"]:
+        """
+        Normalize free-form phase text to a constrained stage key.
+
+        Parameters
+        ----------
+        phase_text : str
+            文本描述的阶段信息，例如 "预处理"、"拼接"、"完成"，或包含英文关键词。
+
+        Returns
+        -------
+        Literal["idle", "preprocess", "concat", "finished"]
+            归一化后的阶段键，用于统一映射展示文本与颜色。
+
+        Rules
+        -----
+        - 包含 "预处理"/"pre"/"scan" 归一化为 "preprocess"
+        - 包含 "混合"/"拼接"/"concat"/"merge" 归一化为 "concat"
+        - 包含 "完成"/"finish"/"done" 归一化为 "finished"
+        - 其他情况归一化为 "idle"
+        """
+        try:
+            pt = (phase_text or "").lower()
+            # 中文优先匹配，英文关键词兜底
+            if "预处理" in phase_text or "pre" in pt or "scan" in pt:
+                return "preprocess"
+            if "混合" in phase_text or "拼接" in phase_text or "concat" in pt or "merge" in pt:
+                return "concat"
+            if "完成" in phase_text or "finish" in pt or "done" in pt:
+                return "finished"
+        except Exception:
+            pass
+        return "idle"
+
     def set_progress_value(self, value: int, total: int = 1000) -> None:
         """
         Alias for update_progress to provide a more semantic API name.
@@ -984,6 +1177,26 @@ class VideoConcatTab(QtWidgets.QWidget):
         """
         try:
             self.update_phase(stage_text)
+        except Exception:
+            pass
+
+    def set_stage(self, stage: Literal["idle", "preprocess", "concat", "finished"]) -> None:
+        """
+        Set the current stage using a constrained vocabulary and update UI.
+
+        Parameters
+        ----------
+        stage : Literal["idle", "preprocess", "concat", "finished"]
+            Normalized stage identifier.
+
+        Behavior
+        --------
+        - Maps the stage identifier to a localized phase text and forwards to
+          update_phase().
+        - Centralizes stage management for better type-safety and maintainability.
+        """
+        try:
+            self.update_phase(theme.STAGE_TEXT_MAP.get(stage, str(stage)))
         except Exception:
             pass
 
@@ -1114,8 +1327,8 @@ class VideoConcatTab(QtWidgets.QWidget):
         self,
         start_btn: Optional[QtWidgets.QPushButton] = None,
         stop_btn: Optional[QtWidgets.QPushButton] = None,
-        base_h: int = 44,
-        base_pt: int = 12,
+        base_h: int = 28,
+        base_pt: int = 11,
     ) -> None:
         """Apply DPI-aware height, font size and lightweight styles to action buttons.
 
@@ -1138,9 +1351,9 @@ class VideoConcatTab(QtWidgets.QWidget):
         - If neither provided nor attached, this method is a no-op.
         """
         # Resolve buttons: prefer parameters, fallback to attached ones
-        start = start_btn or self.start_btn
-        stop = stop_btn or self.stop_btn
-        if start is None or stop is None:
+        start = start_btn or getattr(self, "start_btn", None) or getattr(self, "action_btn", None)
+        stop = stop_btn or getattr(self, "stop_btn", None)
+        if start is None and stop is None:
             return
 
         # Compute DPI scale
@@ -1151,23 +1364,40 @@ class VideoConcatTab(QtWidgets.QWidget):
         except Exception:
             scale = 1.0
 
-        # Adaptive height and font size
-        height = int(max(40, min(64, base_h * scale)))
-        pt_size = int(max(12, min(18, base_pt * scale)))
+        # Target height: match progress bar height if available; otherwise fallback to DPI-scaled base
+        try:
+            pb_h = self.progress_bar.height() if getattr(self, "progress_bar", None) is not None else 0
+        except Exception:
+            pb_h = 0
+        if isinstance(pb_h, int) and pb_h > 0:
+            height = pb_h
+        else:
+            height = int(max(28, min(52, base_h * scale)))
+
+        # Font size: align with progress bar font if possible
+        try:
+            pb_font_pt = self.progress_bar.font().pointSize() if getattr(self, "progress_bar", None) is not None else 0
+        except Exception:
+            pb_font_pt = 0
+        pt_size = pb_font_pt if isinstance(pb_font_pt, int) and pb_font_pt > 0 else int(max(base_pt, min(16, base_pt * scale)))
 
         # Fix height and size policy
         try:
-            start.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-            stop.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-            start.setFixedHeight(height)
-            stop.setFixedHeight(height)
+            if start is not None:
+                start.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                start.setFixedHeight(height)
+            if stop is not None:
+                stop.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                stop.setFixedHeight(height)
         except Exception:
             pass
 
         # Apply font size
         try:
-            bf = start.font(); bf.setPointSize(pt_size); start.setFont(bf)
-            bf2 = stop.font(); bf2.setPointSize(pt_size); stop.setFont(bf2)
+            if start is not None:
+                bf = start.font(); bf.setPointSize(pt_size); start.setFont(bf)
+            if stop is not None:
+                bf2 = stop.font(); bf2.setPointSize(pt_size); stop.setFont(bf2)
         except Exception:
             pass
 
@@ -1179,8 +1409,10 @@ class VideoConcatTab(QtWidgets.QWidget):
                 f"QPushButton:pressed{{border:1px solid #888888;background-color: rgba(0,0,0,0.04);}}"
                 f"QPushButton:disabled{{color: rgba(0,0,0,0.4);border:1px solid #dddddd;background-color: rgba(0,0,0,0.02);}}"
             )
-            start.setStyleSheet(style)
-            stop.setStyleSheet(style)
+            if start is not None:
+                start.setStyleSheet(style)
+            if stop is not None:
+                stop.setStyleSheet(style)
         except Exception:
             pass
 
@@ -1490,6 +1722,8 @@ class VideoConcatTab(QtWidgets.QWidget):
         dir_container.addLayout(dir_btns)
         dir_group = QtWidgets.QGroupBox("视频目录（可多选）")
         dir_group.setLayout(dir_container)
+        # 视频目录默认值设置为E:\Download\社媒助手\抖音\潮汕菲宝，方便调试
+        video_dirs_list.addItem(r"E:\Download\社媒助手\抖音\潮汕菲宝")
 
         # --- BGM 路径（文件或目录） ---
         bgm_path_edit = QtWidgets.QLineEdit()
@@ -1498,6 +1732,8 @@ class VideoConcatTab(QtWidgets.QWidget):
         bgm_hbox = QtWidgets.QHBoxLayout()
         bgm_hbox.addWidget(bgm_path_edit)
         bgm_hbox.addWidget(bgm_browse_btn)
+        # bgm目录设置为E:\Download\社媒助手\ytb-bgm，方便调试
+        bgm_path_edit.setText(r"E:\Download\社媒助手\ytb-bgm")
 
         # --- 输出路径 ---
         output_edit = QtWidgets.QLineEdit()
@@ -1809,54 +2045,46 @@ class VideoConcatTab(QtWidgets.QWidget):
         return None
 
     def on_open_selected_files(self) -> None:
-        """Open and select all selected output files in the system file manager."""
+        """
+        Open and select all selected output files in the system file manager.
+
+        行为
+        ----
+        - 使用 get_selected_paths() 获取选中行对应的路径列表。
+        - 统一委托给 open_paths(paths)，集中处理存在性检查与文件管理器显示。
+        - 如果无选中项，则提示用户进行选择。
+        """
         try:
-            if self.results_table is None:
-                return
-            sel = self.results_table.selectionModel().selectedRows()
+            paths = self.get_selected_paths()
         except Exception:
-            sel = []
-        if not sel:
+            paths = []
+        if not paths:
             QtWidgets.QMessageBox.information(self, "提示", "请先选择一个或多个输出文件")
             return
-        paths: list[Path] = []
-        for mi in sel:
-            try:
-                p = self._get_result_path_by_row(mi.row())
-                if p and p.exists():
-                    paths.append(p)
-                else:
-                    QtWidgets.QMessageBox.warning(self, "提示", f"文件不存在: {p}")
-            except Exception:
-                pass
-        if paths:
-            self._reveal_in_file_manager(paths)
+        try:
+            self.open_paths(paths)
+        except Exception:
+            pass
+
+    def open_selected_paths(self) -> None:
+        """
+        Public alias to open selected output file paths.
+
+        外部模块或 MainWindow 若需触发“打开并在文件管理器中选中”动作，
+        推荐调用此方法以获得更语义化的接口。
+        """
+        try:
+            self.on_open_selected_files()
+        except Exception:
+            pass
 
     def copy_selected_paths(self) -> None:
         """Copy selected output file paths to clipboard."""
         try:
-            if self.results_table is None:
-                return
-            sel = self.results_table.selectionModel().selectedRows()
+            paths = self.get_selected_paths()
         except Exception:
-            sel = []
-        if not sel:
-            QtWidgets.QMessageBox.information(self, "提示", "请先选择一个或多个输出文件")
-            return
-        paths: list[str] = []
-        for mi in sel:
-            try:
-                p = self._get_result_path_by_row(mi.row())
-                if p:
-                    paths.append(str(p))
-            except Exception:
-                pass
-        if paths:
-            try:
-                QtWidgets.QApplication.clipboard().setText("\n".join(paths))
-                QtWidgets.QMessageBox.information(self, "提示", f"已复制 {len(paths)} 个路径到剪贴板")
-            except Exception:
-                pass
+            paths = []
+        self.copy_paths(paths)
 
     def _reveal_in_file_manager(self, paths: List[Path]) -> None:
         """Reveal and select files in the system file manager across platforms."""
@@ -1889,6 +2117,68 @@ class VideoConcatTab(QtWidgets.QWidget):
                     QtCore.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p.parent)))
                 except Exception:
                     pass
+
+    def open_paths(self, paths: List[Path]) -> None:
+        """
+        Open and select specified output file paths in the system file manager.
+
+        Parameters
+        ----------
+        paths : List[pathlib.Path]
+            The file paths to reveal in the system file manager.
+
+        Notes
+        -----
+        - Non-existent paths will be summarized in a single warning dialog and skipped.
+        - This method is UI-agnostic and does not depend on table selection.
+        """
+        try:
+            if not paths:
+                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个或多个输出文件")
+                return
+            existing: List[Path] = []
+            missing: List[Path] = []
+            for p in paths:
+                try:
+                    if p and Path(p).exists():
+                        existing.append(Path(p))
+                    else:
+                        missing.append(Path(p))
+                except Exception:
+                    pass
+            if missing:
+                try:
+                    msg = theme.format_missing_paths_warning(missing)
+                    QtWidgets.QMessageBox.warning(self, theme.MISSING_PATHS_WARNING_TITLE, msg)
+                except Exception:
+                    pass
+            if existing:
+                self._reveal_in_file_manager(existing)
+        except Exception:
+            pass
+
+    def copy_paths(self, paths: List[Path]) -> None:
+        """
+        Copy specified output file paths to clipboard.
+
+        Parameters
+        ----------
+        paths : List[pathlib.Path]
+            The file paths to copy.
+
+        Notes
+        -----
+        - This method is UI-agnostic and does not depend on table selection.
+        - Paths will be copied as newline-separated absolute strings.
+        """
+        try:
+            if not paths:
+                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个或多个输出文件")
+                return
+            QtWidgets.QApplication.clipboard().setText("\n".join(str(p) for p in paths))
+            QtWidgets.QMessageBox.information(self, "提示", f"已复制 {len(paths)} 个路径到剪贴板")
+        except Exception:
+            pass
             
     def update_output_default(self) -> None:
         """

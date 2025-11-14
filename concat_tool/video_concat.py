@@ -1318,7 +1318,7 @@ def main():
         # 清理临时文件（无论是否提前 return 都会执行）
         try:
             if 'temp_dir' in locals() and isinstance(temp_dir, Path) and temp_dir.exists():
-                shutil.rmtree(temp_dir)
+                # shutil.rmtree(temp_dir)
                 print(f"🧹 已清理临时目录: {temp_dir}")
         except Exception as e:
             print(f"⚠️  清理临时目录失败: {e}")

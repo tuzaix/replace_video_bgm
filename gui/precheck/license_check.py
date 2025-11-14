@@ -17,7 +17,6 @@ from __future__ import annotations
 import sys
 import random
 from pathlib import Path
-from typing import Optional
 
 from PySide6 import QtCore, QtWidgets
 
