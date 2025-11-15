@@ -391,7 +391,8 @@ def compute_sharpest_frame_cv_gpu(
                     max_side = 640
                     if max(cw, ch) > max_side:
                         scale = max_side / float(max(cw, ch))
-                    roi = cv2.resize(roi, (int(cw * scale), int(ch * scale)), interpolation=cv2.INTER_AREA)
+                        roi = cv2.resize(roi, (int(cw * scale), int(ch * scale)), interpolation=cv2.INTER_AREA)
+                    # 若无需缩放则直接使用 roi
                     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
                     lap16 = cv2.Laplacian(gray, cv2.CV_16S, ksize=3)
                     mean, stddev = cv2.meanStdDev(lap16)
@@ -502,22 +503,46 @@ def scan_and_extract(
     recursive: bool = False,
     quality: int = 2,
     fmt: str = "png",
+    count_per_video: int = 1,
+    override_cover_dir: Optional[str] = None,
 ) -> List[str]:
-    """Traverse `base_dir` and extract frames for all videos to `cover`.
+    """Traverse `base_dir` and extract frames for all videos.
 
-    - Mirrors input directory structure under `cover` to avoid collisions.
+    Overview
+    --------
+    - Mirrors input directory structure under a `cover` output root.
     - Skips files already extracted unless `overwrite=True`.
-    - 使用 OpenCV 对视频全片进行清晰度分析（拉普拉斯方差），仅保存最清晰的帧。
-    - 默认分析窗口：从 0 秒到视频总时长；若无法探测时长则回退为 0~5 秒。
+    - 使用 OpenCV/CUDA 对视频进行清晰度分析（拉普拉斯方差）。
+    - 支持每个视频保存多张截图：按视频总时长等分为 `count_per_video` 个时间窗，
+      在每个时间窗内选取“最清晰帧”。
 
-    Returns:
-        A list of status messages for each processed file.
+    Parameters
+    ----------
+    base_dir : str
+        根目录，遍历其中的所有视频文件。
+    overwrite : bool, default False
+        若目标文件存在，是否覆盖。
+    recursive : bool, default False
+        是否递归扫描子目录。
+    quality : int, default 2
+        图像质量参数（JPEG 1-31；PNG 映射到压缩级别）。
+    fmt : str, default "png"
+        输出格式（"jpg" 或 "png"）。
+    count_per_video : int, default 1
+        每个视频要生成的截图数量；按时间等分窗口在各窗口中选取最清晰帧。
+    override_cover_dir : Optional[str]
+        若提供，则将输出根目录设置为该路径（而非 `base_dir/截图`）。
+
+    Returns
+    -------
+    List[str]
+        每个处理文件的状态消息列表。
     """
     base_dir = os.path.abspath(base_dir)
     if not os.path.isdir(base_dir):
         return [f"Not a directory: {base_dir}"]
 
-    cover_dir = os.path.join(base_dir, "截图")
+    cover_dir = override_cover_dir if override_cover_dir else os.path.join(base_dir, "截图")
     ensure_dir(cover_dir)
 
     messages: List[str] = []
@@ -548,37 +573,53 @@ def scan_and_extract(
             rel = os.path.relpath(dirpath, start=base_dir)
             out_parent_dir = os.path.join(res_dir, rel) if rel != "." else res_dir
             ensure_dir(out_parent_dir)
-            # 随机数字命名，避免非法字符与路径过长问题，同时保证目录内唯一性
-            ext = "png" if fmt.lower() == "png" else "jpg"
-            safe_name = generate_unique_random_name(out_parent_dir, ext, length=12)
-
-            # GPU 优先：尝试使用 CUDA 解码整片并计算最清晰帧
-            ok_best, best_img, info_msg, best_score, best_num = compute_sharpest_frame_cv_gpu(in_path)
-            if not ok_best:
-                # CPU 兜底：计算分析窗口（0 到视频时长；不可探测则 0~5 秒）
-                start_sec = 0.0
-                dur = probe_video_duration_seconds(in_path)
-                if dur is not None and dur > start_sec:
-                    window_end = dur
-                else:
-                    window_end = start_sec + 5.0
-                ok_best, best_img, info_msg, best_score, best_num = compute_sharpest_frame_cv(
-                    in_path,
-                    start_time_sec=0.0,
-                    end_time_sec=window_end,
-                )
-            if ok_best and best_img is not None:
-                out_path = os.path.join(out_parent_dir, f"{safe_name}.{ext}")
-                if (not overwrite) and os.path.exists(out_path):
-                    messages.append(f"Skip existing: {out_path}")
-                else:
-                    ok_save, msg_save = save_frame_cv(best_img, out_path, fmt=fmt, quality=quality)
-                    messages.append(msg_save)
-                    messages.append(f"Best frame score={best_score:.2f} @ frame={best_num}")
-                    # 标注采用的路径（GPU/CPU）以便调试
-                    messages.append("Path: GPU" if "GPU" in info_msg else "Path: CPU")
+            # 多窗口策略：根据视频总时长等分为 count_per_video 个窗口，逐窗选取最清晰帧
+            try:
+                total_dur = probe_video_duration_seconds(in_path) or 5.0
+            except Exception:
+                total_dur = 5.0
+            total_dur = max(0.5, float(total_dur))
+            shots = max(1, int(count_per_video))
+            window_edges: List[Tuple[float, float]] = []
+            if shots == 1:
+                window_edges = [(0.0, total_dur)]
             else:
-                messages.append(f"CV best-frame failed: {info_msg}")
+                seg = total_dur / float(shots)
+                start = 0.0
+                for i in range(shots):
+                    end = start + seg
+                    # 保证最后一个窗口覆盖到片尾
+                    if i == shots - 1:
+                        end = total_dur
+                    window_edges.append((start, end))
+                    start = end
+
+            # 逐窗口生成截图
+            ext = "png" if fmt.lower() == "png" else "jpg"
+            for (win_start, win_end) in window_edges:
+                # GPU 优先：整片/窗口不支持按时间直接 seek 的 cudacodec，故先尝试整片评分；若失败或需要窗口，则回落到 CPU窗口分析
+                ok_best, best_img, info_msg, best_score, best_num = compute_sharpest_frame_cv_gpu(in_path)
+                if not ok_best:
+                    ok_best, best_img, info_msg, best_score, best_num = compute_sharpest_frame_cv(
+                        in_path,
+                        start_time_sec=win_start,
+                        end_time_sec=win_end,
+                    )
+
+                if ok_best and best_img is not None:
+                    safe_name = generate_unique_random_name(out_parent_dir, ext, length=12)
+                    out_path = os.path.join(out_parent_dir, f"{safe_name}.{ext}")
+                    if (not overwrite) and os.path.exists(out_path):
+                        messages.append(f"Skip existing: {out_path}")
+                    else:
+                        ok_save, msg_save = save_frame_cv(best_img, out_path, fmt=fmt, quality=quality)
+                        messages.append(msg_save)
+                        messages.append(
+                            f"Best frame score={best_score:.2f} @ frame={best_num} window=[{win_start:.2f},{win_end:.2f}]"
+                        )
+                        messages.append("Path: GPU" if "GPU" in info_msg else "Path: CPU")
+                else:
+                    messages.append(f"CV best-frame failed: {info_msg}")
 
     return messages
 
