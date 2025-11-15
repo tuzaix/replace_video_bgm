@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Container, Optional, List, Tuple
 import os
-from PySide6 import QtWidgets, QtCore
+from PySide6 import QtWidgets, QtCore, QtGui
 from gui.utils import theme
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,7 +52,7 @@ class ExtractFramesWorker(QtCore.QObject):
     finished = QtCore.Signal(str, int)
     error = QtCore.Signal(str)
     # 使用带参数的启动信号，确保在工作线程中调用 run()
-    start = QtCore.Signal(str, str, int, int)
+    start = QtCore.Signal(str, str, int, int, int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -404,6 +404,8 @@ class ExtractFramesTab(QtWidgets.QWidget):
 
         self.results_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        # 双击行打开对应分辨率子目录
+        self.results_table.cellDoubleClicked.connect(self._on_results_double_clicked)
 
         group_results = QtWidgets.QGroupBox("截图文件目录")
         grl = QtWidgets.QVBoxLayout(group_results)
@@ -562,6 +564,29 @@ class ExtractFramesTab(QtWidgets.QWidget):
                     self.results_table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(count)))
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def _on_results_double_clicked(self, row: int, column: int) -> None:
+        """双击结果行时打开对应目录。
+
+        从第 `row` 行的第 2 列（分辨率目录路径）读取目录路径，尝试用系统默认文件管理器打开。
+        在 Windows 上优先使用 Qt 的 `QDesktopServices`，失败时回退到 `os.startfile`。
+        """
+        try:
+            item = self.results_table.item(row, 1)
+            if not item:
+                return
+            path = item.text().strip()
+            if not path or not os.path.isdir(path):
+                return
+            # 优先使用 Qt 的 DesktopServices 打开目录
+            opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+            if not opened:
+                try:
+                    os.startfile(path)  # Windows 回退
+                except Exception:
+                    pass
         except Exception:
             pass
 
