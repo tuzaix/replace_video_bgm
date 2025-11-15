@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Container, Optional, List, Tuple
 import os
+import shutil
 from PySide6 import QtWidgets, QtCore, QtGui
 from gui.utils import theme
 import threading
@@ -289,7 +290,6 @@ class ExtractFramesWorker(QtCore.QObject):
             self.phase.emit("Counting results…")
             total_images = 0
             for dirpath, dirnames, filenames in os.walk(output_dir):
-                print(f"目录: {dirpath}")
                 total_images += sum(1 for f in filenames if os.path.splitext(f)[1].lower() in {".jpg", ".jpeg", ".png"})
             # 结束时发射 total_tasks / total_tasks
             self.progress.emit(total_tasks, total_tasks)
@@ -642,11 +642,106 @@ class ExtractFramesTab(QtWidgets.QWidget):
             self.output_dir_edit.setText(d)
 
     def _on_action_clicked(self) -> None:
-        """Start or stop the extraction task depending on current state."""
+        """开始或停止任务；在开始前询问是否清理旧截图目录。
+
+        当当前状态为未运行时：
+        - 若截图目录存在且非空，弹出确认弹窗：
+          - 选择“删除后开始”：先清理该目录，再开始任务。
+          - 选择“保留并开始”：不清理，直接开始任务。
+          - 选择“取消”：不开始任务。
+        - 若目录不存在或为空：直接开始任务。
+
+        当当前状态为运行中时：调用停止逻辑。
+        """
         if not self._is_running:
+            # 在开始前确认是否清理旧目录
+            self._confirm_and_cleanup_output_dir_before_start()
             self._start_task()
         else:
             self._stop_task()
+
+    def _confirm_and_cleanup_output_dir_before_start(self) -> bool:
+        """开始前确认是否清理旧截图目录（精简版）。
+
+        仅在输出目录存在且非空时弹窗，提供两种选择：
+        - "删除后开始"：直接尝试清理后继续开始（失败也不打断）。
+        - "直接开始"：保留旧内容并开始。
+
+        始终返回 True 以继续开始任务（除非无法访问目录时，视为空处理）。
+        """
+        output_dir = self.output_dir_edit.text().strip()
+
+        # 目录不存在则直接允许开始
+        if not os.path.isdir(output_dir):
+            return True
+
+        # 检查目录是否为空
+        try:
+            entries = list(os.scandir(output_dir))
+            is_empty = len(entries) == 0
+        except Exception:
+            # 无法列出时，视为空，避免多余提示
+            is_empty = True
+
+        if is_empty:
+            return True
+
+        # 目录非空，弹窗确认（仅两项：删除后开始 / 直接开始）
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setIcon(QtWidgets.QMessageBox.Question)
+        msg_box.setWindowTitle("清理旧截图确认")
+        msg_box.setText(
+            f"检测到截图目录非空：\n{output_dir}\n\n是否删除旧文件后开始？"
+        )
+        delete_button = msg_box.addButton("删除后开始", QtWidgets.QMessageBox.YesRole)
+        keep_button = msg_box.addButton("直接开始", QtWidgets.QMessageBox.NoRole)
+        msg_box.setDefaultButton(delete_button)
+        msg_box.exec()
+
+        clicked = msg_box.clickedButton()
+        if clicked is delete_button:
+            # 尝试清理（失败不打断流程，不额外弹窗）
+            try:
+                self._safe_cleanup_directory(output_dir)
+            except Exception:
+                pass
+            return True
+        # 直接开始
+        return True
+
+    def _safe_cleanup_directory(self, dir_path: str) -> Tuple[bool, str]:
+        """安全清理指定目录内容。
+
+        尝试删除目录中的所有文件与子目录；若删除整个目录失败，则逐项删除。
+        删除后不保证重建目录；后续 `_start_task()` 会负责创建。
+
+        参数
+        - dir_path: 待清理目录的绝对路径或相对路径。
+
+        返回
+        - (True, "") 表示清理成功；(False, 错误信息) 表示失败。
+        """
+        try:
+            abs_dir = os.path.abspath(dir_path)
+            # 优先尝试整体删除
+            try:
+                shutil.rmtree(abs_dir)
+            except Exception:
+                # 回退到逐项清理
+                try:
+                    for entry in os.scandir(abs_dir):
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                shutil.rmtree(entry.path)
+                            else:
+                                os.remove(entry.path)
+                        except Exception:
+                            pass
+                except Exception as e2:
+                    return False, str(e2)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
     def _start_task(self) -> None:
         """启动后台任务，读取当前表单的目录、数量与线程数。"""
