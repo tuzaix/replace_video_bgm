@@ -506,12 +506,11 @@ class ExtractFramesTab(QtWidgets.QWidget):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("0 / 0")
         self.action_btn = QtWidgets.QPushButton("开始")
-        
         self._apply_progressbar_style(chunk_color=theme.PRIMARY_BLUE)
         self._apply_action_button_style(running=False)
         self.action_btn.clicked.connect(self._on_action_clicked)
         row_progress = QtWidgets.QHBoxLayout()
-        row_progress.addWidget(self.progress_bar, 1)
+        row_progress.addWidget(self.progress_bar)
         row_progress.addWidget(self.action_btn)
 
         group_progress = QtWidgets.QGroupBox("运行状态")
@@ -876,7 +875,7 @@ class ExtractFramesTab(QtWidgets.QWidget):
             row = self.results_table.rowCount()
             self.results_table.insertRow(row)
             self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(out_dir))
-            self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem("查看更多请双击到目录里看"))
+            self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem("查看更多，双击打开目录..."))
         except Exception:
             pass
 
@@ -889,7 +888,7 @@ class ExtractFramesTab(QtWidgets.QWidget):
         在 Windows 上优先使用 Qt 的 `QDesktopServices`，失败时回退到 `os.startfile`。
         """
         try:
-            item = self.results_table.item(row, 1)
+            item = self.results_table.item(row, 0)
             if not item:
                 return
             path = item.text().strip()
