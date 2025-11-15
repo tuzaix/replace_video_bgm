@@ -32,9 +32,8 @@ if not getattr(sys, "frozen", False):
 from gui.workers.video_concat_worker import VideoConcatWorker
 from concat_tool.settings import Settings  # type: ignore
 from gui.precheck import run_preflight_checks
-from gui.tabs.cover_generator_tab import CoverGeneratorTab
+from gui.tabs.extract_frames_tab import ExtractFramesTab
 from gui.tabs.video_concat_tab import VideoConcatTab
-from gui.tabs.bgm_merge_tab import BgmMergeTab
 from gui.utils.table_helpers import resolve_display_name, set_table_row_colors
 # 预检逻辑已抽象到 gui.precheck.preflight 模块，main_gui 保留调用点即可。
 
@@ -69,6 +68,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 下调最小尺寸，允许用户将窗口缩到更小高度
         try:
             self.setMinimumSize(720, 480)
+            self.setMaximumSize(720, 480)
         except Exception:
             pass
 
@@ -84,20 +84,31 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             # 若初始化失败，不影响其他标签页；用户将看到空白页
             pass
-        # 注册已有的“封面生成”标签页骨架（可选扩展）
+    
+         # 注册“生成截图”标签页
         try:
-            cover_tab = CoverGeneratorTab(self)
-            self.register_feature_tab("封面生成", cover_tab)
+            extract_tab = ExtractFramesTab(self)
+            self.register_feature_tab("生成截图", extract_tab)
         except Exception:
-            # 若加载失败，不影响主功能页
+            # 若加载失败，不影响其他标签页
             pass
+        
+        # # 注册已有的“封面生成”标签页骨架（可选扩展）
+        # try:
+        #     cover_tab = CoverGeneratorTab(self)
+        #     self.register_feature_tab("封面生成", cover_tab)
+        # except Exception:
+        #     # 若加载失败，不影响主功能页
+        #     pass
 
-        # 注册“BGM 合并”占位标签页（规划中）
-        try:
-            bgm_tab = BgmMergeTab(self)
-            self.register_feature_tab("BGM 合并", bgm_tab)
-        except Exception:
-            pass
+       
+
+        # # 注册“BGM 合并”占位标签页（规划中）
+        # try:
+        #     bgm_tab = BgmMergeTab(self)
+        #     self.register_feature_tab("BGM 合并", bgm_tab)
+        # except Exception:
+        #     pass
 
         # 占位标签页：更多功能（开发中）
         more_tab = QtWidgets.QWidget()

@@ -27,6 +27,78 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+class BusySpinner(QtWidgets.QWidget):
+    """轻量级菊花转圈圈控件。
+
+    在父控件上绘制一个旋转的圆形条纹，作为不确定加载指示器。通过 `start()`/`stop()` 控制动画。
+    """
+
+    def __init__(
+        self,
+        parent: Optional[QtWidgets.QWidget] = None,
+        inner_radius: int = 12,
+        line_length: int = 6,
+        line_width: int = 3,
+        lines: int = 12,
+        color: Optional[QtGui.QColor] = None,
+        interval_ms: int = 90,
+    ) -> None:
+        super().__init__(parent)
+        self._inner_radius = inner_radius
+        self._line_length = line_length
+        self._line_width = line_width
+        self._lines = max(6, int(lines))
+        base_color = color or QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff")))
+        self._color = base_color
+        self._angle = 0
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(int(interval_ms))
+        self._timer.timeout.connect(self._on_tick)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+
+    def sizeHint(self) -> QtCore.QSize:  # type: ignore[override]
+        """返回控件的推荐尺寸。"""
+        d = (self._inner_radius + self._line_length + self._line_width) * 2
+        return QtCore.QSize(d, d)
+
+    def start(self) -> None:
+        """开始旋转动画。"""
+        self._timer.start()
+        self.show()
+
+    def stop(self) -> None:
+        """停止旋转动画。"""
+        self._timer.stop()
+        self.hide()
+
+    def _on_tick(self) -> None:
+        """定时器回调，更新旋转角度并重绘。"""
+        self._angle = (self._angle + 360 // self._lines) % 360
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # type: ignore[override]
+        """绘制菊花条纹，按照当前角度旋转。"""
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        center = self.rect().center()
+        radius = self._inner_radius
+        for i in range(self._lines):
+            # 颜色从淡到浓形成转圈效果
+            alpha = int(60 + 195 * (i + 1) / self._lines)
+            c = QtGui.QColor(self._color)
+            c.setAlpha(alpha)
+            pen = QtGui.QPen(c, self._line_width, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap)
+            painter.setPen(pen)
+            angle = (self._angle + (360 * i) // self._lines) % 360
+            painter.save()
+            painter.translate(center)
+            painter.rotate(angle)
+            painter.drawLine(QtCore.QPoint(0, -radius), QtCore.QPoint(0, -(radius + self._line_length)))
+            painter.restore()
+        painter.end()
+
+
 class ExtractFramesWorker(QtCore.QObject):
     """Background worker to run frame extraction.
 
@@ -51,6 +123,8 @@ class ExtractFramesWorker(QtCore.QObject):
     progress = QtCore.Signal(int, int)
     finished = QtCore.Signal(str, int)
     error = QtCore.Signal(str)
+    # 每次成功保存一张截图时，发射该图片的绝对路径
+    image_saved = QtCore.Signal(str)
     # 使用带参数的启动信号，确保在工作线程中调用 run()
     start = QtCore.Signal(str, str, int, int, int)
 
@@ -178,13 +252,18 @@ class ExtractFramesWorker(QtCore.QObject):
                             start_time_sec=win_start,
                             end_time_sec=win_end,
                         )
-                    if ok_best and best_img is not None:
-                        ext = "png"
-                        safe_name = generate_unique_random_name(out_parent_dir, ext, length=12)
-                        out_path = os.path.join(out_parent_dir, f"{safe_name}.{ext}")
-                        ok_save, msg_save = save_frame_cv(best_img, out_path, fmt=ext, quality=2)
-                        if ok_save:
-                            saved += 1
+                if ok_best and best_img is not None:
+                    ext = "png"
+                    safe_name = generate_unique_random_name(out_parent_dir, ext, length=12)
+                    out_path = os.path.join(out_parent_dir, f"{safe_name}.{ext}")
+                    ok_save, msg_save = save_frame_cv(best_img, out_path, fmt=ext, quality=2)
+                    if ok_save:
+                        saved += 1
+                        # 通知 UI 展示最新生成的截图预览
+                        try:
+                            self.image_saved.emit(out_path)
+                        except Exception:
+                            pass
                     # 无论窗口是否成功保存，都推进进度
                     with done_lock:
                         done_count += 1
@@ -244,6 +323,11 @@ class ExtractFramesTab(QtWidgets.QWidget):
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 40)
         splitter.setStretchFactor(1, 60)
+
+        # 固定splitter不能左右拖动
+        splitter_handle = splitter.handle(1)
+        splitter_handle.setEnabled(False)
+
         self.root_layout.setContentsMargins(6, 6, 6, 6)
         self.root_layout.addWidget(splitter)
 
@@ -310,16 +394,6 @@ class ExtractFramesTab(QtWidgets.QWidget):
         row_1.addWidget(self.count_spin, 1)
         gl2.addLayout(row_1)
 
-        # 4) 并发执行线程数（数值框）
-        lbl_threads = QtWidgets.QLabel("并发线程数")
-        self.threads_spin = QtWidgets.QSpinBox()
-        self.threads_spin.setRange(1, 32)
-        self.threads_spin.setValue(2)
-        row_2 = QtWidgets.QHBoxLayout()
-        row_2.addWidget(lbl_threads, 0)
-        row_2.addWidget(self.threads_spin, 1)
-        gl2.addLayout(row_2)
-
         # 4) 筛选掉相同视频分辨率的视频数少于x（数值框）
         lbl_filter = QtWidgets.QLabel("过滤同分辨率的视频数少于")
         self.filter_spin = QtWidgets.QSpinBox()
@@ -329,6 +403,16 @@ class ExtractFramesTab(QtWidgets.QWidget):
         row_3.addWidget(lbl_filter, 0)
         row_3.addWidget(self.filter_spin, 1)
         gl2.addLayout(row_3)
+        
+        # 4) 并发执行线程数（数值框）
+        lbl_threads = QtWidgets.QLabel("并发线程数")
+        self.threads_spin = QtWidgets.QSpinBox()
+        self.threads_spin.setRange(1, 32)
+        self.threads_spin.setValue(2)
+        row_2 = QtWidgets.QHBoxLayout()
+        row_2.addWidget(lbl_threads, 0)
+        row_2.addWidget(self.threads_spin, 1)
+        gl2.addLayout(row_2)
 
         # 视频目录变更时同步默认截图目录
         self.video_dir_edit.textChanged.connect(self._sync_default_output_dir)
@@ -344,11 +428,36 @@ class ExtractFramesTab(QtWidgets.QWidget):
             pass
         splitter.addWidget(group1)
         splitter.addWidget(group2)
-        # 在下方加入一个可扩展的占位控件，吃掉剩余空间，使 group1/2 靠上排列
-        spacer = QtWidgets.QWidget()
-        spacer.setMinimumSize(0, 0)
-        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        splitter.addWidget(spacer)
+
+        # # 在下方加入一个可扩展的占位控件，吃掉剩余空间，使 group1/2 靠上排列
+        # spacer = QtWidgets.QWidget()
+        # spacer.setMinimumSize(0, 0)
+        # spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
+
+        group3 = QtWidgets.QGroupBox("截图预览")
+        gl3 = QtWidgets.QVBoxLayout(group3)
+        gl3.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
+        gl3.setContentsMargins(10, 8, 10, 8)
+        gl3.setSpacing(10)
+
+        # spacer换成可以加载图片预览的窗口
+        self.preview_label = QtWidgets.QLabel()
+        # 预览区域铺满整个 group3，但不超过其范围；随 group3 尺寸自适应。
+        try:
+            self.preview_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            self.preview_label.setMinimumSize(0, 0)
+            self.preview_label.setMaximumSize(800, 350)
+            # 监听尺寸变化，以便对当前预览图进行等比平滑缩放
+            self.preview_label.installEventFilter(self)
+        except Exception:
+            pass
+        self.preview_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.preview_label.setStyleSheet("border: 1px solid #ccc;")
+        # 使用拉伸因子，让预览标签填满 group3 可用空间
+        gl3.addWidget(self.preview_label, 1)
+
+        splitter.addWidget(group3)
         # # 设置初始尺寸：前两项按内容高度，剩余空间给占位控件
         # try:
         #     h1 = group1.sizeHint().height()
@@ -411,10 +520,80 @@ class ExtractFramesTab(QtWidgets.QWidget):
         grl = QtWidgets.QVBoxLayout(group_results)
         grl.setContentsMargins(6, 6, 6, 6)
         grl.addWidget(self.results_table)
+        # 初始化覆盖在结果表上的加载蒙版（菊花转圈圈）
+        self._init_results_overlay()
         layout.addWidget(group_results)
 
         container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         return container
+
+    def _init_results_overlay(self) -> None:
+        """初始化覆盖在结果表上的半透明加载蒙版与菊花转圈圈。"""
+        try:
+            # 叠加在结果表上的蒙版，默认隐藏
+            self._results_overlay = QtWidgets.QWidget(self.results_table)
+            self._results_overlay.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+            self._results_overlay.setStyleSheet("background-color: rgba(0, 0, 0, 80);")
+            ovl = QtWidgets.QVBoxLayout(self._results_overlay)
+            ovl.setContentsMargins(24, 24, 24, 24)
+            ovl.setSpacing(12)
+            ovl.setAlignment(QtCore.Qt.AlignCenter)
+
+            # 菊花转圈圈（去掉居中文案，仅保留转圈圈）
+            self._overlay_spinner = BusySpinner(
+                parent=self._results_overlay,
+                inner_radius=12,
+                line_length=6,
+                line_width=3,
+                lines=12,
+                color=QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff"))),
+                interval_ms=80,
+            )
+            ovl.addWidget(self._overlay_spinner, 0, QtCore.Qt.AlignCenter)
+
+            self._results_overlay.hide()
+
+            # 保持蒙版尺寸与结果表一致
+            try:
+                self.results_table.installEventFilter(self)
+            except Exception:
+                pass
+            self._position_results_overlay()
+        except Exception:
+            pass
+
+    def _position_results_overlay(self) -> None:
+        """将蒙版尺寸设为覆盖整个结果表。"""
+        try:
+            if hasattr(self, "_results_overlay") and self._results_overlay is not None:
+                self._results_overlay.setGeometry(self.results_table.rect())
+                self._results_overlay.raise_()
+        except Exception:
+            pass
+
+    def _show_results_overlay(self, show: bool) -> None:
+        """显示或隐藏结果表上的加载蒙版。"""
+        try:
+            if not hasattr(self, "_results_overlay") or self._results_overlay is None:
+                return
+            if show:
+                self._position_results_overlay()
+                self._results_overlay.show()
+                self._results_overlay.raise_()
+                try:
+                    if hasattr(self, "_overlay_spinner") and self._overlay_spinner is not None:
+                        self._overlay_spinner.start()
+                except Exception:
+                    pass
+            else:
+                self._results_overlay.hide()
+                try:
+                    if hasattr(self, "_overlay_spinner") and self._overlay_spinner is not None:
+                        self._overlay_spinner.stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _sync_default_output_dir(self, _: str) -> None:
         """Update the default output dir to <video_dir>/截图 when the video dir changes."""
@@ -473,6 +652,8 @@ class ExtractFramesTab(QtWidgets.QWidget):
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
+        # 连接每张图片保存后的预览更新
+        self._worker.image_saved.connect(self._on_image_saved)
         self._thread.finished.connect(self._cleanup_thread)
         self._thread.start()
         # 通过信号触发开始，避免直接调用导致在主线程执行
@@ -485,6 +666,8 @@ class ExtractFramesTab(QtWidgets.QWidget):
         # 运行态样式：强调“停止”按钮，禁用“开始”外观
         self._apply_action_button_style(running=True)
         self._set_form_enabled(False)
+        # 显示结果列表蒙版（转圈圈）
+        self._show_results_overlay(True)
 
     def _stop_task(self) -> None:
         """Request the worker to stop and restore UI when done."""
@@ -524,7 +707,89 @@ class ExtractFramesTab(QtWidgets.QWidget):
         # 空闲态样式：强调“开始”按钮
         self._apply_action_button_style(running=False)
         self._set_form_enabled(True)
+        # 隐藏结果列表蒙版
+        self._show_results_overlay(False)
         self._cleanup_thread()
+
+    def _on_image_saved(self, path: str) -> None:
+        """每次成功保存截图后，将该图片以幻灯片式交替展示。
+
+        - 固定预览区域大小；
+        - 新图显示时淡入，旧图淡出并销毁以释放内存。
+        """
+        try:
+            if not path or not os.path.isfile(path):
+                return
+            pix = QtGui.QPixmap(path)
+            if pix.isNull():
+                return
+            self._show_preview_pixmap(pix)
+        except Exception:
+            pass
+
+    def _show_preview_pixmap(self, pix: QtGui.QPixmap) -> None:
+        """以交替动画显示预览图片，并清理前一张图片引用避免占用内存。
+
+        Parameters
+        ----------
+        pix : QtGui.QPixmap
+            需要显示的新图片。
+        """
+        try:
+            # 创建透明度效果以支持淡入/淡出
+            if not hasattr(self, "_preview_opacity") or self._preview_opacity is None:
+                self._preview_opacity = QtWidgets.QGraphicsOpacityEffect(self.preview_label)
+                self.preview_label.setGraphicsEffect(self._preview_opacity)
+                self._preview_opacity.setOpacity(1.0)
+
+            had_prev = hasattr(self, "_current_preview_pixmap") and isinstance(getattr(self, "_current_preview_pixmap"), QtGui.QPixmap) and getattr(self, "_current_preview_pixmap") is not None and not getattr(self, "_current_preview_pixmap").isNull()
+
+            def do_fade_in() -> None:
+                try:
+                    size = self.preview_label.size()
+                    scaled = pix.scaled(size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                    self.preview_label.setPixmap(scaled)
+                    self._current_preview_pixmap = pix
+                except Exception:
+                    self.preview_label.setPixmap(pix)
+                    self._current_preview_pixmap = pix
+                anim_in = QtCore.QPropertyAnimation(self._preview_opacity, b"opacity", self)
+                anim_in.setDuration(160)
+                anim_in.setStartValue(0.0)
+                anim_in.setEndValue(1.0)
+                anim_in.setEasingCurve(QtCore.QEasingCurve.InOutQuad)
+                self._preview_anim = anim_in
+                anim_in.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+
+            if had_prev:
+                # 先淡出旧图，然后清理并淡入新图
+                anim_out = QtCore.QPropertyAnimation(self._preview_opacity, b"opacity", self)
+                anim_out.setDuration(120)
+                anim_out.setStartValue(1.0)
+                anim_out.setEndValue(0.0)
+                anim_out.setEasingCurve(QtCore.QEasingCurve.InOutQuad)
+
+                def on_out_finished() -> None:
+                    # 清理旧图，确保销毁引用
+                    try:
+                        self.preview_label.clear()
+                    except Exception:
+                        pass
+                    self._current_preview_pixmap = None
+                    do_fade_in()
+
+                anim_out.finished.connect(on_out_finished)
+                self._preview_anim = anim_out
+                anim_out.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+            else:
+                # 初次显示或无旧图：直接淡入新图
+                try:
+                    self._preview_opacity.setOpacity(0.0)
+                except Exception:
+                    pass
+                do_fade_in()
+        except Exception:
+            pass
 
     def _populate_results_by_resolution(self, out_dir: str) -> None:
         """Populate the results table with resolution subfolders and image counts.
@@ -599,6 +864,8 @@ class ExtractFramesTab(QtWidgets.QWidget):
         # 空闲态样式：强调“开始”按钮
         self._apply_action_button_style(running=False)
         self._set_form_enabled(True)
+        # 隐藏结果列表蒙版
+        self._show_results_overlay(False)
         self._cleanup_thread()
 
     def _cleanup_thread(self) -> None:
@@ -623,6 +890,32 @@ class ExtractFramesTab(QtWidgets.QWidget):
             self.output_dir_edit.setEnabled(enabled)
         except Exception:
             pass
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        """事件过滤：保持加载蒙版自适应，并在预览标签尺寸变化时重绘缩放。"""
+        try:
+            if obj is self.results_table and event.type() in (
+                QtCore.QEvent.Resize,
+                QtCore.QEvent.Move,
+                QtCore.QEvent.Show,
+            ):
+                self._position_results_overlay()
+            # 预览标签尺寸变化时，若存在当前预览图，则按新尺寸重新缩放显示
+            if obj is self.preview_label and event.type() in (
+                QtCore.QEvent.Resize,
+            ):
+                try:
+                    pix = getattr(self, "_current_preview_pixmap", None)
+                    if pix is not None and isinstance(pix, QtGui.QPixmap) and not pix.isNull():
+                        size = self.preview_label.size()
+                        if size.width() > 0 and size.height() > 0:
+                            scaled = pix.scaled(size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                            self.preview_label.setPixmap(scaled)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     # --- 样式与尺寸同步方法 ---
     def _apply_progressbar_style(self, chunk_color: str = theme.PRIMARY_BLUE) -> None:
