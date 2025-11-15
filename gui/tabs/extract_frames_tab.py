@@ -352,7 +352,7 @@ class ExtractFramesTab(QtWidgets.QWidget):
         self.video_dir_edit = QtWidgets.QLineEdit()
         self.video_dir_edit.setPlaceholderText("选择视频目录…")
         # 默认值（可按需调整）
-        self.video_dir_edit.setText("E:\\Download\\社媒助手\\抖音\\Miya")
+        self.video_dir_edit.setText("E:\\Download\\社媒助手\\抖音\\Miya-test")
 
         btn_browse_video = QtWidgets.QPushButton("浏览…")
         btn_browse_video.clicked.connect(self._on_browse_video_dir)
@@ -360,21 +360,6 @@ class ExtractFramesTab(QtWidgets.QWidget):
         row_video.addWidget(lbl_video, 0)
         row_video.addWidget(self.video_dir_edit, 1)
         row_video.addWidget(btn_browse_video)
-        
-       
-
-        # # 在“过滤同分辨率的视频数少于”行右侧增加问号提示按钮
-        # btn_help_filter = QtWidgets.QPushButton("?")
-        # btn_help_filter.setFixedSize(22, 22)
-        # btn_help_filter.setToolTip("当某种分辨率的视频数量少于设定值时，将跳过这些视频的截图生成")
-        # row_3.addWidget(btn_help_filter)
-
-        # # 在“并发线程数”行右侧增加问号提示按钮
-        # btn_help_threads = QtWidgets.QPushButton("?")
-        # btn_help_threads.setFixedSize(22, 22)
-        # btn_help_threads.setToolTip("控制同时处理视频的文件数量，数值越高占用资源越多")
-        # row_2.addWidget(btn_help_threads)
-        
         gl1.addLayout(row_video)
 
         # 2) 截图目录（默认随视频目录更新）
@@ -402,6 +387,9 @@ class ExtractFramesTab(QtWidgets.QWidget):
         # 3) 每个视频截图数量（数值框）
         lbl_count = QtWidgets.QLabel("每个视频截图数量")
         self.count_spin = QtWidgets.QSpinBox()
+        # self.count_spin 支持手动填写
+        self.count_spin.setKeyboardTracking(False)
+
         self.count_spin.setRange(1, 20)
         self.count_spin.setValue(1)
         btn_help_count = QtWidgets.QPushButton("?")
@@ -740,6 +728,9 @@ class ExtractFramesTab(QtWidgets.QWidget):
         self._show_results_overlay(False)
         self._cleanup_thread()
 
+        # 完成后弹窗，提示用户打开目录进行人工筛选
+        self._prompt_open_dir_after_finish(out_dir)
+
     def _on_image_saved(self, path: str) -> None:
         """每次成功保存截图后，将该图片以幻灯片式交替展示。
 
@@ -896,6 +887,35 @@ class ExtractFramesTab(QtWidgets.QWidget):
         # 隐藏结果列表蒙版
         self._show_results_overlay(False)
         self._cleanup_thread()
+
+    def _prompt_open_dir_after_finish(self, out_dir: str) -> None:
+        """在任务完成后弹出提示框，提供“打开目录/取消”选项。
+
+        Parameters
+        ----------
+        out_dir : str
+            截图输出根目录，将在用户点击“打开目录”时用系统文件管理器打开。
+        """
+        try:
+            if not out_dir or not os.path.isdir(out_dir):
+                return
+            msg = QtWidgets.QMessageBox(self)
+            msg.setWindowTitle("提示")
+            msg.setIcon(QtWidgets.QMessageBox.Information)
+            msg.setText("请打开生成截图的目录，人工筛选删除不符合要求的图片\n便于接下来的封面合成质量！")
+            open_btn = msg.addButton("打开目录", QtWidgets.QMessageBox.AcceptRole)
+            cancel_btn = msg.addButton("取消", QtWidgets.QMessageBox.RejectRole)
+            msg.exec()
+            if msg.clickedButton() == open_btn:
+                opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(out_dir))
+                if not opened:
+                    try:
+                        os.startfile(out_dir)
+                    except Exception:
+                        pass
+        except Exception:
+            # 保持安静失败，不影响主流程
+            pass
 
     def _cleanup_thread(self) -> None:
         """Dispose thread and worker references safely."""
