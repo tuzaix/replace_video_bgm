@@ -68,7 +68,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 下调最小尺寸，允许用户将窗口缩到更小高度
         try:
             self.setMinimumSize(720, 480)
-            self.setMaximumSize(720, 480)
+            # self.setMaximumSize(720, 480)
         except Exception:
             pass
 

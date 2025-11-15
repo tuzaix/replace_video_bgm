@@ -360,6 +360,21 @@ class ExtractFramesTab(QtWidgets.QWidget):
         row_video.addWidget(lbl_video, 0)
         row_video.addWidget(self.video_dir_edit, 1)
         row_video.addWidget(btn_browse_video)
+        
+       
+
+        # # 在“过滤同分辨率的视频数少于”行右侧增加问号提示按钮
+        # btn_help_filter = QtWidgets.QPushButton("?")
+        # btn_help_filter.setFixedSize(22, 22)
+        # btn_help_filter.setToolTip("当某种分辨率的视频数量少于设定值时，将跳过这些视频的截图生成")
+        # row_3.addWidget(btn_help_filter)
+
+        # # 在“并发线程数”行右侧增加问号提示按钮
+        # btn_help_threads = QtWidgets.QPushButton("?")
+        # btn_help_threads.setFixedSize(22, 22)
+        # btn_help_threads.setToolTip("控制同时处理视频的文件数量，数值越高占用资源越多")
+        # row_2.addWidget(btn_help_threads)
+        
         gl1.addLayout(row_video)
 
         # 2) 截图目录（默认随视频目录更新）
@@ -389,29 +404,44 @@ class ExtractFramesTab(QtWidgets.QWidget):
         self.count_spin = QtWidgets.QSpinBox()
         self.count_spin.setRange(1, 20)
         self.count_spin.setValue(1)
+        btn_help_count = QtWidgets.QPushButton("?")
+        btn_help_count.setFixedSize(22, 22)
+        btn_help_count.setToolTip("设置每个视频需要生成的截图数量，范围 1–20")
         row_1 = QtWidgets.QHBoxLayout()
         row_1.addWidget(lbl_count, 0)
         row_1.addWidget(self.count_spin, 1)
+        row_1.addWidget(btn_help_count, 2)
+
         gl2.addLayout(row_1)
+
 
         # 4) 筛选掉相同视频分辨率的视频数少于x（数值框）
         lbl_filter = QtWidgets.QLabel("过滤同分辨率的视频数少于")
         self.filter_spin = QtWidgets.QSpinBox()
         self.filter_spin.setRange(1, 100)
         self.filter_spin.setValue(20)
+        btn_help_filter = QtWidgets.QPushButton("?")
+        btn_help_filter.setFixedSize(22, 22)
+        btn_help_filter.setToolTip("当某种分辨率的视频数量少于设定值时，将跳过这些视频的截图生成")
         row_3 = QtWidgets.QHBoxLayout()
         row_3.addWidget(lbl_filter, 0)
         row_3.addWidget(self.filter_spin, 1)
+        row_3.addWidget(btn_help_filter, 2)
         gl2.addLayout(row_3)
-        
+
         # 4) 并发执行线程数（数值框）
         lbl_threads = QtWidgets.QLabel("并发线程数")
         self.threads_spin = QtWidgets.QSpinBox()
         self.threads_spin.setRange(1, 32)
         self.threads_spin.setValue(2)
+        btn_help_threads = QtWidgets.QPushButton("?")
+        btn_help_threads.setFixedSize(22, 22)
+        btn_help_threads.setToolTip("控制同时处理视频的文件数量，数值越高占用资源越多")
+
         row_2 = QtWidgets.QHBoxLayout()
         row_2.addWidget(lbl_threads, 0)
         row_2.addWidget(self.threads_spin, 1)
+        row_2.addWidget(btn_help_threads, 2)
         gl2.addLayout(row_2)
 
         # 视频目录变更时同步默认截图目录
@@ -433,7 +463,6 @@ class ExtractFramesTab(QtWidgets.QWidget):
         # spacer = QtWidgets.QWidget()
         # spacer.setMinimumSize(0, 0)
         # spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-
 
         group3 = QtWidgets.QGroupBox("截图预览")
         gl3 = QtWidgets.QVBoxLayout(group3)
