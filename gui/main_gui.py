@@ -34,6 +34,7 @@ from concat_tool.settings import Settings  # type: ignore
 from gui.precheck import run_preflight_checks
 from gui.tabs.extract_frames_tab import ExtractFramesTab
 from gui.tabs.video_concat_tab import VideoConcatTab
+from gui.tabs.generate_cover_tab import GenerateCoverTab
 from gui.utils.table_helpers import resolve_display_name, set_table_row_colors
 # 预检逻辑已抽象到 gui.precheck.preflight 模块，main_gui 保留调用点即可。
 
@@ -89,6 +90,14 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             extract_tab = ExtractFramesTab(self)
             self.register_feature_tab("生成截图", extract_tab)
+        except Exception:
+            # 若加载失败，不影响其他标签页
+            pass
+
+        # 注册“合成封面”标签页
+        try:
+            cover_tab = GenerateCoverTab(self)
+            self.register_feature_tab("合成封面", cover_tab)
         except Exception:
             # 若加载失败，不影响其他标签页
             pass
