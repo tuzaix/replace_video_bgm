@@ -662,7 +662,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         )
     )
     parser.add_argument("directory", help="Base directory to scan for video files")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing cover images")
+    parser.add_argument("--overwrite", action="store_true", default=True, help="Overwrite existing cover images")
     # Default behavior: non-recursive. Use --recursive to enable scanning subdirectories.
     parser.add_argument("--no-recursive", action="store_true", help="Do not scan subdirectories (default)")
     parser.add_argument("--recursive", action="store_true", help="Scan subdirectories (enable recursion)")
