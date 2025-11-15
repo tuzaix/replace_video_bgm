@@ -216,8 +216,9 @@ class ExtractFramesWorker(QtCore.QObject):
                 nonlocal done_count
                 in_path = os.path.join(video_dir, video_filename)
                 # 分辨率分组目录：<output_dir>/<WxH>/<rel>
-                wh = probe_video_resolution(in_path)
-                res_dir = os.path.join(output_dir, f"{wh[0]}x{wh[1]}" if wh else "unknown_resolution")
+                # wh = probe_video_resolution(in_path)
+                # res_dir = os.path.join(output_dir, f"{wh[0]}x{wh[1]}" if wh else "unknown_resolution")
+                res_dir = output_dir # 不在物理上区分分辨率，之通过视频文件属性来区分
                 ensure_dir(res_dir)
                 out_parent_dir = res_dir  # 非递归，直接使用分辨率层
 
@@ -505,7 +506,7 @@ class ExtractFramesTab(QtWidgets.QWidget):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("0 / 0")
         self.action_btn = QtWidgets.QPushButton("开始")
-        # 与视频混剪页保持一致的尺寸与样式（进度条与按钮同高）
+        
         self._apply_progressbar_style(chunk_color=theme.PRIMARY_BLUE)
         self._apply_action_button_style(running=False)
         self.action_btn.clicked.connect(self._on_action_clicked)
@@ -520,13 +521,22 @@ class ExtractFramesTab(QtWidgets.QWidget):
         layout.addWidget(group_progress)
 
         # b) 结果表（序号，目录，截图数量）
-        self.results_table = QtWidgets.QTableWidget(0, 3)
-        self.results_table.setHorizontalHeaderLabels(["序号", "目录", "截图数量"])
-        self.results_table.horizontalHeader().setStretchLastSection(True)
-    
-        self.results_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        self.results_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
-        self.results_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.results_table = QtWidgets.QTableWidget(0, 2)
+        # 表头：序号、文件绝对路径、分辨率
+        self.results_table.setHorizontalHeaderLabels(["文件路径", "分辨率"])
+        # 列宽按比例调节：第一列10%、第二列70%、第三列20%
+        # 使用 Interactive 模式，并在表格尺寸变化时根据比例重新设置列宽
+        try:
+            header = self.results_table.horizontalHeader()
+            header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        except Exception:
+            pass
+        self._results_col_ratios = (0.70, 0.30)
+        try:
+            self.results_table.installEventFilter(self)
+        except Exception:
+            pass
+        self._apply_results_table_column_ratio()
 
         self.results_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -812,50 +822,70 @@ class ExtractFramesTab(QtWidgets.QWidget):
             pass
 
     def _populate_results_by_resolution(self, out_dir: str) -> None:
-        """Populate the results table with resolution subfolders and image counts.
+        """Populate the results table with all image files and their resolutions.
+
+        遍历传入目录下的所有图片文件（递归）：
+        - 第 1 列：序号（从 1 开始）
+        - 第 2 列：文件的绝对路径
+        - 第 3 列：文件分辨率（如 1920x1080），无法识别时显示 "unknown"
 
         Parameters
         ----------
         out_dir : str
-            截图输出根目录。该目录下按分辨率（如 1920x1080、1280x720、unknown_resolution）划分子目录，
-            本方法将枚举这些子目录，并统计各自包含的图片数量（非递归）。
+            要扫描的根目录。将递归遍历其子目录，收集扩展名为 .jpg/.jpeg/.png 的图片文件。
         """
         try:
             self.results_table.setRowCount(0)
             if not out_dir or not os.path.isdir(out_dir):
                 return
             exts = {".jpg", ".jpeg", ".png"}
-            # 遍历分辨率子目录，仅统计该层级的图片数量
+
+            # 收集所有匹配的图片文件（递归）
+            all_images: list[str] = []
+            display_lines = 30
             try:
-                for name in sorted(os.listdir(out_dir)):
-                    sub_path = os.path.join(out_dir, name)
-                    if not os.path.isdir(sub_path):
-                        continue
-                    # 统计图片数量（非递归）
-                    try:
-                        files = os.listdir(sub_path)
-                    except Exception:
-                        files = []
-                    count = 0
-                    for f in files:
-                        fp = os.path.join(sub_path, f)
+                for dirpath, dirnames, filenames in os.walk(out_dir):
+                    for f in filenames:
+                        fp = os.path.join(dirpath, f)
                         if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in exts:
-                            count += 1
-                    # 填充一行：序号、分辨率子目录路径、数量
-                    row = self.results_table.rowCount()
-                    self.results_table.insertRow(row)
-                    self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(row + 1)))
-                    self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(sub_path))
-                    self.results_table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(count)))
+                            all_images.append(fp)
+                            if len(all_images) > display_lines:
+                                break
+                    if len(all_images) > display_lines:
+                        break
             except Exception:
                 pass
+
+            # 稳定排序后填充表格
+            
+            for fp in sorted(all_images):
+                # 读取图片分辨率（WxH）；失败则显示 unknown
+                res_text = "unknown"
+                try:
+                    img = QtGui.QImage(fp)
+                    if not img.isNull():
+                        res_text = f"{img.width()}x{img.height()}"
+                except Exception:
+                    pass
+
+                row = self.results_table.rowCount()
+                self.results_table.insertRow(row)
+                self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(fp))
+                self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(res_text))
+            # 增加一行，提示是：查看更多，请到 out_dir 查看
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+            self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(out_dir))
+            self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem("查看更多请双击到目录里看"))
         except Exception:
             pass
 
     def _on_results_double_clicked(self, row: int, column: int) -> None:
-        """双击结果行时打开对应目录。
+        """双击结果行时打开对应文件或目录。
 
-        从第 `row` 行的第 2 列（分辨率目录路径）读取目录路径，尝试用系统默认文件管理器打开。
+        从第 `row` 行的第 2 列读取绝对路径：
+        - 如果是文件，则尝试用系统默认程序打开该文件；
+        - 如果是目录，则尝试用系统文件管理器打开该目录。
         在 Windows 上优先使用 Qt 的 `QDesktopServices`，失败时回退到 `os.startfile`。
         """
         try:
@@ -863,13 +893,21 @@ class ExtractFramesTab(QtWidgets.QWidget):
             if not item:
                 return
             path = item.text().strip()
-            if not path or not os.path.isdir(path):
+            if not path:
                 return
-            # 优先使用 Qt 的 DesktopServices 打开目录
-            opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+            # 优先尝试打开文件，其次目录
+            target = None
+            if os.path.isfile(path):
+                target = path
+            elif os.path.isdir(path):
+                target = path
+            else:
+                return
+
+            opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(target))
             if not opened:
                 try:
-                    os.startfile(path)  # Windows 回退
+                    os.startfile(target)  # Windows 回退
                 except Exception:
                     pass
         except Exception:
@@ -949,6 +987,8 @@ class ExtractFramesTab(QtWidgets.QWidget):
                 QtCore.QEvent.Show,
             ):
                 self._position_results_overlay()
+                # 表格尺寸变化时按比例调整列宽
+                self._apply_results_table_column_ratio()
             # 预览标签尺寸变化时，若存在当前预览图，则按新尺寸重新缩放显示
             if obj is self.preview_label and event.type() in (
                 QtCore.QEvent.Resize,
@@ -965,6 +1005,46 @@ class ExtractFramesTab(QtWidgets.QWidget):
         except Exception:
             pass
         return super().eventFilter(obj, event)
+
+    def _apply_results_table_column_ratio(self) -> None:
+        """按比例设置结果表的列宽。
+
+        以当前表格视口宽度为基准，按照 `self._results_col_ratios` 依次将
+        三列宽度设置为约 10% / 70% / 20%。该方法在表格初始化与尺寸变化时调用。
+
+        注意：Qt 的表头没有原生“列权重”概念，因此使用 `Interactive` 模式并在
+        `Resize` 事件中动态应用比例，以获得期望效果。
+        """
+        try:
+            ratios = getattr(self, "_results_col_ratios", (0.70, 0.30))
+            if not isinstance(ratios, (tuple, list)) or len(ratios) != 2:
+                ratios = (0.70, 0.30)
+            total = sum(float(r) for r in ratios)
+            if total <= 0:
+                return
+            vw = self.results_table.viewport().width()
+            if vw <= 0:
+                # 回退到表格本身宽度
+                vw = self.results_table.width()
+            if vw <= 0:
+                return
+
+            # 计算各列宽度，保证最小可读宽度
+            mins = (60, 200)
+            widths = []
+            for i, r in enumerate(ratios):
+                w = int(vw * (float(r) / total))
+                w = max(mins[i], w)
+                widths.append(w)
+
+            # 应用列宽
+            for i, w in enumerate(widths):
+                try:
+                    self.results_table.setColumnWidth(i, w)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # --- 样式与尺寸同步方法 ---
     def _apply_progressbar_style(self, chunk_color: str = theme.PRIMARY_BLUE) -> None:
@@ -995,8 +1075,11 @@ class ExtractFramesTab(QtWidgets.QWidget):
         height = int(max(28, min(52, base_h * scale)))
         try:
             self.progress_bar.setFixedHeight(height)
+            # 缓存统一控件高度，供按钮样式使用，确保开始/停止高度一致
+            self._control_height = height
         except Exception:
-            pass
+            # 回退：无缓存则使用主题默认高度
+            self._control_height = getattr(self, "_control_height", theme.BUTTON_HEIGHT)
         try:
             font = self.progress_bar.font()
             base_pt = 11
@@ -1027,11 +1110,8 @@ class ExtractFramesTab(QtWidgets.QWidget):
         running : bool
             当前是否为运行态。
         """
-        try:
-            pb_h = self.progress_bar.height() if getattr(self, "progress_bar", None) is not None else 0
-        except Exception:
-            pb_h = 0
-        height = pb_h if isinstance(pb_h, int) and pb_h > 0 else theme.BUTTON_HEIGHT
+        # 使用统一的控件高度，避免不同状态下按钮高度不一致
+        height = int(getattr(self, "_control_height", theme.BUTTON_HEIGHT))
 
         primary_bg = theme.PRIMARY_BLUE
         primary_bg_hover = theme.PRIMARY_BLUE_HOVER
@@ -1056,6 +1136,10 @@ class ExtractFramesTab(QtWidgets.QWidget):
         )
 
         try:
+            # 同步按钮字体大小与进度条，视觉高度一致
+            pb_font = self.progress_bar.font() if getattr(self, "progress_bar", None) is not None else None
+            if pb_font is not None:
+                self.action_btn.setFont(pb_font)
             self.action_btn.setStyleSheet(running_style if running else idle_style)
             self.action_btn.setFixedHeight(height)
             self.action_btn.setToolTip("点击开始" if not running else "点击停止")
