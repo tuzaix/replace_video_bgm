@@ -1026,6 +1026,13 @@ class GenerateCoverWorker(QtCore.QObject):
 class GenerateCoverTab(QtWidgets.QWidget):
     """“合成封面”标签页，实现左右面板布局与运行控制。"""
 
+        # -- 交互与绘制常量（封装性优化） --
+    HANDLE_SIZE: float = 10.0           # 交互手柄尺寸（像素）
+    ROTATE_SENSITIVITY: float = 4.0     # 旋转灵敏度：水平每 4 像素约 1 度
+    RESIZE_SENSITIVITY: float = 4.0     # 缩放灵敏度：单步像素换算字号
+    MIN_FONT_SIZE: int = 6              # 最小字号
+    MAX_FONT_SIZE: int = 96             # 最大字号
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self.root_layout = QtWidgets.QHBoxLayout(self)
@@ -2132,9 +2139,3 @@ class GenerateCoverTab(QtWidgets.QWidget):
             self.action_btn.setFixedHeight(height)
         except Exception:
             pass
-    # -- 交互与绘制常量（封装性优化） --
-    HANDLE_SIZE: float = 10.0           # 交互手柄尺寸（像素）
-    ROTATE_SENSITIVITY: float = 4.0     # 旋转灵敏度：水平每 4 像素约 1 度
-    RESIZE_SENSITIVITY: float = 4.0     # 缩放灵敏度：单步像素换算字号
-    MIN_FONT_SIZE: int = 6              # 最小字号
-    MAX_FONT_SIZE: int = 96             # 最大字号
