@@ -1797,8 +1797,6 @@ class GenerateCoverTab(QtWidgets.QWidget):
         status = msg_box.exec()
         clicked = msg_box.clickedButton()
         # 若用户通过右上角 X 关闭（Rejected）或未点任何按钮，视为取消开始
-        print(f"clicked: {clicked}, status: {status}, {QtWidgets.QMessageBox.Rejected}")
-        print(clicked, status, delete_button, keep_button, cancel_button)
         try:
             if clicked is None or clicked == cancel_button:
                 return False
