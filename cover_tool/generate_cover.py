@@ -599,7 +599,6 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
                 # 使用活动区映射计算绘制坐标与字号
                 mapped = map_block_to_draw_area(block, draw_rect)
                 px_size = int(mapped.get("map_text_font_px", 18))
-                stroke_w = int(max(0, round(px_size * 0.01))) + (2 if bbold else 0) # 边框粗细：字号的 1%，加粗时额外 1px
                 
 
                 # 加载中文字体（优先项目字体）
@@ -636,18 +635,10 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
                     ascent, descent = font.getmetrics()  # type: ignore[attr-defined]
                 except Exception:
                     # 兜底：无法获取度量时使用首行 textbbox 高度近似
-                    bb0 = draw.textbbox((0, 0), lines[0], font=font, stroke_width=stroke_w)
+                    bb0 = draw.textbbox((0, 0), lines[0], font=font, stroke_width=0)
                     ascent = max(1, bb0[3] - bb0[1])
                     descent = max(1, int(round(ascent * 0.25)))
                 baseline_h = max(1, int(ascent + descent))
-
-                # 宽度按 textbbox 测量，高度统一使用 baseline_h，避免上下偏移
-                line_sizes = []
-                for ln in lines:
-                    bb = draw.textbbox((0, 0), ln, font=font, stroke_width=stroke_w)
-                    lw = max(1, bb[2] - bb[0])
-                    line_sizes.append((lw, baseline_h))
-                max_width = max(w for w, _ in line_sizes)
 
                 # 行距按比例估算：默认更紧凑（0.18），可通过块字段覆盖
                 try:
@@ -655,8 +646,47 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
                 except Exception:
                     line_gap_ratio = 0.18
                 line_gap_ratio = max(0.0, min(0.5, line_gap_ratio))
+
+                # 高度自适应：根据行数和行距，将字号压缩到 box 高度以内
+                baseline_per_px = baseline_h / max(px_size, 1)
+                lines_count = len(lines)
+                ratio_total = lines_count + line_gap_ratio * max(0, lines_count - 1)
+                if sbh > 0 and baseline_per_px > 0 and ratio_total > 0:
+                    px_fit_h = int(sbh / (baseline_per_px * ratio_total))
+                    px_fit_h = max(8, min(px_size, px_fit_h))
+                    if px_fit_h < px_size:
+                        px_size = px_fit_h
+                        # 重新加载字体并更新度量
+                        if font_path:
+                            try:
+                                try:
+                                    font = ImageFont.truetype(font_path, px_size, layout_engine=getattr(ImageFont, "LAYOUT_BASIC", None))
+                                except Exception:
+                                    font = ImageFont.truetype(font_path, px_size)
+                            except Exception:
+                                font = ImageFont.load_default()
+                        else:
+                            font = ImageFont.load_default()
+                        try:
+                            ascent, descent = font.getmetrics()  # type: ignore[attr-defined]
+                        except Exception:
+                            bb0 = draw.textbbox((0, 0), lines[0], font=font, stroke_width=0)
+                            ascent = max(1, bb0[3] - bb0[1])
+                            descent = max(1, int(round(ascent * 0.25)))
+                        baseline_h = max(1, int(ascent + descent))
+
+                # 依据最终字号计算描边宽度及行宽
+                stroke_w = int(max(0, round(px_size * 0.01))) + (2 if bbold else 0)
+                line_sizes = []
+                for ln in lines:
+                    bb = draw.textbbox((0, 0), ln, font=font, stroke_width=stroke_w)
+                    lw = max(1, bb[2] - bb[0])
+                    line_sizes.append((lw, baseline_h))
+                max_width = max(w for w, _ in line_sizes)
+
+                # 最终行距与总高度（结合行距）
                 line_gap = int(round(baseline_h * line_gap_ratio))
-                total_h = baseline_h * len(lines) + line_gap * max(0, len(lines) - 1)
+                total_h = baseline_h * lines_count + line_gap * max(0, lines_count - 1)
 
                 # 以映射 box 的中心点为参照，计算紧致边界并扩展 10px 背景区域
                 center_x = int(mapped.get("map_text_box_centerpoint_x", sbx + sbw // 2))
