@@ -18,6 +18,112 @@ if PROJECT_ROOT not in sys.path:
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
+def compute_draw_area_16_9_by_width(img_w: int, img_h: int, padding_pct: float = 0.05) -> tuple[int, int, int, int]:
+    """计算图片上的 16:9 居中绘制区域，先剔除四边 padding，再按宽度优先计算，必要时按高度回退。
+
+    输入支持两种形式：
+    - 单值：`padding_pct: float`，表示左右留白比例（左/右各 `padding_pct`），上下为 0；
+    - 四元组/列表：`(left, top, right, bottom)`，每个值可为**比例**（<= 1.0，建议 0~0.2）或**像素**（> 1.0）。
+
+    算法：
+    1) 将四边 padding 统一转换为**像素**：
+       - 若为比例：`px = round(img_w * ratio)`（左右）或 `round(img_h * ratio)`（上下），比例会被夹到 [0, 0.2]；
+       - 若为像素：直接使用非负值；
+    2) 先从有效区域尺寸 `w_eff = img_w - pl_px - pr_px`、`h_eff = img_h - pt_px - pb_px` 出发，按**宽度优先**计算：
+       - `draw_w = w_eff`、`draw_h = round(draw_w * 9/16)`；
+       - 若 `draw_h > h_eff`，则回退为按**高度优先**：`draw_h = h_eff`、`draw_w = round(draw_h * 16/9)`；
+    3) 在有效区域内**居中**放置该矩形并返回 `(left_px, top_px, draw_w, draw_h)`。
+
+    该函数与 GUI 中的 16:9 活动区域逻辑保持一致，适用于将控件坐标映射到图片绘制区域。
+    """
+    try:
+        # 解析 4 边 padding，支持比例或像素
+        def _parse_pad(val, is_horizontal: bool) -> int:
+            # 比例（<=1.0）按对应维度转换为像素，比例夹到 [0, 0.2]; 像素（>1.0）直接取非负
+            if val is None:
+                return 0
+            v = float(val)
+            if v <= 1.0:
+                ratio = max(0.0, min(0.2, v))
+                base = img_w if is_horizontal else img_h
+                return int(round(base * ratio))
+            # 像素值
+            return max(0, int(round(v)))
+
+        if isinstance(padding_pct, (tuple, list)) and len(padding_pct) == 4:
+            pl_px = _parse_pad(padding_pct[0], True)
+            pt_px = _parse_pad(padding_pct[1], False)
+            pr_px = _parse_pad(padding_pct[2], True)
+            pb_px = _parse_pad(padding_pct[3], False)
+        else:
+            # 单值：左右为比例或像素，上下为 0
+            v = float(padding_pct)
+            pl_px = _parse_pad(v, True)
+            pr_px = _parse_pad(v, True)
+            pt_px = 0
+            pb_px = 0
+
+        # 有效范围尺寸（至少为 1 像素）
+        w_eff = max(1, img_w - pl_px - pr_px)
+        h_eff = max(1, img_h - pt_px - pb_px)
+
+        # 宽度优先计算 16:9，必要时按高度回退
+        draw_w = w_eff
+        draw_h = int(round(draw_w * 9.0 / 16.0))
+        if draw_h > h_eff:
+            draw_h = h_eff
+            draw_w = int(round(draw_h * 16.0 / 9.0))
+            draw_w = max(1, min(draw_w, w_eff))
+
+        # 在有效区域内居中
+        left_px = int(round(pl_px + (w_eff - draw_w) / 2.0))
+        top_px = int(round(pt_px + (h_eff - draw_h) / 2.0))
+        return left_px, top_px, int(draw_w), int(draw_h)
+    except Exception:
+        return 0, 0, int(img_w), int(img_h)
+
+def map_block_to_draw_area(block: dict, draw_rect: tuple[int, int, int, int]) -> dict:
+    """将字幕块从控件的 16:9 活动区映射到图片绘制区域，并估算字体像素大小。
+
+    输入字段（来自 `CaptionPositionWidget.get_blocks()`）：
+    - `active_w`, `active_h`: 控件 16:9 活动区宽高（像素）
+    - `pixel_x`, `pixel_y`: 块在活动区的像素坐标（左上角）
+    - `box_w`, `box_h`: 文本包围框宽高（像素）
+    - 可选 `font_size`: 控件中该块的字体点大小（若有则优先使用）
+
+    返回：位置信息与缩放关系，用于在图片上绘制：
+    `{ "x": int, "y": int, "font_px": int, "scale_x": float, "scale_y": float, "draw_left": int, "draw_top": int, "draw_w": int, "draw_h": int }`。
+    """
+    left, top, draw_w, draw_h = draw_rect
+    aw = int(block.get("active_w", 0))
+    ah = int(block.get("active_h", 0))
+    px = int(block.get("pixel_x", 0))
+    py = int(block.get("pixel_y", 0))
+    box_h = int(block.get("box_h", 0))
+    bfont_size = int(block.get("font_size", 0))
+    if aw <= 0 or ah <= 0:
+        sx = sy = 1.0
+    else:
+        sx = float(draw_w) / float(max(1, aw))
+        sy = float(draw_h) / float(max(1, ah))
+    x = int(round(left + px * sx))
+    y = int(round(top + py * sy))
+    if bfont_size > 0:
+        font_px = int(max(8, round(bfont_size * sy)))
+    else:
+        font_px = int(max(8, round(box_h * sy)))
+    return {
+        "x": x,
+        "y": y,
+        "font_px": font_px,
+        "scale_x": float(sx),
+        "scale_y": float(sy),
+        "draw_left": int(left),
+        "draw_top": int(top),
+        "draw_w": int(draw_w),
+        "draw_h": int(draw_h),
+    }
+
 
 def _imread_unicode(path: str, flags: int = 1):
     """Safely read images from paths containing non-ASCII characters on Windows.
@@ -323,29 +429,50 @@ def render_caption_blocks(
             W, H = img_rgba.size
             draw = ImageDraw.Draw(img_rgba)
 
-            # 基准缩放与字体大小近似（保持与原 cv2 路径视觉相近）
-            base_scale = max(0.6, min(1.5, H / 480.0))
+            # 计算 16:9 居中绘制区域（左右各 5% 留白）
+            draw_rect = compute_draw_area_16_9_by_width(W, H, padding_pct=(0.05, 0.03, 0.05, 0.03))
+            # 在原图上标示 16:9 绘制区域：浅灰半透明填充 + 边框
+            try:
+                dl, dt, dw, dh = draw_rect
+                # 透明度统一为 20%（alpha ≈ 51/255）
+                # 优化透明度：填充约 18%（更易看见背景），边框约 40%
+                draw.rectangle(
+                    [dl, dt, dl + dw, dt + dh],
+                    fill=(229, 231, 235, 46),
+                    outline=(160, 160, 160, 102),
+                    width=2,
+                )
+            except Exception:
+                pass
+            
+
             import pprint
             for block in caption_blocks:
-                pprint.pprint(block)
+                # pprint.pprint(block)
+
+                
+                original_box_center_x = block['pixel_x'] + block['box_w'] / 2
+                original_box_center_y = block['pixel_y'] + block['box_h'] / 2
+
+                a_x = block['active_w'] / 2
+                a_y = block['active_h'] / 2
+                print(draw_rect)
+                print(f"({original_box_center_x:.1f}, {original_box_center_y:.1f}) -> ({a_x:.1f}, {a_y:.1f})")
+
                 try:
                     t = _ensure_unicode_text(block.get("text", ""))
                     if not t:
                         continue
-                    pos = block.get("position", (0.0, 0.0))
-                    xr = max(0.0, min(1.0, float(pos[0])))
-                    yr = max(0.0, min(1.0, float(pos[1])))
-                    balign = str(block.get("align", default_align if default_align in {"left", "center", "right"} else "left"))
+                    balign = str(block.get("align", "left"))
                     color_hex = str(block.get("color", "#ffffffff"))
                     bg_hex = str(block.get("bgcolor", "#00000000"))
                     stroke_hex = str(block.get("stroke_color", "#00000000"))
-                    bfont_size = int(block.get("font_size", 18))
                     bbold = bool(block.get("font_bold", False))
 
-                    # 计算近似像素字号与描边宽度
-                    font_scale_b = max(0.4, min(4.0, base_scale * (bfont_size / 18.0)))
-                    px_size = int(max(8, round(font_scale_b * 18)))
-                    stroke_w = int(max(0, round(font_scale_b * 2))) + (1 if bbold else 0)
+                    # 使用活动区映射计算绘制坐标与字号
+                    mapped = map_block_to_draw_area(block, draw_rect)
+                    px_size = int(mapped.get("font_px", 18))
+                    stroke_w = int(max(0, round(px_size * 0.12))) + (1 if bbold else 0)
 
                     # 加载中文字体（优先项目字体）
                     font_path = _resolve_chinese_font(bold=bbold)
@@ -365,13 +492,16 @@ def render_caption_blocks(
                     bbox = draw.textbbox((0, 0), t, font=font, stroke_width=stroke_w)
                     tw = max(1, bbox[2] - bbox[0])
                     th = max(1, bbox[3] - bbox[1])
-                    x = int(round(xr * W))
-                    y = int(round(yr * H))
+                    x = int(mapped.get("x", 0))
+                    y = int(mapped.get("y", 0))
                     if balign == "center":
                         x -= tw // 2
                     elif balign == "right":
                         x -= tw
-                    y = max(th + 6, min(H - 6, y))
+                    # 夹紧到绘制区域范围
+                    dl, dt, dw, dh = draw_rect
+                    y = max(dt + th + 6, min(dt + dh - 6, y))
+                    x = max(dl + 6, min(dl + dw - tw - 6, x))
 
                     # 背景矩形（半透明）
                     rgba_bg = _rgba_hex_to_rgba(bg_hex)

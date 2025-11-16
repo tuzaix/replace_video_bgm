@@ -79,6 +79,7 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         self._editing_idx: int = -1
         self.setMinimumSize(200, 120)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        
         self.setStyleSheet("border: 1px solid #ccc; background: #fafafa;")
         # 默认字号设置为 18
         try:
@@ -551,17 +552,12 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         painter.setPen(QtGui.QPen(QtGui.QColor("#888")))
         painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft, "右键添加/删除字幕块；拖拽字幕进行定位（活动区：16:9）")
         rect = self._active_rect_16_9()
-        pen_area = QtGui.QPen(QtGui.QColor(180, 180, 200))
-        pen_area.setStyle(QtCore.Qt.PenStyle.DashLine)
-        painter.setPen(pen_area)
-        painter.drawRect(rect)
-        pen_axes = QtGui.QPen(QtGui.QColor(160, 160, 220))
-        pen_axes.setStyle(QtCore.Qt.PenStyle.DashLine)
-        painter.setPen(pen_axes)
-        cx = rect.left() + rect.width() / 2.0
-        cy = rect.top() + rect.height() / 2.0
-        painter.drawLine(QtCore.QPointF(rect.left(), cy), QtCore.QPointF(rect.right(), cy))
-        painter.drawLine(QtCore.QPointF(cx, rect.top()), QtCore.QPointF(cx, rect.bottom()))
+        # 填充拖拽活动区域背景为灰色，提升可视对比（先填充，后面再绘制边框与轴，避免被遮住）
+        try:
+            gray_bg = QtGui.QColor(str(getattr(theme, "GRAY_BG", "#e5e7eb")))
+        except Exception:
+            gray_bg = QtGui.QColor("#e5e7eb")
+        painter.fillRect(rect, gray_bg)
         # 绘制所有字幕块（支持旋转与交互手柄）
         for idx, b in enumerate(self._blocks):
             bbox = self._text_bbox(b)
@@ -621,31 +617,49 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                 painter.setPen(QtGui.QPen(QtGui.QColor("#10b981")))
                 painter.drawEllipse(tr)  # 旋转手柄（右上角）
                 painter.restore()
+        # 将活动区边框与轴线置于最上层，避免被字幕块背景所遮挡
+        pen_area = QtGui.QPen(QtGui.QColor(180, 180, 200))
+        pen_area.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen_area)
+        painter.drawRect(rect)
+        pen_axes = QtGui.QPen(QtGui.QColor(160, 160, 220))
+        pen_axes.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen_axes)
+        cx = rect.left() + rect.width() / 2.0
+        cy = rect.top() + rect.height() / 2.0
+        painter.drawLine(QtCore.QPointF(rect.left(), cy), QtCore.QPointF(rect.right(), cy))
+        painter.drawLine(QtCore.QPointF(cx, rect.top()), QtCore.QPointF(cx, rect.bottom()))
         painter.end()
 
     # -------------------------
     # 16:9 活动区计算
     # -------------------------
     def _active_rect_16_9(self) -> QtCore.QRectF:
-        """返回控件内部的“16:9 横屏活动区”矩形。
+        """返回控件内部的“16:9 横屏活动区”矩形（固定比例，含左右留白）。
 
         计算规则：
-        - 以控件宽度为基准计算高度：`h_desired = width * 9 / 16`；
-        - 若超过控件高度，则回算适配宽度：`w_fit = height * 16 / 9` 并水平居中；
-        - 否则按计算高度垂直居中。
+        - 设水平留白比例 `pad = 0.05`（左右各 5%）；
+        - 以有效宽度 `w_draw = w * (1 - 2*pad)` 计算高度 `h_draw = w_draw * 9/16`；
+        - 若高度超过控件高度，则改以高度为基准：`h_draw = h`，`w_draw = min(h*16/9, w*(1-2*pad))`；
+        - 将活动区在控件内居中（左右按留白居中，垂直居中）。
         """
         w = float(max(1, self.width()))
         h = float(max(1, self.height()))
-        h_desired = w * 9.0 / 16.0
-        if h_desired <= h:
-            x0 = 0.0
-            y0 = (h - h_desired) / 2.0
-            return QtCore.QRectF(x0, y0, w, h_desired)
-        # 高度不够：根据高度回算适配宽度，并水平居中
-        w_fit = h * 16.0 / 9.0
-        x0 = (w - w_fit) / 2.0
-        y0 = 0.0
-        return QtCore.QRectF(x0, y0, w_fit, h)
+        pad = 0
+        w_eff = max(1.0, w * (1.0 - 2.0 * pad))
+        h_draw = w_eff * 9.0 / 16.0
+        if h_draw <= h:
+            draw_w = w_eff
+            draw_h = h_draw
+            x0 = (w - draw_w) / 2.0
+            y0 = (h - draw_h) / 2.0
+            return QtCore.QRectF(x0, y0, draw_w, draw_h)
+        # 高度限制：按高度回算宽度并约束留白
+        draw_h = h
+        draw_w = min(h * 16.0 / 9.0, w_eff)
+        x0 = (w - draw_w) / 2.0
+        y0 = (h - draw_h) / 2.0
+        return QtCore.QRectF(x0, y0, draw_w, draw_h)
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
         """双击命中字幕块时进入编辑状态，创建内嵌 QTextEdit。"""
