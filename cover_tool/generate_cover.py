@@ -205,26 +205,87 @@ def _rgba_hex_to_rgba(s: str) -> tuple[int, int, int, int]:
     return (r, g, b, a)
 
 def _resolve_chinese_font(bold: bool, font_family: Optional[str] = None) -> Optional[str]:
-    """Resolve a Chinese font path strictly from project fonts under `gui/fonts`.
+    """Resolve Chinese font path strictly from project fonts under `gui/fonts`.
+
+    Why selection appeared ineffective:
+    - Qt reports font families like "Source Han Sans CN", "思源黑体 CN" or with style hints
+      ("Medium", "Heavy"), which didn't match our previous strict keys
+      (e.g. "sourcehansanscn-bold"). This mismatch caused `None` and a fallback to
+      `ImageFont.load_default()`, making all selections look the same.
+
+    Fix:
+    - Robustly normalize Qt family names and map them to project font files.
+    - Parse weight hints (extra light/light/medium/bold/heavy/regular/normal).
+    - Use the `bold` flag as a tiebreaker when weight is ambiguous.
 
     Priority:
     1) If `font_family` is an existing file path, use it directly.
-    2) If `font_family` matches a known project family or filename, select the corresponding OTF.
-    3) Fallback to project fonts based on weight (bold vs regular).
+    2) If `font_family` mentions Source Han Sans (or 思源黑体) variants, map to CN files.
+    3) Fallback to project fonts based on `bold`.
 
-    Returns:
-    - Font file path as `str` if found; otherwise `None`.
+    Returns the absolute path to the chosen OTF, or `None` if not found.
     """
     try:
+        # 1) Explicit file path
         if font_family:
             ff = str(font_family).strip()
-            # Explicit file path
             if os.path.isfile(ff):
                 return ff
 
-            # Normalize family name and map to project fonts
-            ff_lower = ff.lower()
-            known_project = {
+            name = ff.lower()
+            # Normalize basic separators for matching
+            name_nospace = name.replace(" ", "").replace("_", "").replace("-", "")
+
+            # 2) Map Source Han Sans (思源黑体) names to CN project fonts
+            def choose_weight_filename(weight_hint: Optional[str]) -> str:
+                # Pick filename by explicit weight or fallback using `bold`
+                if weight_hint == "extralight":
+                    return "SourceHanSansCN-ExtraLight.otf"
+                if weight_hint == "light":
+                    return "SourceHanSansCN-Light.otf"
+                if weight_hint == "medium":
+                    return "SourceHanSansCN-Medium.otf"
+                if weight_hint == "heavy":
+                    return "SourceHanSansCN-Heavy.otf"
+                if weight_hint in ("regular", "normal"):
+                    return "SourceHanSansCN-Regular.otf"
+                # Ambiguous: use bold flag
+                return "SourceHanSansCN-Bold.otf" if bold else "SourceHanSansCN-Regular.otf"
+
+            def detect_weight_hint(name_for_hint: str) -> Optional[str]:
+                # Simple heuristics from Qt family: match common weight tokens
+                if "extralight" in name_for_hint or "extra light" in name_for_hint or "extrathin" in name_for_hint:
+                    return "extralight"
+                if "light" in name_for_hint:
+                    return "light"
+                if "medium" in name_for_hint:
+                    return "medium"
+                if "heavy" in name_for_hint:
+                    return "heavy"
+                if "bold" in name_for_hint:
+                    return "bold"  # treated via bold flag
+                if "regular" in name_for_hint or "normal" in name_for_hint:
+                    return "regular"
+                return None
+
+            # Detect Source Han Sans family by various spellings
+            is_source_han = (
+                ("source" in name and "han" in name and ("sans" in name or "黑体" in name))
+                or ("思源黑体" in name)
+                or ("sourcehansans" in name_nospace)
+            )
+            if is_source_han:
+                hint = detect_weight_hint(name)
+                # Bold token in name should prefer bold even if hint absent
+                if hint is None and "bold" in name:
+                    hint = "bold"
+                filename = choose_weight_filename(hint)
+                p = os.path.join(FONTS_DIR, filename)
+                if os.path.isfile(p):
+                    return p
+
+            # Direct mapping for exact known keys (kept for completeness)
+            direct_map = {
                 "sourcehansanscn-regular": "SourceHanSansCN-Regular.otf",
                 "sourcehansanscn-normal": "SourceHanSansCN-Normal.otf",
                 "sourcehansanscn-medium": "SourceHanSansCN-Medium.otf",
@@ -232,17 +293,19 @@ def _resolve_chinese_font(bold: bool, font_family: Optional[str] = None) -> Opti
                 "sourcehansanscn-heavy": "SourceHanSansCN-Heavy.otf",
                 "sourcehansanscn-light": "SourceHanSansCN-Light.otf",
             }
-            # Family without weight → choose bold or regular
-            if ff_lower == "sourcehansanscn":
-                ff_lower = "sourcehansanscn-bold" if bold else "sourcehansanscn-regular"
-            if ff_lower in known_project:
-                p = os.path.join(FONTS_DIR, known_project[ff_lower])
-                if os.path.isfile(p):
-                    return p
+            key = name_nospace
+            if key == "sourcehansanscn":
+                key = "sourcehansanscnbold" if bold else "sourcehansanscnregular"
+            for k, fname in direct_map.items():
+                if k in key:
+                    p = os.path.join(FONTS_DIR, fname)
+                    if os.path.isfile(p):
+                        return p
     except Exception:
+        # Fall through to project fallback
         pass
 
-    # Default project font fallback
+    # 3) Project font fallback based on bold
     candidates = [
         os.path.join(FONTS_DIR, "SourceHanSansCN-Bold.otf") if bold else os.path.join(FONTS_DIR, "SourceHanSansCN-Regular.otf"),
         os.path.join(FONTS_DIR, "SourceHanSansCN-Normal.otf"),
