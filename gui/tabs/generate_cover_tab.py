@@ -758,10 +758,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
         text_row.addWidget(self.caption_text_edit, 1)
         gl2.addLayout(text_row)
 
-        # 去除独立的“封面字幕”输入框；拖拽控件内通过右键菜单添加/删除字幕块
-
         align_row = QtWidgets.QHBoxLayout()
-        align_row.addWidget(QtWidgets.QLabel("字幕对齐方式"), 0)
+        align_row.addWidget(QtWidgets.QLabel("对齐"), 0)
         self.align_left = QtWidgets.QRadioButton("靠左"); 
         self.align_center = QtWidgets.QRadioButton("居中"); 
         self.align_right = QtWidgets.QRadioButton("靠右")
@@ -773,7 +771,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
         align_row.addWidget(self.align_center)
         align_row.addWidget(self.align_right)
         # 字体选择与大小（横向追加控件）
-        align_row.addWidget(QtWidgets.QLabel("字幕字体"), 0)
+        align_row.addWidget(QtWidgets.QLabel("字体"), 0)
         self.font_combo = QtWidgets.QFontComboBox()
         try:
             self.font_combo.setCurrentFont(self.font())
@@ -785,7 +783,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
             pass
         align_row.addWidget(self.font_combo)
 
-        align_row.addWidget(QtWidgets.QLabel("字体大小"), 0)
+        align_row.addWidget(QtWidgets.QLabel("字号"), 0)
         self.font_size_spin = QtWidgets.QSpinBox()
         self.font_size_spin.setRange(8, 72)
         self.font_size_spin.setValue(15)
