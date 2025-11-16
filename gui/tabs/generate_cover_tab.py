@@ -1727,23 +1727,13 @@ class GenerateCoverTab(QtWidgets.QWidget):
         - "删除后开始"：直接尝试清理后继续开始（失败也不打断）。
         - "直接开始"：保留旧内容并开始。
 
-        始终返回 True 以继续开始任务（除非无法访问目录时，视为空处理）。
+        当用户点击弹窗右上角的关闭（X）或取消导致对话框被拒绝时，返回 False，表示不继续往下执行。
+        其他情况返回 True 以继续开始任务（无法访问目录时视为空处理）。
         """
         output_dir = self.output_dir_edit.text().strip()
 
         # 目录不存在则直接允许开始
         if not os.path.isdir(output_dir):
-            return True
-
-        # 检查目录是否为空
-        try:
-            entries = list(os.scandir(output_dir))
-            is_empty = len(entries) == 0
-        except Exception:
-            # 无法列出时，视为空，避免多余提示
-            is_empty = True
-
-        if is_empty:
             return True
 
         # 目录非空，弹窗确认（仅两项：删除后开始 / 直接开始）
@@ -1756,9 +1746,15 @@ class GenerateCoverTab(QtWidgets.QWidget):
         delete_button = msg_box.addButton("删除后开始", QtWidgets.QMessageBox.YesRole)
         keep_button = msg_box.addButton("直接开始", QtWidgets.QMessageBox.NoRole)
         msg_box.setDefaultButton(delete_button)
-        msg_box.exec()
-
+        status = msg_box.exec()
         clicked = msg_box.clickedButton()
+        # 若用户通过右上角 X 关闭或对话框被拒绝，视为取消开始
+        try:
+            if clicked is None or status == QtWidgets.QMessageBox.Rejected:
+                return False
+        except Exception:
+            # 兼容性兜底：继续通过按钮对象判断
+            pass
         if clicked is delete_button:
             # 尝试清理（失败不打断流程，不额外弹窗）
             try:
@@ -1766,8 +1762,11 @@ class GenerateCoverTab(QtWidgets.QWidget):
             except Exception:
                 pass
             return True
-        # 直接开始
-        return True
+        if clicked is keep_button:
+            # 保留旧内容，直接开始
+            return True
+        # 其他情况（包括未知按钮或关闭）一律视为取消
+        return False
 
     def _safe_cleanup_directory(self, dir_path: str) -> Tuple[bool, str]:
         """安全清理指定目录内容。
@@ -1817,7 +1816,9 @@ class GenerateCoverTab(QtWidgets.QWidget):
             return
         # 开始前确认是否清理旧输出目录（仅在非空时提示）
         try:
-            self._confirm_and_cleanup_output_dir_before_start()
+            if not self._confirm_and_cleanup_output_dir_before_start():
+                # 用户关闭弹窗或取消，直接返回，不继续启动任务
+                return
         except Exception:
             pass
         # 收集所有字幕块（包含样式）以支持多字幕块生成
