@@ -21,6 +21,7 @@ from gui.utils import theme
 from gui.utils.table_helpers import ensure_table_headers, resolve_display_name, set_table_row_colors
 from gui.utils.overlay import BusyOverlay
 # 在当前阶段，逐步迁移右侧结果面板的构建到 Tab 内部
+from gui.precheck.preflight import run_preflight_checks
 
 
 def create_concat_tab(parent: Optional[QtWidgets.QWidget] = None) -> Tuple[QtWidgets.QWidget, QtWidgets.QHBoxLayout]:
@@ -114,6 +115,8 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.stop_btn: Optional[QtWidgets.QPushButton] = None
         # 左侧输出路径自动填充开关（默认启用，用户手动编辑后关闭）
         self._output_autofill: bool = True
+        # 授权/环境预检通过标记（首过缓存）
+        self._preflight_passed: bool = False
 
         # 质量档位与填充模式映射（在本 Tab 内维护一份，便于构建控件与展示）
         self._profile_display_to_code = {
@@ -741,10 +744,32 @@ class VideoConcatTab(QtWidgets.QWidget):
         处理“开始”按钮点击事件。
 
         职责：采集当前表单设置并通过 start_requested 信号通知 MainWindow。
+        在首次点击时执行授权/环境预检，未通过则提示并拦截开始。
 
         注意：实际的工作线程创建与运行由 MainWindow 负责，本方法不直接
         启动任何耗时任务，确保 UI 模块与业务逻辑解耦。
         """
+        # --- 预检授权（只要未通过或尚未检查，就执行一次） ---
+        try:
+            if not self._preflight_passed:
+                app = QtWidgets.QApplication.instance()
+                ok = bool(run_preflight_checks(app)) if app is not None else False
+                self._preflight_passed = ok
+                if not ok:
+                    try:
+                        if getattr(self, "phase_label", None) is not None:
+                            self.phase_label.setText("未授权或环境不满足，无法开始")
+                    except Exception:
+                        pass
+                    return
+        except Exception:
+            # 兜底：出现异常则视为未通过，避免误放行
+            try:
+                if getattr(self, "phase_label", None) is not None:
+                    self.phase_label.setText("预检失败：未授权或环境不满足")
+            except Exception:
+                pass
+            return
         try:
             settings_obj = self.collect_settings()
         except Exception:

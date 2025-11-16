@@ -24,6 +24,7 @@ import os
 import shutil
 from PySide6 import QtWidgets, QtCore, QtGui
 from gui.utils import theme
+from gui.precheck import run_preflight_checks
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -311,6 +312,8 @@ class ExtractFramesTab(QtWidgets.QWidget):
         self._thread: Optional[QtCore.QThread] = None
         self._worker: Optional[ExtractFramesWorker] = None
         self._is_running: bool = False
+        # 预检授权状态开关（参考 generate_cover_tab 的实现），通过一次预检决定是否允许开始
+        self._preflight_passed: bool = False
         self._build_page()
 
     def _build_page(self) -> None:
@@ -642,7 +645,7 @@ class ExtractFramesTab(QtWidgets.QWidget):
             self.output_dir_edit.setText(d)
 
     def _on_action_clicked(self) -> None:
-        """开始或停止任务；在开始前询问是否清理旧截图目录。
+        """开始或停止任务；开始前进行一次授权/环境预检，并询问是否清理旧截图目录。
 
         当当前状态为未运行时：
         - 若截图目录存在且非空，弹出确认弹窗：
@@ -654,6 +657,25 @@ class ExtractFramesTab(QtWidgets.QWidget):
         当当前状态为运行中时：调用停止逻辑。
         """
         if not self._is_running:
+            # 授权/环境预检（若尚未通过，则执行一次；通过后本次会话内不重复检查）
+            try:
+                if not self._preflight_passed:
+                    app = QtWidgets.QApplication.instance()
+                    ok = bool(run_preflight_checks(app)) if app is not None else False
+                    self._preflight_passed = ok
+                    if not ok:
+                        try:
+                            QtWidgets.QMessageBox.warning(self, "未授权或环境不满足", "未授权或环境不满足，无法开始")
+                        except Exception:
+                            pass
+                        return
+            except Exception:
+                # 兜底：出现异常则视为未通过，避免误放行
+                try:
+                    QtWidgets.QMessageBox.warning(self, "预检失败", "预检失败：未授权或环境不满足")
+                except Exception:
+                    pass
+                return
             # 在开始前确认是否清理旧目录
             self._confirm_and_cleanup_output_dir_before_start()
             self._start_task()

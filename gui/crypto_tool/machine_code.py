@@ -156,8 +156,8 @@ def get_stable_hardware_id():
             "disk_serial": disk_serial,
             "cpu_id": cpu_id,
         }
-        print(f"原始硬件ID组合: {raw_id}")
-        print(f"硬件信息: {info}")
+        # print(f"原始硬件ID组合: {raw_id}")
+        # print(f"硬件信息: {info}")
         
         info_json = json.dumps(info, ensure_ascii=False)
         hashed_id = hashlib.sha256(info_json.encode('utf-8')).hexdigest()
