@@ -130,12 +130,19 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             yr = max(0.0, min(1.0, float(p.y()) / float(h)))
             bf: QtGui.QFont = b.get("font", self.font())
             al: str = b.get("align", self._align)
+            # 颜色导出为十六进制（含alpha）
+            col: QtGui.QColor = b.get("color", QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff"))))
+            bgc: QtGui.QColor = b.get("bgcolor", QtGui.QColor("#000000"))
+            def _hex_rgba(c: QtGui.QColor) -> str:
+                return f"#{c.red():02x}{c.green():02x}{c.blue():02x}{c.alpha():02x}"
             blocks.append({
                 "text": str(b.get("text", "")),
                 "position": (xr, yr),
                 "font_family": bf.family(),
                 "font_size": bf.pointSize() if bf.pointSize() > 0 else bf.pixelSize() or 12,
                 "align": al if al in {"left", "center", "right"} else "left",
+                "color": _hex_rgba(col),
+                "bgcolor": _hex_rgba(bgc),
             })
         return blocks
 
@@ -181,6 +188,40 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                 return
             a = align if align in {"left", "center", "right"} else "left"
             self._blocks[idx]["align"] = a
+            self.update()
+        except Exception:
+            pass
+
+    def set_block_color(self, idx: int, color: QtGui.QColor) -> None:
+        """设置指定字幕块的文本颜色并重绘。若索引无效则忽略。"""
+        try:
+            if idx < 0 or idx >= len(self._blocks):
+                return
+            self._blocks[idx]["color"] = QtGui.QColor(color)
+            if self._editor is not None and self._editing_idx == idx:
+                try:
+                    pal = self._editor.palette()
+                    pal.setColor(QtGui.QPalette.Text, QtGui.QColor(color))
+                    self._editor.setPalette(pal)
+                except Exception:
+                    pass
+            self.update()
+        except Exception:
+            pass
+
+    def set_block_bgcolor(self, idx: int, color: QtGui.QColor) -> None:
+        """设置指定字幕块的背景颜色并重绘。若索引无效则忽略。"""
+        try:
+            if idx < 0 or idx >= len(self._blocks):
+                return
+            self._blocks[idx]["bgcolor"] = QtGui.QColor(color)
+            if self._editor is not None and self._editing_idx == idx:
+                try:
+                    pal = self._editor.palette()
+                    pal.setColor(QtGui.QPalette.Base, QtGui.QColor(color))
+                    self._editor.setPalette(pal)
+                except Exception:
+                    pass
             self.update()
         except Exception:
             pass
@@ -307,7 +348,8 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         # 绘制所有字幕块
         for idx, b in enumerate(self._blocks):
             bbox = self._text_bbox(b)
-            bg = QtGui.QColor("#000")
+            # 背景颜色：优先使用块自定义颜色，否则为半透明黑
+            bg = QtGui.QColor(b.get("bgcolor", QtGui.QColor("#000")))
             # 选中块使用更高不透明度的背景以增强对比
             bg.setAlpha(110 if idx == self._selected_idx else 90)
             painter.fillRect(bbox, bg)
@@ -318,8 +360,8 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             else:
                 painter.setPen(QtGui.QPen(QtGui.QColor("#000"), 1))
             painter.drawRect(bbox)
-            # 文本颜色
-            color = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff")))
+            # 文本颜色：优先使用块自定义颜色，否则使用主题色
+            color = QtGui.QColor(b.get("color", QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff")))))
             painter.setPen(QtGui.QPen(color))
             # 文本位置：在 bbox 内侧留 6 像素内边距
             font: QtGui.QFont = b.get("font", self.font())
@@ -702,7 +744,10 @@ class GenerateCoverTab(QtWidgets.QWidget):
 
         lbl_images = QtWidgets.QLabel("截图目录")
         self.images_dir_edit = QtWidgets.QLineEdit()
+
         self.images_dir_edit.setPlaceholderText("选择截图目录…")
+        # 默认值便于开发，正式发布要去掉
+        self.images_dir_edit.setText(r"E:\Download\社媒助手\抖音\Miya\截图")
         browse_images_btn = QtWidgets.QPushButton("浏览…")
         browse_images_btn.clicked.connect(self._on_browse_images_dir)
         row_img = QtWidgets.QHBoxLayout()
@@ -715,6 +760,15 @@ class GenerateCoverTab(QtWidgets.QWidget):
         lbl_output = QtWidgets.QLabel("合成目录")
         self.output_dir_edit = QtWidgets.QLineEdit()
         self.output_dir_edit.setPlaceholderText("默认：<截图目录> 的上一层目录/封面")
+
+        images_dir = self.images_dir_edit.text().strip()
+        if images_dir:
+            default_output_dir = os.path.join(os.path.dirname(images_dir), "封面")
+        images_dir = self.images_dir_edit.text()
+        default_output_dir = os.path.join(os.path.dirname(images_dir), "封面")
+        self.output_dir_edit.setText(default_output_dir)
+
+
         browse_output_btn = QtWidgets.QPushButton("浏览")
         browse_output_btn.clicked.connect(self._on_browse_output_dir)
         row_out = QtWidgets.QHBoxLayout()
@@ -729,9 +783,15 @@ class GenerateCoverTab(QtWidgets.QWidget):
 
         # 数值参数：合成封面数、每次拼接截图数、并行数
         row_nums = QtWidgets.QHBoxLayout()
-        self.count_spin = QtWidgets.QSpinBox(); self.count_spin.setRange(1, 500); self.count_spin.setValue(10)
-        self.per_cover_spin = QtWidgets.QSpinBox(); self.per_cover_spin.setRange(1, 10); self.per_cover_spin.setValue(4)
-        self.workers_spin = QtWidgets.QSpinBox(); self.workers_spin.setRange(1, 32); self.workers_spin.setValue(4)
+        self.count_spin = QtWidgets.QSpinBox(); 
+        self.count_spin.setRange(1, 500); 
+        self.count_spin.setValue(10)
+        self.per_cover_spin = QtWidgets.QSpinBox(); 
+        self.per_cover_spin.setRange(1, 10); 
+        self.per_cover_spin.setValue(4)
+        self.workers_spin = QtWidgets.QSpinBox(); 
+        self.workers_spin.setRange(1, 32); 
+        self.workers_spin.setValue(4)
         row_nums.addWidget(QtWidgets.QLabel("合成封面数"), 0)
         row_nums.addWidget(self.count_spin, 1)
         row_nums.addWidget(QtWidgets.QLabel("每次拼接截图数"), 0)
@@ -740,59 +800,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
         row_nums.addWidget(self.workers_spin, 1)
         gl1.addLayout(row_nums)
 
-        # group2：字幕参数
-        group2 = QtWidgets.QGroupBox("字幕参数")
-        gl2 = QtWidgets.QVBoxLayout(group2)
-        gl2.setContentsMargins(10, 8, 10, 8)
-        gl2.setSpacing(10)
-
-        # 字幕文本输入：仅作用于下方选中的拖拽块；未选中则提示
-        text_row = QtWidgets.QHBoxLayout()
-        text_row.addWidget(QtWidgets.QLabel("字幕文本"), 0)
-        self.caption_text_edit = QtWidgets.QLineEdit()
-        self.caption_text_edit.setPlaceholderText("请输入字幕文本（仅作用于选中块）")
-        try:
-            self.caption_text_edit.editingFinished.connect(self._on_caption_text_commit)
-        except Exception:
-            pass
-        text_row.addWidget(self.caption_text_edit, 1)
-        gl2.addLayout(text_row)
-
-        align_row = QtWidgets.QHBoxLayout()
-        align_row.addWidget(QtWidgets.QLabel("对齐"), 0)
-        self.align_left = QtWidgets.QRadioButton("靠左"); 
-        self.align_center = QtWidgets.QRadioButton("居中"); 
-        self.align_right = QtWidgets.QRadioButton("靠右")
-        self.align_center.setChecked(True)
-
-        for rb in (self.align_left, self.align_center, self.align_right):
-            rb.toggled.connect(self._on_align_changed)
-        align_row.addWidget(self.align_left)
-        align_row.addWidget(self.align_center)
-        align_row.addWidget(self.align_right)
-        # 字体选择与大小（横向追加控件）
-        align_row.addWidget(QtWidgets.QLabel("字体"), 0)
-        self.font_combo = QtWidgets.QFontComboBox()
-        try:
-            self.font_combo.setCurrentFont(self.font())
-        except Exception:
-            pass
-        try:
-            self.font_combo.currentFontChanged.connect(self._on_font_changed)
-        except Exception:
-            pass
-        align_row.addWidget(self.font_combo)
-
-        align_row.addWidget(QtWidgets.QLabel("字号"), 0)
-        self.font_size_spin = QtWidgets.QSpinBox()
-        self.font_size_spin.setRange(8, 72)
-        self.font_size_spin.setValue(15)
-        try:
-            self.font_size_spin.valueChanged.connect(self._on_font_changed)
-        except Exception:
-            pass
-        align_row.addWidget(self.font_size_spin)
-        gl2.addLayout(align_row)
+        # group2：字幕参数（抽离为独立函数构建）
+        group2 = self._build_caption_params_group()
 
         # group3：字幕位置（横屏比例）
         group3 = QtWidgets.QGroupBox("字幕在封面的位置（可拖拽）")
@@ -806,6 +815,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
             self.pos_widget.selection_changed.connect(self._on_selection_changed)
         except Exception:
             pass
+        # 去抖计时器已移除：无左侧字幕输入框，文本编辑在右侧控件中完成
         # QTextEdit.textChanged() 不携带文本参数，需主动读取并传给位置控件
         # 字幕文本联动改为由右键菜单管理；不再与外部输入框联动
         # 初始化预览控件字体，使用选择的字体与字号
@@ -834,6 +844,174 @@ class GenerateCoverTab(QtWidgets.QWidget):
         splitter.setStretchFactor(2, 1)
         splitter.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         return splitter
+
+    def _build_caption_params_group(self) -> QtWidgets.QGroupBox:
+        """构建“字幕参数”分组。
+
+        三行布局：
+        - 行1：字体与字号；
+        - 行2：加粗/倾斜/字体颜色/背景颜色；
+        - 行3：对齐（靠左/居中/靠右）。
+
+        所有控件仅作用于“当前选中”的字幕块，并保持 Office 风格的扁平切换按钮。
+        """
+        group2 = QtWidgets.QGroupBox("字幕参数")
+        gl2 = QtWidgets.QVBoxLayout(group2)
+        gl2.setContentsMargins(10, 8, 10, 8)
+        gl2.setSpacing(10)
+
+        # 行1：字体与字号（仅使用项目目录 gui/fonts 内的字体）
+        row_font = QtWidgets.QHBoxLayout()
+        row_font.addWidget(QtWidgets.QLabel("字体:"), 0)
+        self.font_combo = QtWidgets.QComboBox()
+        try:
+            self._ensure_project_fonts_loaded()
+            self.font_combo.addItems(getattr(self, "_project_font_families", []))
+            # 初始选中：当前选中块的字体族；若无选中，优先第一个块
+            try:
+                sel_idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+                blocks = getattr(self.pos_widget, "_blocks", [])
+                if sel_idx is None or int(sel_idx) < 0:
+                    sel_idx = 0 if blocks else -1
+                if sel_idx is not None and int(sel_idx) >= 0 and int(sel_idx) < len(blocks):
+                    f = blocks[int(sel_idx)].get("font", self.pos_widget.font())
+                    fam = f.family()
+                    i = self.font_combo.findText(fam)
+                    if i >= 0:
+                        self.font_combo.setCurrentIndex(i)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            self.font_combo.currentIndexChanged.connect(self._on_font_changed)
+        except Exception:
+            pass
+        row_font.addWidget(self.font_combo, 1)
+        row_font.addWidget(QtWidgets.QLabel("字号:"), 0)
+        self.font_size_spin = QtWidgets.QSpinBox()
+        self.font_size_spin.setRange(8, 96)
+        self.font_size_spin.setValue(15)
+        try:
+            self.font_size_spin.valueChanged.connect(self._on_font_changed)
+        except Exception:
+            pass
+        row_font.addWidget(self.font_size_spin)
+        try:
+            row_font.addStretch(1)
+        except Exception:
+            pass
+        gl2.addLayout(row_font)
+
+        # 行2：样式与颜色（加粗/倾斜/字体颜色/背景颜色）
+        row_style = QtWidgets.QHBoxLayout()
+        # 加粗按钮（Office风格：切换态、扁平）
+        self.bold_btn = QtWidgets.QToolButton()
+        self.bold_btn.setText("B")
+        self.bold_btn.setCheckable(True)
+        self.bold_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.bold_btn.setFixedSize(28, 24)
+        self.bold_btn.setStyleSheet(
+            "QToolButton{font-weight:bold; border:1px solid #cfcfcf; background:#ffffff;}"
+            "QToolButton:checked{background:#2563eb; color:#ffffff; border-color:#2563eb;}"
+        )
+        self.bold_btn.toggled.connect(self._on_font_bold_toggled)
+        row_style.addWidget(self.bold_btn)
+
+        # 倾斜按钮
+        self.italic_btn = QtWidgets.QToolButton()
+        self.italic_btn.setText("I")
+        self.italic_btn.setCheckable(True)
+        self.italic_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.italic_btn.setFixedSize(28, 24)
+        self.italic_btn.setStyleSheet(
+            "QToolButton{font-style:italic; border:1px solid #cfcfcf; background:#ffffff;}"
+            "QToolButton:checked{background:#2563eb; color:#ffffff; border-color:#2563eb;}"
+        )
+        self.italic_btn.toggled.connect(self._on_font_italic_toggled)
+        row_style.addWidget(self.italic_btn)
+
+        # 字体颜色按钮（显示当前颜色预览）
+        self.font_color_btn = QtWidgets.QToolButton()
+        self.font_color_btn.setText("A")
+        self.font_color_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.font_color_btn.setFixedSize(28, 24)
+        self.font_color_btn.setStyleSheet(
+            "QToolButton{border:1px solid #cfcfcf; background:#ffffff;}"
+        )
+        self.font_color_btn.clicked.connect(self._on_font_color_clicked)
+        row_style.addWidget(QtWidgets.QLabel("字体颜色:"))
+        row_style.addWidget(self.font_color_btn)
+
+        # 背景颜色按钮（显示当前颜色预览）
+        self.font_bg_color_btn = QtWidgets.QToolButton()
+        self.font_bg_color_btn.setText("字体背景色")
+        self.font_bg_color_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.font_bg_color_btn.setFixedSize(32, 24)
+        self.font_bg_color_btn.setStyleSheet(
+            "QToolButton{border:1px solid #cfcfcf; background:#ffffff;}"
+        )
+        self.font_bg_color_btn.clicked.connect(self._on_font_bg_color_clicked)
+        row_style.addWidget(QtWidgets.QLabel("字体背景色:"))
+        row_style.addWidget(self.font_bg_color_btn)
+        try:
+            row_style.addStretch(1)
+        except Exception:
+            pass
+        gl2.addLayout(row_style)
+
+        # 行3：对齐
+        align_row = QtWidgets.QHBoxLayout()
+        align_row.addWidget(QtWidgets.QLabel("对齐:"), 0)
+        self.align_left = QtWidgets.QRadioButton("居左"); 
+        self.align_center = QtWidgets.QRadioButton("居中"); 
+        self.align_right = QtWidgets.QRadioButton("居右")
+        self.align_center.setChecked(True)
+        for rb in (self.align_left, self.align_center, self.align_right):
+            rb.toggled.connect(self._on_align_changed)
+        align_row.addWidget(self.align_left)
+        align_row.addWidget(self.align_center)
+        align_row.addWidget(self.align_right)
+        try:
+            align_row.addStretch(1)
+        except Exception:
+            pass
+        gl2.addLayout(align_row)
+
+        return group2
+
+    def _ensure_project_fonts_loaded(self) -> None:
+        """加载项目字体目录中的字体文件，并记录可用字体族列表。
+
+        目录：`gui/fonts`，支持扩展名 `.ttf`/`.otf`。
+        调用后在 `self._project_font_families` 中提供去重后的字体族名称列表。
+        """
+        try:
+            fonts_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "fonts"))
+            fams = []
+            if os.path.isdir(fonts_dir):
+                for name in os.listdir(fonts_dir):
+                    lp = os.path.join(fonts_dir, name)
+                    if not os.path.isfile(lp):
+                        continue
+                    lower = name.lower()
+                    if not (lower.endswith(".ttf") or lower.endswith(".otf")):
+                        continue
+                    fid = QtGui.QFontDatabase.addApplicationFont(lp)
+                    if fid < 0:
+                        continue
+                    for fam in QtGui.QFontDatabase.applicationFontFamilies(fid):
+                        if fam and fam not in fams:
+                            fams.append(fam)
+            # 若未找到任何项目字体，则使用当前系统字体族作为回退
+            if not fams:
+                try:
+                    fams = [self.font().family()]
+                except Exception:
+                    fams = []
+            self._project_font_families = fams
+        except Exception:
+            self._project_font_families = getattr(self, "_project_font_families", [])
 
     def _build_right_panel(self) -> QtWidgets.QWidget:
         """构建右侧运行与结果面板。"""
@@ -910,23 +1088,113 @@ class GenerateCoverTab(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再调整字体或字号。")
                 self._refresh_controls_for_selection(-1)
                 return
-            qf = self.font_combo.currentFont() if hasattr(self, "font_combo") else self.font()
+            # 基于下拉选中的族名创建字体，并保持当前块的粗体/斜体样式
+            fam = self.font_combo.currentText() if hasattr(self, "font_combo") else self.font().family()
             size = self.font_size_spin.value() if hasattr(self, "font_size_spin") else 20
+            qf = QtGui.QFont(fam)
             qf.setPointSize(int(size))
+            try:
+                blocks = getattr(self.pos_widget, "_blocks", [])
+                if 0 <= int(idx) < len(blocks):
+                    curf: QtGui.QFont = blocks[int(idx)].get("font", self.pos_widget.font())
+                    qf.setBold(curf.bold())
+                    qf.setItalic(curf.italic())
+            except Exception:
+                pass
             if hasattr(self.pos_widget, "set_block_font"):
                 self.pos_widget.set_block_font(int(idx), qf)
             self.pos_widget.update()
         except Exception:
             pass
 
+    def _on_font_bold_toggled(self, checked: bool) -> None:
+        """加粗切换：仅更新选中字幕块字体的粗细。"""
+        if getattr(self, "_syncing_controls", False):
+            return
+        try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再设置加粗样式。")
+                return
+            blocks = getattr(self.pos_widget, "_blocks", [])
+            f: QtGui.QFont = blocks[int(idx)].get("font", self.pos_widget.font())
+            f.setBold(bool(checked))
+            self.pos_widget.set_block_font(int(idx), f)
+            self.pos_widget.update()
+        except Exception:
+            pass
+
+    def _on_font_italic_toggled(self, checked: bool) -> None:
+        """倾斜切换：仅更新选中字幕块字体的倾斜。"""
+        if getattr(self, "_syncing_controls", False):
+            return
+        try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再设置倾斜样式。")
+                return
+            blocks = getattr(self.pos_widget, "_blocks", [])
+            f: QtGui.QFont = blocks[int(idx)].get("font", self.pos_widget.font())
+            f.setItalic(bool(checked))
+            self.pos_widget.set_block_font(int(idx), f)
+            self.pos_widget.update()
+        except Exception:
+            pass
+
+    def _on_font_color_clicked(self) -> None:
+        """选择字体颜色：仅作用于选中块，并更新预览按钮样式。"""
+        try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再设置字体颜色。")
+                return
+            cur = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#2563eb")))
+            blocks = getattr(self.pos_widget, "_blocks", [])
+            if 0 <= int(idx) < len(blocks):
+                cur = blocks[int(idx)].get("color", cur)
+            c = QtWidgets.QColorDialog.getColor(cur, self, "选择字体颜色")
+            if not c.isValid():
+                return
+            if hasattr(self.pos_widget, "set_block_color"):
+                self.pos_widget.set_block_color(int(idx), c)
+            try:
+                self.font_color_btn.setStyleSheet(f"QToolButton{{border:1px solid #cfcfcf; background:{c.name()};}}")
+            except Exception:
+                pass
+            self.pos_widget.update()
+        except Exception:
+            pass
+
+    def _on_font_bg_color_clicked(self) -> None:
+        """选择背景颜色：仅作用于选中块，并更新预览按钮样式。"""
+        try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再设置背景颜色。")
+                return
+            cur = QtGui.QColor("#000000")
+            blocks = getattr(self.pos_widget, "_blocks", [])
+            if 0 <= int(idx) < len(blocks):
+                cur = blocks[int(idx)].get("bgcolor", cur)
+            c = QtWidgets.QColorDialog.getColor(cur, self, "选择背景颜色")
+            if not c.isValid():
+                return
+            if hasattr(self.pos_widget, "set_block_bgcolor"):
+                self.pos_widget.set_block_bgcolor(int(idx), c)
+            try:
+                self.font_bg_color_btn.setStyleSheet(f"QToolButton{{border:1px solid #cfcfcf; background:{c.name()};}}")
+            except Exception:
+                pass
+            self.pos_widget.update()
+        except Exception:
+            pass
+
     def _refresh_controls_for_selection(self, idx: int) -> None:
-        """根据选中的块刷新左侧控件显示（文本、字体、字号、对齐）。"""
+        """根据选中的块刷新左侧控件显示（字体、字号、加粗、倾斜、颜色、背景、对齐）。"""
         try:
             self._syncing_controls = True
             if idx is None or int(idx) < 0:
                 # 未选中：显示默认/控件字体与当前单选状态，不做应用
-                if hasattr(self, "caption_text_edit"):
-                    self.caption_text_edit.setText("")
                 # 保持现有单选状态与字体控件，不强制重置
                 self._syncing_controls = False
                 return
@@ -935,14 +1203,14 @@ class GenerateCoverTab(QtWidgets.QWidget):
                 self._syncing_controls = False
                 return
             b = blocks[int(idx)]
-            # 文本
-            if hasattr(self, "caption_text_edit"):
-                self.caption_text_edit.setText(str(b.get("text", "")))
             # 字体与字号
             f: QtGui.QFont = b.get("font", self.pos_widget.font())
             if hasattr(self, "font_combo"):
                 try:
-                    self.font_combo.setCurrentFont(f)
+                    fam = f.family()
+                    i = self.font_combo.findText(fam)
+                    if i >= 0:
+                        self.font_combo.setCurrentIndex(i)
                 except Exception:
                     pass
             if hasattr(self, "font_size_spin"):
@@ -951,6 +1219,23 @@ class GenerateCoverTab(QtWidgets.QWidget):
                     self.font_size_spin.setValue(int(sz))
                 except Exception:
                     pass
+            # 加粗/倾斜
+            try:
+                self.bold_btn.setChecked(f.bold())
+                self.italic_btn.setChecked(f.italic())
+            except Exception:
+                pass
+            # 颜色与背景预览
+            try:
+                col = b.get("color", QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff"))))
+                self.font_color_btn.setStyleSheet(f"QToolButton{{border:1px solid #cfcfcf; background:{QtGui.QColor(col).name()};}}")
+            except Exception:
+                pass
+            try:
+                bgc = b.get("bgcolor", QtGui.QColor("#000000"))
+                self.font_bg_color_btn.setStyleSheet(f"QToolButton{{border:1px solid #cfcfcf; background:{QtGui.QColor(bgc).name()};}}")
+            except Exception:
+                pass
             # 对齐
             a = b.get("align", getattr(self.pos_widget, "_align", "left"))
             try:
@@ -961,38 +1246,6 @@ class GenerateCoverTab(QtWidgets.QWidget):
                 pass
         finally:
             self._syncing_controls = False
-
-    def _on_selection_changed(self, idx: int) -> None:
-        """选中拖拽块变化时，更新左侧“字幕文本”输入框内容。"""
-        try:
-            if idx is None or int(idx) < 0:
-                self.caption_text_edit.setText("")
-                return
-            blocks = getattr(self.pos_widget, "_blocks", [])
-            if int(idx) < len(blocks):
-                text = str(blocks[int(idx)].get("text", ""))
-                self.caption_text_edit.setText(text)
-        except Exception:
-            pass
-
-    def _on_caption_text_commit(self) -> None:
-        """提交左侧“字幕文本”：只作用于当前选中的拖拽块；未选中则弹窗提示。"""
-        try:
-            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
-            if idx is None or int(idx) < 0:
-                QtWidgets.QMessageBox.information(self, "提示", "请先在下方选择一个字幕块再修改文本。")
-                return
-            text = self.caption_text_edit.text()
-            if hasattr(self.pos_widget, "set_block_text"):
-                self.pos_widget.set_block_text(int(idx), text)
-            else:
-                # 兼容路径：直接写入内部结构
-                blocks = getattr(self.pos_widget, "_blocks", [])
-                if int(idx) < len(blocks):
-                    blocks[int(idx)]["text"] = text
-                    self.pos_widget.update()
-        except Exception:
-            pass
 
     def _on_selection_changed(self, idx: int) -> None:
         """选中拖拽块变化时，刷新左侧控件数据以匹配该块。"""
