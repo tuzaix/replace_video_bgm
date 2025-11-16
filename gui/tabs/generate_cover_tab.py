@@ -41,51 +41,200 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         返回当前归一化坐标 (x_ratio, y_ratio)，范围 [0, 1]。
     """
 
+    # 选中变化信号：携带当前选中块索引（-1 表示未选中）
+    selection_changed = QtCore.Signal(int)
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        self._text: str = "示例字幕"
         self._align: str = "left"
-        # 使用像素位置存储锚点，绘制时转换为文本框左上角或居中点
-        self._pos: QtCore.QPointF = QtCore.QPointF(40.0, 40.0)
-        self._dragging: bool = False
+        # 多字幕块支持：每个块包含文本与位置；字体与对齐使用控件全局设置
+        self._blocks: list[dict] = [
+            # 默认块不设置字体字段，继承控件当前字体，便于后续全局变更自动生效
+            {"text": "示例字幕", "pos": QtCore.QPointF(40.0, 40.0)}
+        ]
+        # 首次显示时居中一次，之后不再自动调整位置（针对第一个块）
+        self._pos_centered_once: bool = False
+        # 当前拖拽的块索引；-1 表示无拖拽
+        self._dragging_idx: int = -1
         self._drag_offset: QtCore.QPointF = QtCore.QPointF(0.0, 0.0)
+        # 当前选中的块索引；-1 表示未选中，用于高对比边框渲染
+        self._selected_idx: int = -1
+        # 编辑器与状态：双击进入编辑，点击外部完成编辑
+        self._editor: Optional[QtWidgets.QTextEdit] = None
+        self._editing_idx: int = -1
         self.setMinimumSize(200, 120)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.setStyleSheet("border: 1px solid #ccc; background: #fafafa;")
 
     def set_text(self, text: str) -> None:
-        """设置控件内部显示的字幕文本，并请求重绘。"""
-        self._text = text or ""
+        """设置第一个字幕块的文本，并请求重绘（多块时建议使用右键菜单）。"""
+        if not self._blocks:
+            self._blocks.append({"text": text or "", "pos": QtCore.QPointF(40.0, 40.0)})
+        else:
+            self._blocks[0]["text"] = text or ""
         self.update()
+
+    def get_text(self) -> str:
+        """返回所有字幕块文本的合并（换行连接）；无块返回空字符串。"""
+        if not self._blocks:
+            return ""
+        return "\n".join([str(b.get("text", "")) for b in self._blocks]).strip()
 
     def set_alignment(self, align: str) -> None:
         """设置字幕文本的水平对齐方式（left/center/right）。"""
         self._align = align if align in {"left", "center", "right"} else "left"
         self.update()
 
+    def get_default_alignment(self) -> str:
+        """返回控件的默认对齐方式（未设置块对齐时的回退）。"""
+        return str(self._align)
+
     def get_position(self) -> Tuple[float, float]:
-        """返回当前位置的归一化坐标 (x_ratio, y_ratio)，原点为左上角。"""
+        """返回第一个字幕块的归一化坐标 (x_ratio, y_ratio)，原点为左上角。"""
         w = max(1, self.width())
         h = max(1, self.height())
-        x_ratio = max(0.0, min(1.0, float(self._pos.x()) / float(w)))
-        y_ratio = max(0.0, min(1.0, float(self._pos.y()) / float(h)))
+        if not self._blocks:
+            return 0.0, 0.0
+        pos = self._blocks[0]["pos"]
+        x_ratio = max(0.0, min(1.0, float(pos.x()) / float(w)))
+        y_ratio = max(0.0, min(1.0, float(pos.y()) / float(h)))
         return x_ratio, y_ratio
 
+    def get_positions(self) -> list[Tuple[float, float]]:
+        """返回所有字幕块的归一化坐标列表。"""
+        w = max(1, self.width())
+        h = max(1, self.height())
+        out: list[Tuple[float, float]] = []
+        for b in self._blocks:
+            p = b["pos"]
+            out.append(
+                (
+                    max(0.0, min(1.0, float(p.x()) / float(w))),
+                    max(0.0, min(1.0, float(p.y()) / float(h)))
+                )
+            )
+        return out
+
+    def get_blocks(self) -> list[dict]:
+        """返回所有字幕块的文本与归一化位置。
+
+        结构：[{"text": str, "position": (x_ratio, y_ratio), "font_family": str, "font_size": int}]
+        用于封面生成时将多个字幕块叠加到最终图像。
+        """
+        w = max(1, self.width())
+        h = max(1, self.height())
+        blocks: list[dict] = []
+        for b in self._blocks:
+            p = b.get("pos", QtCore.QPointF(0.0, 0.0))
+            xr = max(0.0, min(1.0, float(p.x()) / float(w)))
+            yr = max(0.0, min(1.0, float(p.y()) / float(h)))
+            bf: QtGui.QFont = b.get("font", self.font())
+            al: str = b.get("align", self._align)
+            blocks.append({
+                "text": str(b.get("text", "")),
+                "position": (xr, yr),
+                "font_family": bf.family(),
+                "font_size": bf.pointSize() if bf.pointSize() > 0 else bf.pixelSize() or 12,
+                "align": al if al in {"left", "center", "right"} else "left",
+            })
+        return blocks
+
+    def get_selected_index(self) -> int:
+        """返回当前选中的字幕块索引，未选中返回 -1。"""
+        return int(self._selected_idx)
+
+    def set_block_text(self, idx: int, text: str) -> None:
+        """设置指定字幕块的文本并重绘。若索引无效则忽略。"""
+        try:
+            if idx < 0 or idx >= len(self._blocks):
+                return
+            self._blocks[idx]["text"] = str(text or "")
+            # 若正在编辑该块，同步编辑器内容
+            if self._editor is not None and self._editing_idx == idx:
+                try:
+                    self._editor.setPlainText(self._blocks[idx]["text"])  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            self.update()
+        except Exception:
+            pass
+
+    def set_block_font(self, idx: int, font: QtGui.QFont) -> None:
+        """设置指定字幕块的字体并重绘。若索引无效则忽略。"""
+        try:
+            if idx < 0 or idx >= len(self._blocks):
+                return
+            self._blocks[idx]["font"] = font
+            if self._editor is not None and self._editing_idx == idx:
+                try:
+                    self._editor.setFont(font)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            self.update()
+        except Exception:
+            pass
+
+    def set_block_alignment(self, idx: int, align: str) -> None:
+        """设置指定字幕块的水平对齐（left/center/right），若索引无效则忽略。"""
+        try:
+            if idx < 0 or idx >= len(self._blocks):
+                return
+            a = align if align in {"left", "center", "right"} else "left"
+            self._blocks[idx]["align"] = a
+            self.update()
+        except Exception:
+            pass
+
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
-        """开始拖拽：记录按下位置与当前文本框位置的偏移。"""
+        """开始拖拽：命中任一字幕块时记录对应偏移。"""
+        # 若正在编辑，仅当左键点击字幕块外部时结束编辑并提交；回车作为换行由 QTextEdit 默认处理
+        if self._editor is not None and self._editing_idx >= 0:
+            edit_bbox = self._text_bbox(self._blocks[self._editing_idx])
+            if event.button() == QtCore.Qt.LeftButton and not edit_bbox.contains(event.position()):
+                self._finish_edit(commit=True)
+                # 继续处理选择/拖拽逻辑
         if event.button() == QtCore.Qt.LeftButton:
-            bbox = self._text_bbox()
-            if bbox.contains(event.position()):
-                self._dragging = True
-                self._drag_offset = event.position() - self._pos
+            hit = -1
+            if self._blocks:
+                # 从上至下命中，优先最近添加的块
+                for idx in range(len(self._blocks) - 1, -1, -1):
+                    b = self._blocks[idx]
+                    bbox = self._text_bbox(b)
+                    if bbox.contains(event.position()):
+                        hit = idx
+                        break
+            if hit >= 0:
+                self._dragging_idx = hit
+                b = self._blocks[hit]
+                self._drag_offset = event.position() - b["pos"]
+                self._selected_idx = hit
+                try:
+                    self.selection_changed.emit(hit)
+                except Exception:
+                    pass
+                self.update()
+            else:
+                # 点击空白处则取消选中
+                self._selected_idx = -1
+                self._dragging_idx = -1
+                try:
+                    self.selection_changed.emit(-1)
+                except Exception:
+                    pass
+                self.update()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
-        """拖拽时更新位置，并夹紧到控件范围。"""
-        if self._dragging:
+        """拖拽时更新命中的字幕块位置，并夹紧到控件范围。"""
+        # 编辑时不允许拖拽移动
+        if self._editor is not None:
+            super().mouseMoveEvent(event)
+            return
+        if self._dragging_idx >= 0 and self._dragging_idx < len(self._blocks):
+            b = self._blocks[self._dragging_idx]
             new_pos = event.position() - self._drag_offset
             # 夹紧：避免文本框超出控件区域
-            bbox = self._text_bbox(override_pos=new_pos)
+            bbox = self._text_bbox(b, override_pos=new_pos)
             dx = 0.0
             dy = 0.0
             if bbox.left() < 0:
@@ -96,66 +245,302 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                 dy = -bbox.top()
             if bbox.bottom() > self.height():
                 dy = self.height() - bbox.bottom()
-            self._pos = QtCore.QPointF(new_pos.x() + dx, new_pos.y() + dy)
+            b["pos"] = QtCore.QPointF(new_pos.x() + dx, new_pos.y() + dy)
             self.update()
             try:
                 rx, ry = self.get_position()
-                print(f"pos=({self._pos.x():.1f},{self._pos.y():.1f}), ratio=({rx:.3f},{ry:.3f}) [origin top-left]")
+                print(f"drag idx={self._dragging_idx}, pos=({b['pos'].x():.1f},{b['pos'].y():.1f}), ratio=({rx:.3f},{ry:.3f}) [origin top-left]")
             except Exception:
                 pass
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
         """结束拖拽。"""
-        self._dragging = False
+        self._dragging_idx = -1
         super().mouseReleaseEvent(event)
 
-    def _text_bbox(self, override_pos: Optional[QtCore.QPointF] = None) -> QtCore.QRectF:
-        """计算当前字幕文本的包围框，用于拖拽命中测试与绘制背景。"""
-        pos = override_pos or self._pos
-        painter = QtGui.QPainter()
-        font = self.font()
+    def _text_bbox(self, block: Optional[dict] = None, override_pos: Optional[QtCore.QPointF] = None) -> QtCore.QRectF:
+        """计算当前字幕文本的包围框，用于拖拽命中测试与绘制背景。
+
+        行为说明：
+        - 随字幕内容（包括换行）动态增高，保证能容纳所有行内容；
+        - 文本框最大宽度不超过控件宽度的 90%，超过则进行自动换行；
+        - 文本框的定位锚点固定为左上角（origin top-left），切换对齐不会改变块位置。
+        """
+        b = block or (self._blocks[0] if self._blocks else {"text": "", "pos": QtCore.QPointF(0.0, 0.0)})
+        pos = override_pos or b["pos"]
+        # 每个块可独立设置字体；未设置则回退为控件字体
+        font: QtGui.QFont = (block or {}).get("font", self.font())  # type: ignore[arg-type]
         fm = QtGui.QFontMetricsF(font)
-        rect = fm.boundingRect(self._text or "")
-        tw = rect.width() + 12.0
-        th = rect.height() + 12.0
-        # 根据对齐方式调整参考点：left=左上角，center=中心点，right=右上角
-        if self._align == "center":
-            x = pos.x() - tw / 2.0
-            y = pos.y() - th / 2.0
-        elif self._align == "right":
-            x = pos.x() - tw
-            y = pos.y()
-        else:  # left
-            x = pos.x()
-            y = pos.y()
+
+        # 约束文本框最大宽度，避免过长一行溢出控件；多行或超宽会自动换行
+        max_box_w = max(50.0, float(self.width()) * 0.9)
+        text_rect_wrapped = fm.boundingRect(
+            QtCore.QRectF(0.0, 0.0, max_box_w, 1e9),
+            QtCore.Qt.TextWordWrap,
+            (str(b.get("text", "")) or "")
+        )
+
+        tw = text_rect_wrapped.width() + 12.0
+        th = text_rect_wrapped.height() + 12.0
+
+        # 固定锚点为左上角：拖拽块位置不随对齐变化而移动
+        x = pos.x()
+        y = pos.y()
         return QtCore.QRectF(x, y, tw, th)
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # type: ignore[override]
         """绘制背景与字幕文本框。"""
+        # 首次显示时，将第一个文本框居中一次（固定左上角锚点）
+        if not self._pos_centered_once and self.width() > 0 and self.height() > 0 and self._blocks:
+            bbox0 = self._text_bbox(self._blocks[0], QtCore.QPointF(0.0, 0.0))
+            nx = max(0.0, (float(self.width()) - bbox0.width()) / 2.0)
+            ny = max(0.0, (float(self.height()) - bbox0.height()) / 2.0)
+            self._blocks[0]["pos"] = QtCore.QPointF(nx, ny)
+            self._pos_centered_once = True
+
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         # 背景指示文字
         painter.setPen(QtGui.QPen(QtGui.QColor("#888")))
-        painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft, "拖拽字幕进行定位")
-        # 文本背景
-        bbox = self._text_bbox()
-        bg = QtGui.QColor("#000")
-        bg.setAlpha(90)
-        painter.fillRect(bbox, bg)
-        # 文本边框：增加黑色边框便于观察
-        painter.setPen(QtGui.QPen(QtGui.QColor("#000"), 1))
-        painter.drawRect(bbox)
-        # 文本颜色
-        color = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff")))
-        painter.setPen(QtGui.QPen(color))
-        # 文本位置：在 bbox 内侧留 6 像素内边距
-        font = self.font()
-        painter.setFont(font)
-        text_rect = QtCore.QRectF(bbox.left() + 6.0, bbox.top() + 6.0, bbox.width() - 12.0, bbox.height() - 12.0)
-        align_flag = QtCore.Qt.AlignLeft if self._align == "left" else (QtCore.Qt.AlignCenter if self._align == "center" else QtCore.Qt.AlignRight)
-        painter.drawText(text_rect, align_flag | QtCore.Qt.AlignVCenter, self._text)
+        painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft, "右键添加/删除字幕块；拖拽字幕进行定位")
+        # 绘制所有字幕块
+        for idx, b in enumerate(self._blocks):
+            bbox = self._text_bbox(b)
+            bg = QtGui.QColor("#000")
+            # 选中块使用更高不透明度的背景以增强对比
+            bg.setAlpha(110 if idx == self._selected_idx else 90)
+            painter.fillRect(bbox, bg)
+            # 文本边框：选中时使用主色并加粗
+            if idx == self._selected_idx:
+                sel_color = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#2563eb")))
+                painter.setPen(QtGui.QPen(sel_color, 2))
+            else:
+                painter.setPen(QtGui.QPen(QtGui.QColor("#000"), 1))
+            painter.drawRect(bbox)
+            # 文本颜色
+            color = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff")))
+            painter.setPen(QtGui.QPen(color))
+            # 文本位置：在 bbox 内侧留 6 像素内边距
+            font: QtGui.QFont = b.get("font", self.font())
+            painter.setFont(font)
+            text_rect = QtCore.QRectF(bbox.left() + 6.0, bbox.top() + 6.0, bbox.width() - 12.0, bbox.height() - 12.0)
+            b_align = b.get("align", self._align)
+            align_flag = QtCore.Qt.AlignLeft if b_align == "left" else (QtCore.Qt.AlignCenter if b_align == "center" else QtCore.Qt.AlignRight)
+            # 支持自动换行与多行文本绘制；水平对齐由用户选择的单选框控制
+            painter.drawText(text_rect, align_flag | QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, str(b.get("text", "")))
         painter.end()
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        """双击命中字幕块时进入编辑状态，创建内嵌 QTextEdit。"""
+        hit_idx = -1
+        for idx in range(len(self._blocks) - 1, -1, -1):
+            if self._text_bbox(self._blocks[idx]).contains(event.position()):
+                hit_idx = idx
+                break
+        if hit_idx >= 0:
+            self._begin_edit_block(hit_idx)
+        else:
+            # 双击空白不做处理
+            pass
+        super().mouseDoubleClickEvent(event)
+
+    def _begin_edit_block(self, idx: int) -> None:
+        """开始编辑指定字幕块：
+
+        - 在该块的文本区域创建无边框的 QTextEdit；
+        - 载入块文本与字体；
+        - 提供右键菜单调整字体与字号；
+        - 聚焦并选中全部文本便于替换。
+        """
+        try:
+            block = self._blocks[idx]
+        except Exception:
+            return
+        self._editing_idx = idx
+        self._selected_idx = idx
+        self._dragging_idx = -1
+
+        bbox = self._text_bbox(block)
+        inner = QtCore.QRect(int(bbox.left() + 4), int(bbox.top() + 4), int(bbox.width() - 8), int(bbox.height() - 8))
+        editor = QtWidgets.QTextEdit(self)
+        editor.setFrameStyle(QtWidgets.QFrame.NoFrame)
+        editor.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        editor.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        editor.setText(str(block.get("text", "")))
+        editor.setFont(block.get("font", self.font()))
+        editor.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        editor.customContextMenuRequested.connect(lambda pos: self._show_editor_menu(editor))
+        editor.setGeometry(inner)
+        editor.show()
+        editor.raise_()
+        editor.setFocus()
+        editor.selectAll()
+        # 焦点丢失时自动提交编辑
+        editor.installEventFilter(self)
+        self._editor = editor
+        self.update()
+
+    def _finish_edit(self, commit: bool) -> None:
+        """结束编辑状态。
+
+        参数
+        ----
+        commit: 是否提交编辑内容与字体到字幕块。
+        """
+        if self._editor is None:
+            return
+        try:
+            if commit and self._editing_idx >= 0 and self._editing_idx < len(self._blocks):
+                text = self._editor.toPlainText()
+                font = self._editor.font()
+                self._blocks[self._editing_idx]["text"] = text
+                self._blocks[self._editing_idx]["font"] = font
+        except Exception:
+            pass
+        try:
+            self._editor.deleteLater()
+        except Exception:
+            pass
+        self._editor = None
+        self._editing_idx = -1
+        try:
+            self.selection_changed.emit(self._selected_idx)
+        except Exception:
+            pass
+        self.update()
+
+    def _show_editor_menu(self, editor: QtWidgets.QTextEdit) -> None:
+        """编辑器右键菜单：设置字体、增大/减小字号。"""
+        menu = QtWidgets.QMenu(self)
+        try:
+            bg = getattr(theme, "GRAY_BG", "#e5e7eb")
+            fg = getattr(theme, "GRAY_TEXT", "#374151")
+            primary = getattr(theme, "PRIMARY_BLUE", "#2563eb")
+            menu.setStyleSheet(
+                f"QMenu{{background-color:{bg}; color:{fg}; border:1px solid #cfcfcf;}}"
+                "QMenu::item{padding:6px 12px;}"
+                f"QMenu::item:selected{{background-color:{primary}; color:#ffffff;}}"
+            )
+        except Exception:
+            pass
+        act_font = menu.addAction("设置字体…")
+        act_inc = menu.addAction("增大字号")
+        act_dec = menu.addAction("减小字号")
+        chosen = menu.exec(editor.mapToGlobal(QtCore.QPoint(0, editor.cursorRect().bottom())))
+        if chosen is None:
+            return
+        if chosen == act_font:
+            cur_font = editor.font()
+            font, ok = QtWidgets.QFontDialog.getFont(cur_font, self, "选择字体")
+            if ok:
+                editor.setFont(font)
+        elif chosen == act_inc:
+            f = editor.font()
+            sz = f.pointSize()
+            if sz <= 0:
+                sz = 12
+            f.setPointSize(min(sz + 2, 96))
+            editor.setFont(f)
+        elif chosen == act_dec:
+            f = editor.font()
+            sz = f.pointSize()
+            if sz <= 0:
+                sz = 12
+            f.setPointSize(max(sz - 2, 6))
+            editor.setFont(f)
+
+    def eventFilter(self, obj: QtCore.QObject, ev: QtCore.QEvent) -> bool:
+        """拦截编辑器事件：允许回车换行；不因失焦或按键结束编辑。"""
+        if obj is self._editor:
+            # 保持默认行为：
+            # - KeyPress: 交由 QTextEdit 处理（回车换行等）
+            # - FocusOut: 不结束编辑，等待左键点击块外再提交
+            return False
+        return super().eventFilter(obj, ev)
+
+    def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:  # type: ignore[override]
+        """右键菜单：添加或删除拖拽字幕块（支持多块）。"""
+        # 命中检查：是否点击在某个块上
+        hit_idx = -1
+        for idx in range(len(self._blocks) - 1, -1, -1):
+            if self._text_bbox(self._blocks[idx]).contains(event.pos()):
+                hit_idx = idx
+                break
+
+        menu = QtWidgets.QMenu(self)
+        # 使用灰色背景以提高在浅色界面上的可读性
+        try:
+            bg = getattr(theme, "GRAY_BG", "#e5e7eb")
+            fg = getattr(theme, "GRAY_TEXT", "#374151")
+            primary = getattr(theme, "PRIMARY_BLUE", "#2563eb")
+            menu.setStyleSheet(
+                f"QMenu{{background-color:{bg}; color:{fg}; border:1px solid #cfcfcf;}}"
+                "QMenu::item{padding:6px 12px;}"
+                f"QMenu::item:selected{{background-color:{primary}; color:#ffffff;}}"
+            )
+        except Exception:
+            menu.setStyleSheet(
+                "QMenu{background-color:#e5e7eb; color:#374151; border:1px solid #cfcfcf;}"
+                "QMenu::item{padding:6px 12px;}"
+                "QMenu::item:selected{background-color:#2563eb; color:#ffffff;}"
+            )
+        # 右键命中块则选中该块；命中空白则取消选中
+        self._selected_idx = hit_idx
+        try:
+            self.selection_changed.emit(hit_idx)
+        except Exception:
+            pass
+        self.update()
+        if hit_idx >= 0:
+            act_del = menu.addAction("删除该字幕块")
+        else:
+            act_add = menu.addAction("添加字幕块")
+        act_del_all = menu.addAction("删除所有字幕块")
+
+        chosen = menu.exec(event.globalPos())
+        try:
+            if chosen is not None:
+                text = chosen.text()
+                if text == "删除该字幕块" and hit_idx >= 0:
+                    del self._blocks[hit_idx]
+                    self._dragging_idx = -1
+                    self._selected_idx = -1
+                    try:
+                        self.selection_changed.emit(-1)
+                    except Exception:
+                        pass
+                    self.update()
+                elif text == "添加字幕块" and hit_idx < 0:
+                    # 在点击位置添加新块：不设置字体字段，默认继承控件当前字体与字号
+                    pos = event.pos()
+                    self._blocks.append({
+                        "text": "字幕",
+                        "pos": QtCore.QPointF(pos.x(), pos.y()),
+                    })
+                    self.update()
+                elif text == "删除所有字幕块":
+                    self._blocks.clear()
+                    self._dragging_idx = -1
+                    self._selected_idx = -1
+                    try:
+                        self.selection_changed.emit(-1)
+                    except Exception:
+                        pass
+                    self.update()
+        except Exception:
+            pass
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        """首次可用尺寸时将文本框居中一次，后续尺寸变化不自动移动。"""
+        if not self._pos_centered_once and self.width() > 0 and self.height() > 0 and self._blocks:
+            bbox0 = self._text_bbox(self._blocks[0], QtCore.QPointF(0.0, 0.0))
+            nx = max(0.0, (float(self.width()) - bbox0.width()) / 2.0)
+            ny = max(0.0, (float(self.height()) - bbox0.height()) / 2.0)
+            self._blocks[0]["pos"] = QtCore.QPointF(nx, ny)
+            self._pos_centered_once = True
+            self.update()
+        super().resizeEvent(event)
 
 
 class GenerateCoverWorker(QtCore.QObject):
@@ -256,6 +641,7 @@ class GenerateCoverWorker(QtCore.QObject):
                 caption_align=align if align in {"left", "center", "right"} else "left",
                 output_dir=output_dir,
                 progress_cb=on_cover,
+                captions=getattr(self, "_captions", None),
             )
         except Exception as e:
             self.error.emit(f"并发生成封面失败: {e}")
@@ -360,13 +746,19 @@ class GenerateCoverTab(QtWidgets.QWidget):
         gl2.setContentsMargins(10, 8, 10, 8)
         gl2.setSpacing(10)
 
-        self.caption_edit = QtWidgets.QTextEdit()  # 多行文本框，默认约 5 行高度
-        self.caption_edit.setFixedHeight(5 * self.caption_edit.fontMetrics().height())
-        self.caption_edit.setPlaceholderText("封面字幕…")
-        row_cap = QtWidgets.QHBoxLayout()
-        row_cap.addWidget(QtWidgets.QLabel("封面字幕"), 0)
-        row_cap.addWidget(self.caption_edit, 1)
-        gl2.addLayout(row_cap)
+        # 字幕文本输入：仅作用于下方选中的拖拽块；未选中则提示
+        text_row = QtWidgets.QHBoxLayout()
+        text_row.addWidget(QtWidgets.QLabel("字幕文本"), 0)
+        self.caption_text_edit = QtWidgets.QLineEdit()
+        self.caption_text_edit.setPlaceholderText("请输入字幕文本（仅作用于选中块）")
+        try:
+            self.caption_text_edit.editingFinished.connect(self._on_caption_text_commit)
+        except Exception:
+            pass
+        text_row.addWidget(self.caption_text_edit, 1)
+        gl2.addLayout(text_row)
+
+        # 去除独立的“封面字幕”输入框；拖拽控件内通过右键菜单添加/删除字幕块
 
         align_row = QtWidgets.QHBoxLayout()
         align_row.addWidget(QtWidgets.QLabel("字幕对齐方式"), 0)
@@ -411,14 +803,18 @@ class GenerateCoverTab(QtWidgets.QWidget):
         gl3.setSpacing(10)
 
         self.pos_widget = CaptionPositionWidget()
-        # QTextEdit.textChanged() 不携带文本参数，需主动读取并传给位置控件
         try:
-            self.caption_edit.textChanged.connect(lambda: self.pos_widget.set_text(self.caption_edit.toPlainText()))
+            # 选中变化时同步左侧输入与对齐/字体控件界面
+            self.pos_widget.selection_changed.connect(self._on_selection_changed)
         except Exception:
             pass
+        # QTextEdit.textChanged() 不携带文本参数，需主动读取并传给位置控件
+        # 字幕文本联动改为由右键菜单管理；不再与外部输入框联动
         # 初始化预览控件字体，使用选择的字体与字号
+        # 初始化界面与状态
+        self._syncing_controls = False
         try:
-            self._on_font_changed()
+            self._refresh_controls_for_selection(-1)
         except Exception:
             pass
         
@@ -489,22 +885,121 @@ class GenerateCoverTab(QtWidgets.QWidget):
         return container
 
     def _on_align_changed(self) -> None:
-        """对齐方式单选框变更时更新拖拽控件的文本对齐。"""
+        """对齐方式变更：仅更新当前选中的字幕块，无选中则提示。"""
+        if getattr(self, "_syncing_controls", False):
+            return
         align = "left"
         if self.align_center.isChecked():
             align = "center"
         elif self.align_right.isChecked():
             align = "right"
-        self.pos_widget.set_alignment(align)
+        idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+        if idx is None or int(idx) < 0:
+            QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再调整对齐方式。")
+            self._refresh_controls_for_selection(-1)
+            return
+        if hasattr(self.pos_widget, "set_block_alignment"):
+            self.pos_widget.set_block_alignment(int(idx), align)
+        self.pos_widget.update()
 
     def _on_font_changed(self) -> None:
-        """字体或字号变化时，更新拖拽预览控件的字体。"""
+        """字体或字号变更：仅更新当前选中的字幕块，无选中则提示。"""
+        if getattr(self, "_syncing_controls", False):
+            return
         try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再调整字体或字号。")
+                self._refresh_controls_for_selection(-1)
+                return
             qf = self.font_combo.currentFont() if hasattr(self, "font_combo") else self.font()
             size = self.font_size_spin.value() if hasattr(self, "font_size_spin") else 20
             qf.setPointSize(int(size))
-            self.pos_widget.setFont(qf)
+            if hasattr(self.pos_widget, "set_block_font"):
+                self.pos_widget.set_block_font(int(idx), qf)
             self.pos_widget.update()
+        except Exception:
+            pass
+
+    def _refresh_controls_for_selection(self, idx: int) -> None:
+        """根据选中的块刷新左侧控件显示（文本、字体、字号、对齐）。"""
+        try:
+            self._syncing_controls = True
+            if idx is None or int(idx) < 0:
+                # 未选中：显示默认/控件字体与当前单选状态，不做应用
+                if hasattr(self, "caption_text_edit"):
+                    self.caption_text_edit.setText("")
+                # 保持现有单选状态与字体控件，不强制重置
+                self._syncing_controls = False
+                return
+            blocks = getattr(self.pos_widget, "_blocks", [])
+            if int(idx) >= len(blocks):
+                self._syncing_controls = False
+                return
+            b = blocks[int(idx)]
+            # 文本
+            if hasattr(self, "caption_text_edit"):
+                self.caption_text_edit.setText(str(b.get("text", "")))
+            # 字体与字号
+            f: QtGui.QFont = b.get("font", self.pos_widget.font())
+            if hasattr(self, "font_combo"):
+                try:
+                    self.font_combo.setCurrentFont(f)
+                except Exception:
+                    pass
+            if hasattr(self, "font_size_spin"):
+                try:
+                    sz = f.pointSize() if f.pointSize() > 0 else (f.pixelSize() or 12)
+                    self.font_size_spin.setValue(int(sz))
+                except Exception:
+                    pass
+            # 对齐
+            a = b.get("align", getattr(self.pos_widget, "_align", "left"))
+            try:
+                self.align_left.setChecked(a == "left")
+                self.align_center.setChecked(a == "center")
+                self.align_right.setChecked(a == "right")
+            except Exception:
+                pass
+        finally:
+            self._syncing_controls = False
+
+    def _on_selection_changed(self, idx: int) -> None:
+        """选中拖拽块变化时，更新左侧“字幕文本”输入框内容。"""
+        try:
+            if idx is None or int(idx) < 0:
+                self.caption_text_edit.setText("")
+                return
+            blocks = getattr(self.pos_widget, "_blocks", [])
+            if int(idx) < len(blocks):
+                text = str(blocks[int(idx)].get("text", ""))
+                self.caption_text_edit.setText(text)
+        except Exception:
+            pass
+
+    def _on_caption_text_commit(self) -> None:
+        """提交左侧“字幕文本”：只作用于当前选中的拖拽块；未选中则弹窗提示。"""
+        try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                QtWidgets.QMessageBox.information(self, "提示", "请先在下方选择一个字幕块再修改文本。")
+                return
+            text = self.caption_text_edit.text()
+            if hasattr(self.pos_widget, "set_block_text"):
+                self.pos_widget.set_block_text(int(idx), text)
+            else:
+                # 兼容路径：直接写入内部结构
+                blocks = getattr(self.pos_widget, "_blocks", [])
+                if int(idx) < len(blocks):
+                    blocks[int(idx)]["text"] = text
+                    self.pos_widget.update()
+        except Exception:
+            pass
+
+    def _on_selection_changed(self, idx: int) -> None:
+        """选中拖拽块变化时，刷新左侧控件数据以匹配该块。"""
+        try:
+            self._refresh_controls_for_selection(idx)
         except Exception:
             pass
 
@@ -551,7 +1046,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "提示", "请先填写合成封面目录")
             return
         try:
-            caption = self.caption_edit.toPlainText().strip()
+            caption = self.pos_widget.get_text().strip()
         except Exception:
             caption = ""
         align = "left"
@@ -560,10 +1055,25 @@ class GenerateCoverTab(QtWidgets.QWidget):
         elif self.align_right.isChecked():
             align = "right"
         pos_x, pos_y = self.pos_widget.get_position()
+        # 收集所有字幕块以支持多字幕块生成
+        captions_blocks: list[tuple[str, tuple[float, float]]] = []
+        try:
+            for b in self.pos_widget.get_blocks():
+                t = str(b.get("text", "")).strip()
+                p = b.get("position", (0.0, 0.0))
+                if t:
+                    captions_blocks.append((t, (float(p[0]), float(p[1]))))
+        except Exception:
+            captions_blocks = []
 
         # 线程与工作者
         self._thread = QtCore.QThread(self)
         self._worker = GenerateCoverWorker()
+        # 将多字幕块传给工作者（避免更改信号签名）
+        try:
+            setattr(self._worker, "_captions", captions_blocks)
+        except Exception:
+            pass
         self._worker.moveToThread(self._thread)
         # 连接信号
         self._thread.started.connect(lambda: self._worker.run(
