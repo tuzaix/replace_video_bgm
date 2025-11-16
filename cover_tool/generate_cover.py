@@ -456,8 +456,10 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
 
         # 计算 16:9 居中绘制区域（左右各 5% 留白）
         draw_rect = compute_draw_area_16_9_by_width(W, H, padding_pct=(0.03, 0.01, 0.03, 0.01))
-       
+        import pprint
         for block in caption_blocks:
+            pprint.pprint(block)
+            print()
             try:
                 t = _ensure_unicode_text(block.get("text", ""))
                 if not t:
@@ -472,7 +474,8 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
                 # 使用活动区映射计算绘制坐标与字号
                 mapped = map_block_to_draw_area(block, draw_rect)
                 px_size = int(mapped.get("map_text_font_px", 18))
-                stroke_w = int(max(0, round(px_size * 0.12))) + (1 if bbold else 0)
+                stroke_w = int(max(0, round(px_size * 0.01))) + (2 if bbold else 0) # 边框粗细：字号的 1%，加粗时额外 1px
+                
 
                 # 加载中文字体（优先项目字体）
                 font_path = _resolve_chinese_font(bold=bbold, font_family=font_family)

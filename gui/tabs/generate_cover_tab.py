@@ -1322,6 +1322,17 @@ class GenerateCoverTab(QtWidgets.QWidget):
             "QToolButton{border:1px solid #cfcfcf; background: rgba(0,0,0,0);}"
         )
         self.font_stroke_color_btn.clicked.connect(self._on_font_stroke_color_clicked)
+        # 为描边色按钮添加下拉菜单：选择颜色/无边框
+        try:
+            stroke_menu = QtWidgets.QMenu(self.font_stroke_color_btn)
+            act_pick_stroke = stroke_menu.addAction("选择描边色…")
+            act_clear_stroke = stroke_menu.addAction("无边框")
+            act_pick_stroke.triggered.connect(self._on_font_stroke_color_clicked)
+            act_clear_stroke.triggered.connect(self._on_font_stroke_color_cleared)
+            self.font_stroke_color_btn.setMenu(stroke_menu)
+            self.font_stroke_color_btn.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        except Exception:
+            pass
         row_style.addWidget(QtWidgets.QLabel("字符边框色:"))
         row_style.addWidget(self.font_stroke_color_btn)
         try:
@@ -1635,7 +1646,12 @@ class GenerateCoverTab(QtWidgets.QWidget):
             pass
 
     def _on_font_stroke_color_clicked(self) -> None:
-        """选择字符边框颜色：仅作用于选中块，透明表示关闭描边，并更新预览样式。"""
+        """选择字符边框颜色并应用到选中块；透明表示关闭描边。
+
+        - 打开颜色选择对话框（支持透明通道）
+        - 应用到当前选中的字幕块
+        - 更新预览按钮样式与画布
+        """
         try:
             idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
             if idx is None or int(idx) < 0:
@@ -1648,15 +1664,37 @@ class GenerateCoverTab(QtWidgets.QWidget):
             c = QtWidgets.QColorDialog.getColor(cur, self, "选择字符边框颜色")
             if not c.isValid():
                 return
+            self._apply_stroke_color_to_block(int(idx), c)
+        except Exception:
+            pass
+
+    def _on_font_stroke_color_cleared(self) -> None:
+        """清除选中块的字符边框（无边框），并更新预览与画布。
+
+        - 当未选择时，如存在字幕块则默认操作第一个块。
+        - 将描边颜色设为完全透明以表示关闭边框。
+        """
+        try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                blocks0 = getattr(self.pos_widget, "_blocks", [])
+                if len(blocks0) == 0:
+                    QtWidgets.QMessageBox.information(self, "提示", "当前无字幕块可清除边框。请先添加字幕块。")
+                    return
+                idx = 0
+            transparent = QtGui.QColor(0, 0, 0, 0)
+            self._apply_stroke_color_to_block(int(idx), transparent)
+        except Exception:
+            pass
+
+    def _apply_stroke_color_to_block(self, idx: int, color: QtGui.QColor) -> None:
+        """将字符边框颜色应用到指定块，并更新按钮预览与画布。"""
+        try:
             if hasattr(self.pos_widget, "set_block_stroke_color"):
-                self.pos_widget.set_block_stroke_color(int(idx), c)
-            try:
-                # 使用 rgba 以支持透明预览
-                self.font_stroke_color_btn.setStyleSheet(
-                    f"QToolButton{{border:1px solid #cfcfcf; background: rgba({c.red()},{c.green()},{c.blue()},{c.alpha()});}}"
-                )
-            except Exception:
-                pass
+                self.pos_widget.set_block_stroke_color(int(idx), QtGui.QColor(color))
+            self.font_stroke_color_btn.setStyleSheet(
+                f"QToolButton{{border:1px solid #cfcfcf; background: rgba({color.red()},{color.green()},{color.blue()},{color.alpha()});}}"
+            )
             self.pos_widget.update()
         except Exception:
             pass
