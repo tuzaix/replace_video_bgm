@@ -562,8 +562,15 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
     """在基础拼接图上合成多个字幕块（Unicode 安全）。
     修复中文乱码：改用 Pillow 或 Qt 绘制支持 Unicode 的字体。
     优先级：Pillow → PySide6/Qt → OpenCV（仅英文，保留作为兜底）。
-    - 每个字幕块支持：`text`, `position(xr,yr)`, `font_size`, `font_bold`, `font_italic`(不直接支持),
-      `color`, `bgcolor`(含透明度), `stroke_color`, `align`。
+
+    支持的块字段（部分）：
+    - `text`: 字幕文本（支持多行）。
+    - `position(xr,yr)`: 控件坐标系中的位置（由上层映射）。
+    - `font_size`, `font_bold`, `font_italic`(不直接支持): 字体样式参数。
+    - `color`, `bgcolor`(含透明度), `stroke_color`: 文本颜色、背景与描边颜色。
+    - `align`: 文本对齐方式（left/center/right）。
+    - 可选 `line_gap_ratio`: 行距占基线高度比例（默认 0.18，范围 0.0–0.5）。
+
     返回合成后图片（同输入类型）。
     """
     if not caption_blocks: # 没字幕则直接返回
@@ -642,8 +649,13 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
                     line_sizes.append((lw, baseline_h))
                 max_width = max(w for w, _ in line_sizes)
 
-                # 行距按 baseline 的 0.25 估算
-                line_gap = int(round(baseline_h * 0.25))
+                # 行距按比例估算：默认更紧凑（0.18），可通过块字段覆盖
+                try:
+                    line_gap_ratio = float(block.get("line_gap_ratio", 0.18))
+                except Exception:
+                    line_gap_ratio = 0.18
+                line_gap_ratio = max(0.0, min(0.5, line_gap_ratio))
+                line_gap = int(round(baseline_h * line_gap_ratio))
                 total_h = baseline_h * len(lines) + line_gap * max(0, len(lines) - 1)
 
                 # 以映射 box 的中心点为参照，计算紧致边界并扩展 10px 背景区域
