@@ -130,7 +130,13 @@ def build_stitched_image(image_paths: List[str]) -> object:
     - 当所有输入图片均不可读取时抛出 `ValueError`。
     """
     # 默认改为含过渡的拼接，提升视觉效果
-    return stitch_images_with_blend(image_paths, blend_width=150)
+    img = stitch_images_with_blend(image_paths, blend_width=150)
+    # 适配到 16:9 画布（以宽度为基准，等比居中裁剪/留边）
+    # try:
+    #     return fit_canvas_to_aspect_by_width(img, aspect_w=16, aspect_h=9, fill_color=(0, 0, 0))
+    # except Exception:
+    #     return img
+    return img 
 
 
 def stitch_images_with_blend(image_paths: List[str], blend_width: int = 24) -> object:
@@ -226,11 +232,9 @@ def stitch_images_with_blend(image_paths: List[str], blend_width: int = 24) -> o
 
     return out
 
-
 def render_caption_blocks(
     base_img: object,
-    caption_blocks: Optional[list[dict]],
-    default_align: str = "left",
+    caption_blocks: Optional[list[dict]] = None
 ) -> object:
     """在基础拼接图上合成多个字幕块（Unicode 安全）。
 
@@ -242,6 +246,10 @@ def render_caption_blocks(
 
     返回合成后图片（同输入类型）。
     """
+
+    import pprint 
+    pprint.pprint(caption_blocks)
+
     # 本地工程根与文本处理工具
     import os as _os_local
     try:
@@ -314,6 +322,7 @@ def render_caption_blocks(
                 return None
 
             img_rgba = _np_bgr_to_pil_rgba(base_img)
+
             W, H = img_rgba.size
             draw = ImageDraw.Draw(img_rgba)
 
@@ -321,6 +330,7 @@ def render_caption_blocks(
             base_scale = max(0.6, min(1.5, H / 480.0))
 
             for block in caption_blocks:
+                print("block:", block)
                 try:
                     t = _ensure_unicode_text(block.get("text", ""))
                     if not t:
@@ -706,8 +716,7 @@ def _color_to_bgr(color: str) -> tuple:
 
 def generate_thumbnail_single(
     image_paths: List[str],
-    caption_blocks: Optional[list[dict]] = None,
-    default_align: str = "left",
+    caption_blocks: Optional[list[dict]] = None
 ) -> str:
     """生成一个横向拼接的封面图片并返回临时文件路径。
 
@@ -729,7 +738,7 @@ def generate_thumbnail_single(
 
     # 第二步：仅叠加字幕块（不再支持旧版单/多字幕）
     if caption_blocks and len(caption_blocks) > 0:
-        stitched = render_caption_blocks(stitched, caption_blocks, default_align=default_align)
+        stitched = render_caption_blocks(stitched, caption_blocks)
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"stitched_cover_{uuid.uuid4().hex[:8]}.jpg")
     ok = cv2.imwrite(tmp_path, stitched)
@@ -768,11 +777,7 @@ def generate_thumbnail(
     for i, picks in enumerate(tasks, start=1):
         try:
             # 生成临时封面并保存到输出目录的 `封面/` 子目录
-            stitched_path = generate_thumbnail_single(
-                image_paths=picks,
-                caption_blocks=caption_blocks,
-                default_align="left",
-            )
+            stitched_path = generate_thumbnail_single(image_paths=picks, caption_blocks=caption_blocks)
             if not stitched_path or not os.path.exists(stitched_path):
                 print(f"[done {i}/{count}] Failed to generate cover")
                 continue
