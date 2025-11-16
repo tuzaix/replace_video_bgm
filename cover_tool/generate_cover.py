@@ -779,7 +779,6 @@ def choose_images(candidates: List[str], k: int) -> List[str]:
     """
     if not candidates:
         return []
-    random.seed(int(time.time()))
     if len(candidates) >= k:
         return random.sample(candidates, k)
     return random.choices(candidates, k=k)
@@ -885,7 +884,7 @@ def generate_thumbnail(
     tasks: List[List[str]] = [choose_images(image_paths, per_cover) for _ in range(max(1, int(count)))]
    
     for i, picks in enumerate(tasks, start=1):
-        # print(f"[queued {i}/{count}] Using images: {', '.join(os.path.basename(p) for p in picks)}")
+        print(f"[queued {i}/{count}] Using images: {', '.join(os.path.basename(p) for p in picks)}")
         try:
             # 生成临时封面并保存到输出目录的 `封面/` 子目录
             stitched_path = generate_thumbnail_single(image_paths=picks, caption_blocks=caption_blocks)
