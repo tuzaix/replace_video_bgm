@@ -246,10 +246,6 @@ def render_caption_blocks(
 
     返回合成后图片（同输入类型）。
     """
-
-    import pprint 
-    pprint.pprint(caption_blocks)
-
     # 本地工程根与文本处理工具
     import os as _os_local
     try:
@@ -549,85 +545,85 @@ def render_caption_blocks(
         return base_img
 
 
-def overlay_captions(
-    base_img: object,
-    caption_blocks: Optional[list[dict]] = None,
-    default_align: str = "left",
-    legacy_caption: Optional[str] = None,
-    legacy_position: Optional[tuple[float, float]] = None,
-    legacy_color: str = "yellow",
-    legacy_captions: Optional[list[tuple[str, tuple[float, float]]]] = None,
-) -> object:
-    """在基础拼接图上叠加字幕（公共封装）。
+# def overlay_captions(
+#     base_img: object,
+#     caption_blocks: Optional[list[dict]] = None,
+#     default_align: str = "left",
+#     legacy_caption: Optional[str] = None,
+#     legacy_position: Optional[tuple[float, float]] = None,
+#     legacy_color: str = "yellow",
+#     legacy_captions: Optional[list[tuple[str, tuple[float, float]]]] = None,
+# ) -> object:
+#     """在基础拼接图上叠加字幕（公共封装）。
 
-    优先使用带样式的 `caption_blocks`；若未提供则回退到老接口的单/多字幕：
-    - `legacy_captions`: [(text, (xr, yr))] 列表，统一颜色与对齐。
-    - `legacy_caption` + `legacy_position`: 单字幕。
+#     优先使用带样式的 `caption_blocks`；若未提供则回退到老接口的单/多字幕：
+#     - `legacy_captions`: [(text, (xr, yr))] 列表，统一颜色与对齐。
+#     - `legacy_caption` + `legacy_position`: 单字幕。
 
-    参数：
-    - `base_img`: 基础拼接图（BGR ndarray）。
-    - `caption_blocks`: 新版多字幕块（含样式）。
-    - `default_align`: 新版字幕块的默认对齐。
-    - `legacy_caption`: 旧版单字幕文本。
-    - `legacy_position`: 旧版单字幕位置 (xr, yr) 范围 [0,1]。
-    - `legacy_color`: 旧版字幕颜色（名称）。
-    - `legacy_captions`: 旧版多字幕列表。
+#     参数：
+#     - `base_img`: 基础拼接图（BGR ndarray）。
+#     - `caption_blocks`: 新版多字幕块（含样式）。
+#     - `default_align`: 新版字幕块的默认对齐。
+#     - `legacy_caption`: 旧版单字幕文本。
+#     - `legacy_position`: 旧版单字幕位置 (xr, yr) 范围 [0,1]。
+#     - `legacy_color`: 旧版字幕颜色（名称）。
+#     - `legacy_captions`: 旧版多字幕列表。
 
-    返回：
-    - 合成字幕后的图片（BGR ndarray）。
-    """
-    if caption_blocks and len(caption_blocks) > 0:
-        return render_caption_blocks(base_img, caption_blocks, default_align=default_align)
+#     返回：
+#     - 合成字幕后的图片（BGR ndarray）。
+#     """
+#     if caption_blocks and len(caption_blocks) > 0:
+#         return render_caption_blocks(base_img, caption_blocks, default_align=default_align)
 
-    # 旧版路径：使用统一样式进行叠加
-    try:
-        import cv2
-    except ImportError:
-        raise ImportError("OpenCV (cv2) 未安装。请执行 `pip install opencv-python-headless` 后重试封面生成。")
+#     # 旧版路径：使用统一样式进行叠加
+#     try:
+#         import cv2
+#     except ImportError:
+#         raise ImportError("OpenCV (cv2) 未安装。请执行 `pip install opencv-python-headless` 后重试封面生成。")
 
-    img = base_img
-    h, w = img.shape[0], img.shape[1]
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = max(0.6, min(1.5, h / 480.0))
-    thickness = int(round(font_scale * 2))
-    bgr = _color_to_bgr(legacy_color)
+#     img = base_img
+#     h, w = img.shape[0], img.shape[1]
+#     font = cv2.FONT_HERSHEY_SIMPLEX
+#     font_scale = max(0.6, min(1.5, h / 480.0))
+#     thickness = int(round(font_scale * 2))
+#     bgr = _color_to_bgr(legacy_color)
 
-    def draw_one_legacy(text: str, xr: float, yr: float, align: str = default_align) -> None:
-        nonlocal img
-        text = str(text or "")
-        if not text:
-            return
-        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-        xr = max(0.0, min(1.0, float(xr))); yr = max(0.0, min(1.0, float(yr)))
-        x = int(round(xr * w))
-        y = int(round(yr * h))
-        if align == "center":
-            x -= tw // 2
-        elif align == "right":
-            x -= tw
-        y = max(th + 6, min(h - 6, y))
-        x0, y0 = x - 6, y - th - 6
-        x1, y1 = x + tw + 6, y + baseline + 6
-        overlay = img.copy()
-        cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), thickness=cv2.FILLED)
-        alpha = 0.35
-        img = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)
-        cv2.putText(img, text, (x, y), font, font_scale, bgr, thickness, lineType=cv2.LINE_AA)
+#     def draw_one_legacy(text: str, xr: float, yr: float, align: str = default_align) -> None:
+#         nonlocal img
+#         text = str(text or "")
+#         if not text:
+#             return
+#         (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+#         xr = max(0.0, min(1.0, float(xr))); yr = max(0.0, min(1.0, float(yr)))
+#         x = int(round(xr * w))
+#         y = int(round(yr * h))
+#         if align == "center":
+#             x -= tw // 2
+#         elif align == "right":
+#             x -= tw
+#         y = max(th + 6, min(h - 6, y))
+#         x0, y0 = x - 6, y - th - 6
+#         x1, y1 = x + tw + 6, y + baseline + 6
+#         overlay = img.copy()
+#         cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), thickness=cv2.FILLED)
+#         alpha = 0.35
+#         img = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)
+#         cv2.putText(img, text, (x, y), font, font_scale, bgr, thickness, lineType=cv2.LINE_AA)
 
-    if legacy_captions and len(legacy_captions) > 0:
-        for item in legacy_captions:
-            try:
-                t, pos = item
-                xr, yr = float(pos[0]), float(pos[1])
-            except Exception:
-                t, xr, yr = "", 0.02, 0.95
-            if t:
-                draw_one_legacy(t, xr, yr, default_align)
-    elif legacy_caption:
-        xr, yr = (0.02, 0.95) if legacy_position is None else (float(legacy_position[0]), float(legacy_position[1]))
-        draw_one_legacy(str(legacy_caption), xr, yr, default_align)
+#     if legacy_captions and len(legacy_captions) > 0:
+#         for item in legacy_captions:
+#             try:
+#                 t, pos = item
+#                 xr, yr = float(pos[0]), float(pos[1])
+#             except Exception:
+#                 t, xr, yr = "", 0.02, 0.95
+#             if t:
+#                 draw_one_legacy(t, xr, yr, default_align)
+#     elif legacy_caption:
+#         xr, yr = (0.02, 0.95) if legacy_position is None else (float(legacy_position[0]), float(legacy_position[1]))
+#         draw_one_legacy(str(legacy_caption), xr, yr, default_align)
 
-    return img
+#     return img
 
 
 def list_images(images_dir: str) -> List[str]:
