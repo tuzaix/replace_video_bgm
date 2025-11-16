@@ -46,7 +46,8 @@ class CaptionPositionWidget(QtWidgets.QWidget):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        self._align: str = "left"
+        # 默认对齐采用“居中”
+        self._align: str = "center"
         # 多字幕块支持：每个块包含文本与位置；字体与对齐使用控件全局设置
         self._blocks: list[dict] = [
             # 默认块不设置字体字段，继承控件当前字体，便于后续全局变更自动生效
@@ -65,6 +66,16 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         self.setMinimumSize(200, 120)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.setStyleSheet("border: 1px solid #ccc; background: #fafafa;")
+        # 默认字号设置为 18
+        try:
+            f = self.font()
+            if f.pointSize() <= 0:
+                f.setPointSize(18)
+            else:
+                f.setPointSize(18)
+            self.setFont(f)
+        except Exception:
+            pass
 
     def set_text(self, text: str) -> None:
         """设置第一个字幕块的文本，并请求重绘（多块时建议使用右键菜单）。"""
@@ -130,9 +141,10 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             yr = max(0.0, min(1.0, float(p.y()) / float(h)))
             bf: QtGui.QFont = b.get("font", self.font())
             al: str = b.get("align", self._align)
-            # 颜色导出为十六进制（含alpha）
-            col: QtGui.QColor = b.get("color", QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff"))))
-            bgc: QtGui.QColor = b.get("bgcolor", QtGui.QColor("#000000"))
+            # 默认字体颜色为黑色；背景默认透明
+            col: QtGui.QColor = b.get("color", QtGui.QColor("#000000"))
+            bgc: QtGui.QColor = b.get("bgcolor", QtGui.QColor(0, 0, 0, 0))
+            sc: QtGui.QColor = b.get("stroke_color", QtGui.QColor(0, 0, 0, 0))
             def _hex_rgba(c: QtGui.QColor) -> str:
                 return f"#{c.red():02x}{c.green():02x}{c.blue():02x}{c.alpha():02x}"
             blocks.append({
@@ -143,6 +155,7 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                 "align": al if al in {"left", "center", "right"} else "left",
                 "color": _hex_rgba(col),
                 "bgcolor": _hex_rgba(bgc),
+                "stroke_color": _hex_rgba(sc),
             })
         return blocks
 
@@ -220,8 +233,23 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                     pal = self._editor.palette()
                     pal.setColor(QtGui.QPalette.Base, QtGui.QColor(color))
                     self._editor.setPalette(pal)
+                    # 同步编辑器背景样式，确保透明度在编辑态也可见
+                    a = max(0, min(255, int(color.alpha())))
+                    self._editor.setStyleSheet(
+                        f"QTextEdit{{background-color: rgba({color.red()},{color.green()},{color.blue()},{a});}}"
+                    )
                 except Exception:
                     pass
+            self.update()
+        except Exception:
+            pass
+
+    def set_block_stroke_color(self, idx: int, color: QtGui.QColor) -> None:
+        """设置指定字幕块的字符边框颜色（透明表示关闭描边）。若索引无效则忽略。"""
+        try:
+            if idx < 0 or idx >= len(self._blocks):
+                return
+            self._blocks[idx]["stroke_color"] = QtGui.QColor(color)
             self.update()
         except Exception:
             pass
@@ -331,7 +359,13 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         return QtCore.QRectF(x, y, tw, th)
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # type: ignore[override]
-        """绘制背景与字幕文本框。"""
+        """绘制背景与字幕文本框。
+
+        优化：
+        - 默认不为未选中块绘制边框；
+        - 拖拽过程中不为选中块绘制边框；
+        - 选中但未拖拽时使用主色加粗边框以增强对比。
+        """
         # 首次显示时，将第一个文本框居中一次（固定左上角锚点）
         if not self._pos_centered_once and self.width() > 0 and self.height() > 0 and self._blocks:
             bbox0 = self._text_bbox(self._blocks[0], QtCore.QPointF(0.0, 0.0))
@@ -348,21 +382,17 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         # 绘制所有字幕块
         for idx, b in enumerate(self._blocks):
             bbox = self._text_bbox(b)
-            # 背景颜色：优先使用块自定义颜色，否则为半透明黑
-            bg = QtGui.QColor(b.get("bgcolor", QtGui.QColor("#000")))
-            # 选中块使用更高不透明度的背景以增强对比
-            bg.setAlpha(110 if idx == self._selected_idx else 90)
-            painter.fillRect(bbox, bg)
-            # 文本边框：选中时使用主色并加粗
-            if idx == self._selected_idx:
+            # 背景颜色：优先使用块自定义颜色；默认透明，不强制设置不透明度
+            bg = QtGui.QColor(b.get("bgcolor", QtGui.QColor(0, 0, 0, 0)))
+            if bg.alpha() > 0:
+                painter.fillRect(bbox, bg)
+            # 文本边框：仅在选中且未拖拽时绘制；未选中不画边框，拖拽时也不画边框
+            if idx == self._selected_idx and self._dragging_idx != idx:
                 sel_color = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#2563eb")))
                 painter.setPen(QtGui.QPen(sel_color, 2))
-            else:
-                painter.setPen(QtGui.QPen(QtGui.QColor("#000"), 1))
-            painter.drawRect(bbox)
-            # 文本颜色：优先使用块自定义颜色，否则使用主题色
-            color = QtGui.QColor(b.get("color", QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#409eff")))))
-            painter.setPen(QtGui.QPen(color))
+                painter.drawRect(bbox)
+            # 文本颜色：优先使用块自定义颜色，否则默认黑色
+            color = QtGui.QColor(b.get("color", QtGui.QColor("#000000")))
             # 文本位置：在 bbox 内侧留 6 像素内边距
             font: QtGui.QFont = b.get("font", self.font())
             painter.setFont(font)
@@ -370,6 +400,16 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             b_align = b.get("align", self._align)
             align_flag = QtCore.Qt.AlignLeft if b_align == "left" else (QtCore.Qt.AlignCenter if b_align == "center" else QtCore.Qt.AlignRight)
             # 支持自动换行与多行文本绘制；水平对齐由用户选择的单选框控制
+            # 描边：若设置了非透明的描边颜色，则先绘制若干偏移层以模拟字符边框
+            stroke = QtGui.QColor(b.get("stroke_color", QtGui.QColor(0, 0, 0, 0)))
+            if stroke.alpha() > 0:
+                painter.setPen(QtGui.QPen(stroke))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        painter.drawText(text_rect.translated(dx, dy), align_flag | QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, str(b.get("text", "")))
+            painter.setPen(QtGui.QPen(color))
             painter.drawText(text_rect, align_flag | QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, str(b.get("text", "")))
         painter.end()
 
@@ -815,6 +855,14 @@ class GenerateCoverTab(QtWidgets.QWidget):
             self.pos_widget.selection_changed.connect(self._on_selection_changed)
         except Exception:
             pass
+        # 设置预览控件默认对齐为居中，并统一默认字号 18
+        try:
+            self.pos_widget.set_alignment("center")
+            pf = self.pos_widget.font()
+            pf.setPointSize(18)
+            self.pos_widget.setFont(pf)
+        except Exception:
+            pass
         # 去抖计时器已移除：无左侧字幕输入框，文本编辑在右侧控件中完成
         # QTextEdit.textChanged() 不携带文本参数，需主动读取并传给位置控件
         # 字幕文本联动改为由右键菜单管理；不再与外部输入框联动
@@ -891,7 +939,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
         row_font.addWidget(QtWidgets.QLabel("字号:"), 0)
         self.font_size_spin = QtWidgets.QSpinBox()
         self.font_size_spin.setRange(8, 96)
-        self.font_size_spin.setValue(15)
+        # 默认字号 18
+        self.font_size_spin.setValue(18)
         try:
             self.font_size_spin.valueChanged.connect(self._on_font_changed)
         except Exception:
@@ -936,8 +985,9 @@ class GenerateCoverTab(QtWidgets.QWidget):
         self.font_color_btn.setText("A")
         self.font_color_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.font_color_btn.setFixedSize(28, 24)
+        # 默认字体颜色预览为黑色
         self.font_color_btn.setStyleSheet(
-            "QToolButton{border:1px solid #cfcfcf; background:#ffffff;}"
+            "QToolButton{border:1px solid #cfcfcf; background:#000000;}"
         )
         self.font_color_btn.clicked.connect(self._on_font_color_clicked)
         row_style.addWidget(QtWidgets.QLabel("字体颜色:"))
@@ -948,12 +998,25 @@ class GenerateCoverTab(QtWidgets.QWidget):
         self.font_bg_color_btn.setText("字体背景色")
         self.font_bg_color_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.font_bg_color_btn.setFixedSize(32, 24)
+        # 默认背景颜色预览为透明
         self.font_bg_color_btn.setStyleSheet(
-            "QToolButton{border:1px solid #cfcfcf; background:#ffffff;}"
+            "QToolButton{border:1px solid #cfcfcf; background: rgba(0,0,0,0);}"
         )
         self.font_bg_color_btn.clicked.connect(self._on_font_bg_color_clicked)
         row_style.addWidget(QtWidgets.QLabel("字体背景色:"))
         row_style.addWidget(self.font_bg_color_btn)
+
+        # 字符边框颜色（默认为透明）
+        self.font_stroke_color_btn = QtWidgets.QToolButton()
+        self.font_stroke_color_btn.setText("描边色")
+        self.font_stroke_color_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.font_stroke_color_btn.setFixedSize(32, 24)
+        self.font_stroke_color_btn.setStyleSheet(
+            "QToolButton{border:1px solid #cfcfcf; background: rgba(0,0,0,0);}"
+        )
+        self.font_stroke_color_btn.clicked.connect(self._on_font_stroke_color_clicked)
+        row_style.addWidget(QtWidgets.QLabel("字符边框色:"))
+        row_style.addWidget(self.font_stroke_color_btn)
         try:
             row_style.addStretch(1)
         except Exception:
@@ -1148,7 +1211,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
             if idx is None or int(idx) < 0:
                 QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再设置字体颜色。")
                 return
-            cur = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#2563eb")))
+            # 默认字体颜色为黑色
+            cur = QtGui.QColor("#000000")
             blocks = getattr(self.pos_widget, "_blocks", [])
             if 0 <= int(idx) < len(blocks):
                 cur = blocks[int(idx)].get("color", cur)
@@ -1170,19 +1234,56 @@ class GenerateCoverTab(QtWidgets.QWidget):
         try:
             idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
             if idx is None or int(idx) < 0:
-                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再设置背景颜色。")
-                return
-            cur = QtGui.QColor("#000000")
+                # 未选中时默认应用到第一个块（若存在）
+                blocks0 = getattr(self.pos_widget, "_blocks", [])
+                if len(blocks0) == 0:
+                    QtWidgets.QMessageBox.information(self, "提示", "当前无字幕块可设置背景颜色。请先添加字幕块。")
+                    return
+                    
+                idx = 0
+            # 默认背景颜色为透明
+            cur = QtGui.QColor(0, 0, 0, 0)
             blocks = getattr(self.pos_widget, "_blocks", [])
             if 0 <= int(idx) < len(blocks):
                 cur = blocks[int(idx)].get("bgcolor", cur)
-            c = QtWidgets.QColorDialog.getColor(cur, self, "选择背景颜色")
+            # 允许选择透明度
+            c = QtWidgets.QColorDialog.getColor(cur, self, "选择背景颜色", QtWidgets.QColorDialog.ShowAlphaChannel)
             if not c.isValid():
                 return
             if hasattr(self.pos_widget, "set_block_bgcolor"):
                 self.pos_widget.set_block_bgcolor(int(idx), c)
             try:
-                self.font_bg_color_btn.setStyleSheet(f"QToolButton{{border:1px solid #cfcfcf; background:{c.name()};}}")
+                a = max(0, min(255, int(c.alpha())))
+                self.font_bg_color_btn.setStyleSheet(
+                    f"QToolButton{{border:1px solid #cfcfcf; background: rgba({c.red()},{c.green()},{c.blue()},{a});}}"
+                )
+            except Exception:
+                pass
+            self.pos_widget.update()
+        except Exception:
+            pass
+
+    def _on_font_stroke_color_clicked(self) -> None:
+        """选择字符边框颜色：仅作用于选中块，透明表示关闭描边，并更新预览样式。"""
+        try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再设置字符边框颜色。")
+                return
+            cur = QtGui.QColor(0, 0, 0, 0)  # 默认透明
+            blocks = getattr(self.pos_widget, "_blocks", [])
+            if 0 <= int(idx) < len(blocks):
+                cur = blocks[int(idx)].get("stroke_color", cur)
+            c = QtWidgets.QColorDialog.getColor(cur, self, "选择字符边框颜色")
+            if not c.isValid():
+                return
+            if hasattr(self.pos_widget, "set_block_stroke_color"):
+                self.pos_widget.set_block_stroke_color(int(idx), c)
+            try:
+                # 使用 rgba 以支持透明预览
+                self.font_stroke_color_btn.setStyleSheet(
+                    f"QToolButton{{border:1px solid #cfcfcf; background: rgba({c.red()},{c.green()},{c.blue()},{c.alpha()});}}"
+                )
             except Exception:
                 pass
             self.pos_widget.update()
@@ -1190,7 +1291,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
             pass
 
     def _refresh_controls_for_selection(self, idx: int) -> None:
-        """根据选中的块刷新左侧控件显示（字体、字号、加粗、倾斜、颜色、背景、对齐）。"""
+        """根据选中的块刷新左侧控件显示（字体、字号、加粗、倾斜、颜色、背景、边框、对齐）。"""
         try:
             self._syncing_controls = True
             if idx is None or int(idx) < 0:
@@ -1232,8 +1333,19 @@ class GenerateCoverTab(QtWidgets.QWidget):
             except Exception:
                 pass
             try:
-                bgc = b.get("bgcolor", QtGui.QColor("#000000"))
-                self.font_bg_color_btn.setStyleSheet(f"QToolButton{{border:1px solid #cfcfcf; background:{QtGui.QColor(bgc).name()};}}")
+                bgc = b.get("bgcolor", QtGui.QColor(0, 0, 0, 0))
+                bgc = QtGui.QColor(bgc)
+                self.font_bg_color_btn.setStyleSheet(
+                    f"QToolButton{{border:1px solid #cfcfcf; background: rgba({bgc.red()},{bgc.green()},{bgc.blue()},{bgc.alpha()});}}"
+                )
+            except Exception:
+                pass
+            try:
+                sc = b.get("stroke_color", QtGui.QColor(0, 0, 0, 0))
+                sc = QtGui.QColor(sc)
+                self.font_stroke_color_btn.setStyleSheet(
+                    f"QToolButton{{border:1px solid #cfcfcf; background: rgba({sc.red()},{sc.green()},{sc.blue()},{sc.alpha()});}}"
+                )
             except Exception:
                 pass
             # 对齐
