@@ -1891,6 +1891,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
         self._worker.progress.connect(self._on_progress)
         self._worker.cover_generated.connect(self._on_cover_generated)
         self._worker.finished.connect(self._on_finished)
+        # 任务完成时主动请求线程退出，避免 QThread 在仍运行时被销毁
+        self._worker.finished.connect(self._request_thread_quit)
         self._worker.error.connect(self._on_error)
         self._thread.finished.connect(self._cleanup_thread)
         self._thread.start()
@@ -1903,6 +1905,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
         try:
             if self._worker:
                 self._worker.stop()
+            # 在停止请求后，尽快让线程退出并等待片刻，避免销毁警告
+            self._request_thread_quit()
         except Exception:
             pass
 
@@ -1980,6 +1984,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
     def _cleanup_thread(self) -> None:
         """线程收尾：断开引用与标志。"""
         try:
+            # 确保线程已退出，避免 "QThread: Destroyed while thread is still running"
+            self._request_thread_quit()
             self._thread = None
             self._worker = None
         except Exception:
@@ -2002,6 +2008,34 @@ class GenerateCoverTab(QtWidgets.QWidget):
             self._on_start_clicked()
         else:
             self._on_stop_clicked()
+
+    def _request_thread_quit(self) -> None:
+        """请求后台线程优雅退出并短暂等待，避免线程销毁警告。
+
+        - 调用 `quit()` 触发事件循环退出；
+        - 使用 `wait(2000)` 最长等待 2 秒；若线程已停止或对象为空则忽略。
+        """
+        try:
+            if getattr(self, "_thread", None) is not None:
+                if self._thread.isRunning():
+                    self._thread.quit()
+                    # 短暂等待，避免 UI 关闭时仍在运行
+                    self._thread.wait(2000)
+        except Exception:
+            pass
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        """窗口关闭事件：确保停止工作者并退出线程以避免 QThread 销毁警告。"""
+        try:
+            if getattr(self, "_worker", None) is not None:
+                self._worker.stop()
+        except Exception:
+            pass
+        self._request_thread_quit()
+        try:
+            super().closeEvent(event)
+        except Exception:
+            pass
 
     # --- 样式与尺寸（与截图页保持一致） ---
     def _apply_progressbar_style(self, chunk_color: str = theme.PRIMARY_BLUE) -> None:
