@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 import os
+import shutil
 from PySide6 import QtWidgets, QtCore, QtGui
 from gui.utils import theme
 
@@ -142,7 +143,19 @@ class CaptionPositionWidget(QtWidgets.QWidget):
     def get_blocks(self) -> list[dict]:
         """返回所有字幕块的文本与归一化位置。
 
-        结构：[{"text": str, "position": (x_ratio, y_ratio), "font_family": str, "font_size": int}]
+        结构：[{
+            "text": str,
+            "position": (x_ratio, y_ratio),
+            "font_family": str,
+            "font_size": int,
+            "font_bold": bool,
+            "font_italic": bool,
+            "align": str,
+            "color": "#rrggbbaa",
+            "bgcolor": "#rrggbbaa",
+            "stroke_color": "#rrggbbaa",
+            "rotation": float,
+        }]
         用于封面生成时将多个字幕块叠加到最终图像。
         """
         w = max(1, self.width())
@@ -165,6 +178,8 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                 "position": (xr, yr),
                 "font_family": bf.family(),
                 "font_size": bf.pointSize() if bf.pointSize() > 0 else bf.pixelSize() or 12,
+                "font_bold": bool(bf.bold()),
+                "font_italic": bool(bf.italic()),
                 "align": al if al in {"left", "center", "right"} else "left",
                 "color": _hex_rgba(col),
                 "bgcolor": _hex_rgba(bgc),
@@ -815,7 +830,8 @@ class GenerateCoverWorker(QtCore.QObject):
     cover_generated = QtCore.Signal(int, str, tuple)
     finished = QtCore.Signal(str, int)
     error = QtCore.Signal(str)
-    start = QtCore.Signal(str, int, int, int, str, str, float, float)
+    # 启动信号（未使用）：传递基础参数与字幕块列表
+    start = QtCore.Signal(str, str, int, int, int, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -825,9 +841,22 @@ class GenerateCoverWorker(QtCore.QObject):
         """请求停止：当前轮次结束后退出。"""
         self._stopping = True
 
-    @QtCore.Slot(str, str, int, int, int, str, str, float, float)
-    def run(self, images_dir: str, output_dir: str, count: int, per_cover: int, workers: int, caption: str, align: str, pos_x: float, pos_y: float) -> None:
-        """执行封面生成任务（后台线程）。"""
+    @QtCore.Slot(str, str, int, int, int, object)
+    def run(self, images_dir: str, output_dir: str, count: int, per_cover: int, workers: int, caption_blocks: list[dict]) -> None:
+        """执行封面生成任务（后台线程）。
+
+        本方法根据 `cover_tool.generate_cover` 的最新接口进行适配：
+        使用 `generate_thumbnail(image_paths, output_dir, count, per_cover, caption_blocks, progress_cb)`
+        顺序生成封面，并通过回调更新 UI。
+
+        参数：
+        - images_dir: 截图目录
+        - output_dir: 合成输出目录（最终图片保存在 `output_dir/封面/`）
+        - count: 生成封面数量
+        - per_cover: 每个封面拼接的截图数量
+        - workers: 并行线程数（当前接口不再使用，保留作占位）
+        - caption_blocks: 字幕块列表（含文本、位置、字体参数、颜色与背景透明、描边、对齐等）
+        """
         try:
             from cover_tool import generate_cover as gen
         except Exception as e:
@@ -876,21 +905,18 @@ class GenerateCoverWorker(QtCore.QObject):
                 pass
 
         try:
-            ok = gen.generate_covers_concurrently(
-                images_dir=images_dir,
-                all_images=images,
+            # 适配新的顺序生成接口：不再使用并发方法
+            ok = gen.generate_thumbnail(
+                image_paths=images,
+                output_dir=output_dir,
                 count=total,
                 per_cover=max(1, int(per_cover)),
-                caption=caption or None,
-                color="yellow",
-                workers=max(1, int(workers)),
-                caption_position=(float(pos_x), float(pos_y)),
-                caption_align=align if align in {"left", "center", "right"} else "left",
-                output_dir=output_dir,
+                caption_blocks=caption_blocks,
                 progress_cb=on_cover,
-                captions=getattr(self, "_captions", None),
             )
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self.error.emit(f"并发生成封面失败: {e}")
             return
 
@@ -1608,8 +1634,91 @@ class GenerateCoverTab(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _confirm_and_cleanup_output_dir_before_start(self) -> bool:
+        """开始前确认是否清理旧封面目录（精简版）。
+
+        仅在输出目录存在且非空时弹窗，提供两种选择：
+        - "删除后开始"：直接尝试清理后继续开始（失败也不打断）。
+        - "直接开始"：保留旧内容并开始。
+
+        始终返回 True 以继续开始任务（除非无法访问目录时，视为空处理）。
+        """
+        output_dir = self.output_dir_edit.text().strip()
+
+        # 目录不存在则直接允许开始
+        if not os.path.isdir(output_dir):
+            return True
+
+        # 检查目录是否为空
+        try:
+            entries = list(os.scandir(output_dir))
+            is_empty = len(entries) == 0
+        except Exception:
+            # 无法列出时，视为空，避免多余提示
+            is_empty = True
+
+        if is_empty:
+            return True
+
+        # 目录非空，弹窗确认（仅两项：删除后开始 / 直接开始）
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setIcon(QtWidgets.QMessageBox.Question)
+        msg_box.setWindowTitle("清理旧封面确认")
+        msg_box.setText(
+            f"检测到输出目录非空：\n{output_dir}\n\n是否删除旧文件后开始？"
+        )
+        delete_button = msg_box.addButton("删除后开始", QtWidgets.QMessageBox.YesRole)
+        keep_button = msg_box.addButton("直接开始", QtWidgets.QMessageBox.NoRole)
+        msg_box.setDefaultButton(delete_button)
+        msg_box.exec()
+
+        clicked = msg_box.clickedButton()
+        if clicked is delete_button:
+            # 尝试清理（失败不打断流程，不额外弹窗）
+            try:
+                self._safe_cleanup_directory(output_dir)
+            except Exception:
+                pass
+            return True
+        # 直接开始
+        return True
+
+    def _safe_cleanup_directory(self, dir_path: str) -> Tuple[bool, str]:
+        """安全清理指定目录内容。
+
+        尝试删除目录中的所有文件与子目录；若删除整个目录失败，则逐项删除。
+        删除后不保证重建目录；后续工作者会负责创建。
+
+        参数
+        - dir_path: 待清理目录的绝对路径或相对路径。
+
+        返回
+        - (True, "") 表示清理成功；(False, 错误信息) 表示失败。
+        """
+        try:
+            abs_dir = os.path.abspath(dir_path)
+            # 优先尝试整体删除
+            try:
+                shutil.rmtree(abs_dir)
+            except Exception:
+                # 回退到逐项清理
+                try:
+                    for entry in os.scandir(abs_dir):
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                shutil.rmtree(entry.path)
+                            else:
+                                os.remove(entry.path)
+                        except Exception:
+                            pass
+                except Exception as e2:
+                    return False, str(e2)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
     def _on_start_clicked(self) -> None:
-        """开始执行封面生成任务：启动线程与工作者。"""
+        """开始执行封面生成任务：在需要时确认清理输出目录后，启动线程与工作者。"""
         if self._is_running:
             return
         images_dir = self.images_dir_edit.text().strip()
@@ -1620,35 +1729,21 @@ class GenerateCoverTab(QtWidgets.QWidget):
         if not output_dir:
             QtWidgets.QMessageBox.warning(self, "提示", "请先填写合成封面目录")
             return
+        # 开始前确认是否清理旧输出目录（仅在非空时提示）
         try:
-            caption = self.pos_widget.get_text().strip()
+            self._confirm_and_cleanup_output_dir_before_start()
         except Exception:
-            caption = ""
-        align = "left"
-        if self.align_center.isChecked():
-            align = "center"
-        elif self.align_right.isChecked():
-            align = "right"
-        pos_x, pos_y = self.pos_widget.get_position()
-        # 收集所有字幕块以支持多字幕块生成
-        captions_blocks: list[tuple[str, tuple[float, float]]] = []
+            pass
+        # 收集所有字幕块（包含样式）以支持多字幕块生成
+        caption_blocks_full: list[dict] = []
         try:
-            for b in self.pos_widget.get_blocks():
-                t = str(b.get("text", "")).strip()
-                p = b.get("position", (0.0, 0.0))
-                if t:
-                    captions_blocks.append((t, (float(p[0]), float(p[1]))))
+            caption_blocks_full = list(self.pos_widget.get_blocks())
         except Exception:
-            captions_blocks = []
+            caption_blocks_full = []
 
         # 线程与工作者
         self._thread = QtCore.QThread(self)
         self._worker = GenerateCoverWorker()
-        # 将多字幕块传给工作者（避免更改信号签名）
-        try:
-            setattr(self._worker, "_captions", captions_blocks)
-        except Exception:
-            pass
         self._worker.moveToThread(self._thread)
         # 连接信号
         self._thread.started.connect(lambda: self._worker.run(
@@ -1657,10 +1752,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
             int(self.count_spin.value()),
             int(self.per_cover_spin.value()),
             int(self.workers_spin.value()),
-            caption,
-            align,
-            float(pos_x),
-            float(pos_y),
+            caption_blocks_full,
         ))
         self._worker.phase.connect(self._on_phase)
         self._worker.progress.connect(self._on_progress)
