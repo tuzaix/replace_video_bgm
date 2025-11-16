@@ -489,7 +489,7 @@ def render_caption_blocks(
             draw = ImageDraw.Draw(img_rgba)
 
             # 计算 16:9 居中绘制区域（左右各 5% 留白）
-            draw_rect = compute_draw_area_16_9_by_width(W, H, padding_pct=(0.05, 0.03, 0.05, 0.03))
+            draw_rect = compute_draw_area_16_9_by_width(W, H, padding_pct=(0.03, 0.01, 0.03, 0.01))
             # 在原图上标示 16:9 绘制区域：浅灰半透明填充 + 边框
             try:
                 dl, dt, dw, dh = draw_rect
