@@ -569,7 +569,7 @@ def render_caption_blocks(
                     sby = int(mapped.get("map_text_box_y", dt))
                     sbw = int(mapped.get("map_text_box_width", 0))
                     sbh = int(mapped.get("map_text_box_height", 0))
-                    y = sby + sbh
+                    y = sby + sbh*0.75 # 重新计算y轴坐标，非常重要
 
                     # 根据对齐选择锚点并换算文本左上角 x
                     if balign == "center":
