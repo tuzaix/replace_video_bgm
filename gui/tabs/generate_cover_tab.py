@@ -1417,9 +1417,27 @@ class GenerateCoverTab(QtWidgets.QWidget):
         layout.addWidget(group_progress)
 
         # 结果表
-        self.results_table = QtWidgets.QTableWidget(0, 3)
-        self.results_table.setHorizontalHeaderLabels(["序号", "封面路径", "分辨率"])
-        self.results_table.horizontalHeader().setStretchLastSection(True)
+        self.results_table = QtWidgets.QTableWidget(0, 2)
+        self.results_table.setHorizontalHeaderLabels(["封面路径", "分辨率"])
+        # 设置列宽比例为 70% / 30%，并在容器尺寸变化时保持比例
+        try:
+            header = self.results_table.horizontalHeader()
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
+            header.setSectionResizeMode(1, QtWidgets.QHeaderView.Fixed)
+        except Exception:
+            pass
+        # 双击结果行时打开对应的文件或目录
+        try:
+            self.results_table.cellDoubleClicked.connect(self._on_results_double_clicked)
+        except Exception:
+            pass
+        # 安装事件过滤以在表格尺寸变化时保持列宽比例
+        try:
+            self.results_table.installEventFilter(self)
+            self._apply_results_table_column_ratio()
+        except Exception:
+            pass
         layout.addWidget(self.results_table, 1)
         return container
 
@@ -1828,6 +1846,12 @@ class GenerateCoverTab(QtWidgets.QWidget):
         """开始执行封面生成任务：在需要时确认清理输出目录后，启动线程与工作者。"""
         if self._is_running:
             return
+        # 每次点击开始，先重置右侧结果列表内容
+        try:
+            if hasattr(self, "results_table") and self.results_table is not None:
+                self.results_table.setRowCount(0)
+        except Exception:
+            pass
         images_dir = self.images_dir_edit.text().strip()
         if not images_dir:
             QtWidgets.QMessageBox.warning(self, "提示", "请先填写截图目录")
@@ -1904,9 +1928,36 @@ class GenerateCoverTab(QtWidgets.QWidget):
         try:
             row = self.results_table.rowCount()
             self.results_table.insertRow(row)
-            self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(idx)))
-            self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(path))
-            self.results_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{wh[0]}x{wh[1]}"))
+            self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(path))
+            self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{wh[0]}x{wh[1]}"))
+        except Exception:
+            pass
+
+    def _on_results_double_clicked(self, row: int, column: int) -> None:
+        """双击结果表行时，打开该行对应的文件或目录。
+
+        优先尝试使用 Qt 的 QDesktopServices 以系统默认程序打开；
+        若失败，在 Windows 上回退到 os.startfile。
+        """
+        try:
+            item = self.results_table.item(row, 0)
+            if not item:
+                return
+            path = item.text().strip()
+            if not path:
+                return
+            target: Optional[str] = None
+            if os.path.isfile(path) or os.path.isdir(path):
+                target = path
+            else:
+                return
+
+            ok = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(target))
+            if not ok:
+                try:
+                    os.startfile(target)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1989,6 +2040,32 @@ class GenerateCoverTab(QtWidgets.QWidget):
             self.progress_bar.setStyleSheet(style)
         except Exception:
             pass
+
+    def _apply_results_table_column_ratio(self) -> None:
+        """将结果表两列宽度设置为 70% / 30% 的比例。
+
+        在容器尺寸变化时调用该方法，使用 viewport 宽度以避免滚动条影响。
+        """
+        try:
+            if not hasattr(self, "results_table") or self.results_table is None:
+                return
+            header = self.results_table.horizontalHeader()
+            vw = max(0, int(self.results_table.viewport().width()))
+            w0 = int(round(vw * 0.70))
+            w1 = max(0, vw - w0)
+            header.resizeSection(0, w0)
+            header.resizeSection(1, w1)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        """事件过滤器：保持结果表列宽比例为 70% / 30%。"""
+        try:
+            if obj is getattr(self, "results_table", None) and event.type() == QtCore.QEvent.Resize:
+                self._apply_results_table_column_ratio()
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     def _apply_action_button_style(self, running: bool) -> None:
         """根据运行状态统一设置单按钮的高度与样式。"""
