@@ -4,18 +4,17 @@ import sys
 import uuid
 from typing import List, Optional
 import shutil
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import tempfile
+import time
+import cv2
+from PIL import Image, ImageDraw, ImageFont
  
-
-
 # 允许从项目根目录运行 `python tools/generate_screen_covers.py`
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-
+FONTS_DIR = os.path.join(PROJECT_ROOT, "gui", "fonts")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 def compute_draw_area_16_9_by_width(img_w: int, img_h: int, padding_pct: float = 0.05) -> tuple[int, int, int, int]:
@@ -168,6 +167,103 @@ def _rgba_hex_to_bgra(hex_rgba: str) -> tuple[int, int, int, int]:
     else:
         r, g, b, a = 0, 0, 0, 0
     return b, g, r, a
+
+def _np_bgr_to_pil_rgba(arr) -> object:
+    """Convert a NumPy BGR image (OpenCV) to a Pillow RGBA Image.
+
+    - Imports are kept local to avoid hard dependencies at module import time.
+    - Returns a `PIL.Image.Image` in RGBA mode.
+    """
+    try:
+        import cv2
+        from PIL import Image
+        return Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGBA))
+    except Exception:
+        # Best-effort fallback: return input unmodified (caller should handle types)
+        return arr
+
+def _pil_rgba_to_np_bgr(img_rgba) -> object:
+    """Convert a Pillow RGBA Image to a NumPy BGR array compatible with OpenCV.
+
+    - Imports are kept local to avoid hard dependencies at module import time.
+    - Returns a `numpy.ndarray` in BGR order.
+    """
+    try:
+        import cv2
+        import numpy as np
+        return cv2.cvtColor(np.array(img_rgba), cv2.COLOR_RGBA2BGR)
+    except Exception:
+        return img_rgba
+
+def _rgba_hex_to_rgba(s: str) -> tuple[int, int, int, int]:
+    """Convert `#rrggbb` or `#rrggbbaa` into an RGBA tuple.
+
+    - Uses module-level `_rgba_hex_to_bgra` then swaps back to RGBA.
+    - Returns `(r, g, b, a)` with `a` in 0–255.
+    """
+    b, g, r, a = _rgba_hex_to_bgra(s)
+    return (r, g, b, a)
+
+def _resolve_chinese_font(bold: bool, font_family: Optional[str] = None) -> Optional[str]:
+    """Resolve a Chinese font path strictly from project fonts under `gui/fonts`.
+
+    Priority:
+    1) If `font_family` is an existing file path, use it directly.
+    2) If `font_family` matches a known project family or filename, select the corresponding OTF.
+    3) Fallback to project fonts based on weight (bold vs regular).
+
+    Returns:
+    - Font file path as `str` if found; otherwise `None`.
+    """
+    try:
+        if font_family:
+            ff = str(font_family).strip()
+            # Explicit file path
+            if os.path.isfile(ff):
+                return ff
+
+            # Normalize family name and map to project fonts
+            ff_lower = ff.lower()
+            known_project = {
+                "sourcehansanscn-regular": "SourceHanSansCN-Regular.otf",
+                "sourcehansanscn-normal": "SourceHanSansCN-Normal.otf",
+                "sourcehansanscn-medium": "SourceHanSansCN-Medium.otf",
+                "sourcehansanscn-bold": "SourceHanSansCN-Bold.otf",
+                "sourcehansanscn-heavy": "SourceHanSansCN-Heavy.otf",
+                "sourcehansanscn-light": "SourceHanSansCN-Light.otf",
+            }
+            # Family without weight → choose bold or regular
+            if ff_lower == "sourcehansanscn":
+                ff_lower = "sourcehansanscn-bold" if bold else "sourcehansanscn-regular"
+            if ff_lower in known_project:
+                p = os.path.join(FONTS_DIR, known_project[ff_lower])
+                if os.path.isfile(p):
+                    return p
+    except Exception:
+        pass
+
+    # Default project font fallback
+    candidates = [
+        os.path.join(FONTS_DIR, "SourceHanSansCN-Bold.otf") if bold else os.path.join(FONTS_DIR, "SourceHanSansCN-Regular.otf"),
+        os.path.join(FONTS_DIR, "SourceHanSansCN-Normal.otf"),
+        os.path.join(FONTS_DIR, "SourceHanSansCN-Medium.otf"),
+        os.path.join(FONTS_DIR, "SourceHanSansCN-Heavy.otf") if bold else os.path.join(FONTS_DIR, "SourceHanSansCN-Light.otf"),
+    ]
+    for p in candidates:
+        try:
+            if os.path.isfile(p):
+                return p
+        except Exception:
+            continue
+    return None
+
+def _ensure_unicode_text(x) -> str:
+    if isinstance(x, bytes):
+        try:
+            return x.decode("utf-8")
+        except Exception:
+            return x.decode("utf-8", errors="ignore")
+    return str(x)
 
 def stitch_images(image_paths: List[str]) -> object:
     """生成基础拼接图（不含字幕）。
@@ -341,316 +437,147 @@ def stitch_images_with_blend(image_paths: List[str], blend_width: int = 24) -> o
 
     return out
 
-def render_caption_blocks(
-    base_img: object,
-    caption_blocks: Optional[list[dict]] = None
-) -> object:
+def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]] = None) -> object:
     """在基础拼接图上合成多个字幕块（Unicode 安全）。
-
     修复中文乱码：改用 Pillow 或 Qt 绘制支持 Unicode 的字体。
     优先级：Pillow → PySide6/Qt → OpenCV（仅英文，保留作为兜底）。
-
     - 每个字幕块支持：`text`, `position(xr,yr)`, `font_size`, `font_bold`, `font_italic`(不直接支持),
       `color`, `bgcolor`(含透明度), `stroke_color`, `align`。
-
     返回合成后图片（同输入类型）。
     """
     if not caption_blocks: # 没字幕则直接返回
         return base_img
-    # 本地工程根与文本处理工具
-    import os as _os_local
     try:
-        PROJECT_ROOT_LOCAL = PROJECT_ROOT
-    except NameError:
-        PROJECT_ROOT_LOCAL = _os_local.path.abspath(_os_local.path.join(_os_local.path.dirname(__file__), ".."))
+        # 使用模块级工具函数（已移出并优化）
+        img_rgba = _np_bgr_to_pil_rgba(base_img)
 
-    def _ensure_unicode_text(x) -> str:
-        if isinstance(x, bytes):
+        W, H = img_rgba.size
+        draw = ImageDraw.Draw(img_rgba)
+
+        # 计算 16:9 居中绘制区域（左右各 5% 留白）
+        draw_rect = compute_draw_area_16_9_by_width(W, H, padding_pct=(0.03, 0.01, 0.03, 0.01))
+       
+        for block in caption_blocks:
             try:
-                return x.decode("utf-8")
-            except Exception:
-                return x.decode("utf-8", errors="ignore")
-        return str(x)
-
-    # 尝试使用 Pillow（推荐，支持中文 TrueType 字体）
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        import numpy as np
-        pil_available = True
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        pil_available = False
-
-    if pil_available:
-        try:
-            # 转 PIL RGBA
-            def _np_bgr_to_pil_rgba(arr):
-                import cv2
-                return Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGBA))
-
-            def _pil_rgba_to_np_bgr(img_rgba):
-                import cv2
-                return cv2.cvtColor(np.array(img_rgba), cv2.COLOR_RGBA2BGR)
-
-            def _rgba_hex_to_rgba(s: str) -> tuple[int, int, int, int]:
-                b, g, r, a = _rgba_hex_to_bgra(s)
-                return (r, g, b, a)
-
-            def _resolve_chinese_font(bold: bool, font_family: Optional[str] = None) -> Optional[str]:
-                """根据 `font_family` 与粗体标志解析字体文件路径。
-
-                优先级：
-                1) 若 `font_family` 是存在的文件路径，直接使用；
-                2) 若为项目内已知家族名或文件名，匹配 `gui/fonts` 下的对应 OTF；
-                3) 若为 Windows 常见中文字体家族，映射到系统字体文件；
-                4) 以上都未命中时，按粗体与常用项目字体回退。
-                """
-                try:
-                    if font_family:
-                        ff = str(font_family).strip()
-                        # 显式文件路径
-                        if _os_local.path.isfile(ff):
-                            return ff
-
-                        # 规范化家族名
-                        ff_lower = ff.lower()
-                        fonts_dir = _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts")
-                        known_project = {
-                            "sourcehansanscn-regular": "SourceHanSansCN-Regular.otf",
-                            "sourcehansanscn-normal": "SourceHanSansCN-Normal.otf",
-                            "sourcehansanscn-medium": "SourceHanSansCN-Medium.otf",
-                            "sourcehansanscn-bold": "SourceHanSansCN-Bold.otf",
-                            "sourcehansanscn-heavy": "SourceHanSansCN-Heavy.otf",
-                            "sourcehansanscn-light": "SourceHanSansCN-Light.otf",
-                        }
-                        # 兼容不带权重的家族名：按粗体选择
-                        if ff_lower == "sourcehansanscn":
-                            ff_lower = "sourcehansanscn-bold" if bold else "sourcehansanscn-regular"
-                        if ff_lower in known_project:
-                            p = _os_local.path.join(fonts_dir, known_project[ff_lower])
-                            if _os_local.path.isfile(p):
-                                return p
-
-                        # Windows 字体家族映射
-                        win_map = {
-                            "microsoft yahei": r"C:\\Windows\\Fonts\\msyh.ttc",
-                            "微软雅黑": r"C:\\Windows\\Fonts\\msyh.ttc",
-                            "msyh": r"C:\\Windows\\Fonts\\msyh.ttc",
-                            "msyhbd": r"C:\\Windows\\Fonts\\msyhbd.ttc",  # 粗体
-                            "simhei": r"C:\\Windows\\Fonts\\simhei.ttf",
-                            "黑体": r"C:\\Windows\\Fonts\\simhei.ttf",
-                            "simsun": r"C:\\Windows\\Fonts\\simsun.ttc",
-                            "宋体": r"C:\\Windows\\Fonts\\simsun.ttc",
-                            "arial unicode ms": r"C:\\Windows\\Fonts\\arialuni.ttf",
-                            "arialuni": r"C:\\Windows\\Fonts\\arialuni.ttf",
-                            "notosanscjk": r"C:\\Windows\\Fonts\\NotoSansCJK-Regular.ttc",
-                        }
-                        # 针对粗体的 yahei 变体
-                        if bold and ff_lower in {"microsoft yahei", "微软雅黑", "msyh"}:
-                            ff_lower = "msyhbd" if "msyhbd" in win_map else ff_lower
-                        if ff_lower in win_map and _os_local.path.isfile(win_map[ff_lower]):
-                            return win_map[ff_lower]
-                except Exception:
-                    pass
-
-                # 默认项目字体回退
-                candidates = [
-                    _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Bold.otf") if bold else _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Regular.otf"),
-                    _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Normal.otf"),
-                    _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Medium.otf"),
-                    _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Heavy.otf") if bold else _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Light.otf"),
-                ]
-                for p in candidates:
-                    try:
-                        if _os_local.path.isfile(p):
-                            return p
-                    except Exception:
-                        continue
-                # Windows 常见中文字体作为兜底
-                win_candidates = [
-                    r"C:\\Windows\\Fonts\\msyh.ttc",
-                    r"C:\\Windows\\Fonts\\simhei.ttf",
-                    r"C:\\Windows\\Fonts\\simsun.ttc",
-                    r"C:\\Windows\\Fonts\\arialuni.ttf",
-                    r"C:\\Windows\\Fonts\\NotoSansCJK-Regular.ttc",
-                ]
-                for p in win_candidates:
-                    try:
-                        if _os_local.path.isfile(p):
-                            return p
-                    except Exception:
-                        continue
-                return None
-
-            img_rgba = _np_bgr_to_pil_rgba(base_img)
-
-            W, H = img_rgba.size
-            draw = ImageDraw.Draw(img_rgba)
-
-            # 计算 16:9 居中绘制区域（左右各 5% 留白）
-            draw_rect = compute_draw_area_16_9_by_width(W, H, padding_pct=(0.03, 0.01, 0.03, 0.01))
-            # 在原图上标示 16:9 绘制区域：浅灰半透明填充 + 边框
-            try:
-                dl, dt, dw, dh = draw_rect
-                # 透明度统一为 20%（alpha ≈ 51/255）
-                # 优化透明度：填充约 18%（更易看见背景），边框约 40%
-                draw.rectangle(
-                    [dl, dt, dl + dw, dt + dh],
-                    fill=(229, 231, 235, 46),
-                    outline=(160, 160, 160, 102),
-                    width=2,
-                )
-            except Exception:
-                pass
-              # 获取中心点
-            mid_x, mid_y = draw_rect[0] + draw_rect[2] / 2, draw_rect[1] + draw_rect[3] / 2
-            # 画个中心点
-            draw.ellipse(
-                [mid_x - 10, mid_y - 10, mid_x + 10, mid_y + 10],
-                fill=(255, 0, 0, 128),
-                outline=(255, 0, 0, 255),
-                width=2,
-            )
-
-            import pprint
-            for block in caption_blocks:
-                pprint.pprint(block)
-
-                try:
-                    t = _ensure_unicode_text(block.get("text", ""))
-                    if not t:
-                        continue
-                    balign = str(block.get("align", "left"))
-                    color_hex = str(block.get("color", "#ffffffff"))
-                    bg_hex = str(block.get("bgcolor", "#00000000"))
-                    stroke_hex = str(block.get("stroke_color", "#00000000"))
-                    font_family = str(block.get("font_family", "SourceHanSansCN-Regular"))
-                    bbold = bool(block.get("font_bold", False))
-
-                    # 使用活动区映射计算绘制坐标与字号
-                    mapped = map_block_to_draw_area(block, draw_rect)
-                    px_size = int(mapped.get("map_text_font_px", 18))
-                    stroke_w = int(max(0, round(px_size * 0.12))) + (1 if bbold else 0)
-
-                    map_text_box_centerpoint_x = int(mapped.get("map_text_box_centerpoint_x", mid_x))
-                    map_text_box_centerpoint_y = int(mapped.get("map_text_box_centerpoint_y", mid_y))
-                    # 换一个蓝点，用于定位
-                    draw.ellipse(
-                        [map_text_box_centerpoint_x - 10, map_text_box_centerpoint_y - 10, map_text_box_centerpoint_x + 10, map_text_box_centerpoint_y + 10],
-                        fill=(0, 0, 255, 128),
-                        outline=(0, 0, 255, 255),
-                        width=2,
-                    )
-                   
-
-                    # 加载中文字体（优先项目字体）
-                    font_path = _resolve_chinese_font(bold=bbold, font_family=font_family)
-                    if font_path:
-                        try:
-                            try:
-                                font = ImageFont.truetype(font_path, px_size, layout_engine=getattr(ImageFont, "LAYOUT_BASIC", None))
-                            except Exception:
-                                font = ImageFont.truetype(font_path, px_size)
-                        except Exception:
-                            font = ImageFont.load_default()
-                    else:
-                        font = ImageFont.load_default()
-
-                    # 多行字幕优化对齐：以“最长行居中时”的左右边界作为全局参照
-                    dl, dt, dw, dh = draw_rect
-                    sbx = int(mapped.get("map_text_box_x", dl))
-                    sby = int(mapped.get("map_text_box_y", dt))
-                    sbw = int(mapped.get("map_text_box_width", 0))
-                    sbh = int(mapped.get("map_text_box_height", 0))
-
-                    # 颜色
-                    rgba_text = _rgba_hex_to_rgba(color_hex)
-                    rgba_stroke = _rgba_hex_to_rgba(stroke_hex)
-                    rgba_bg = _rgba_hex_to_rgba(bg_hex)
-
-                    # 分行与测量
-                    lines = t.splitlines() if "\n" in t else [t]
-                    if not lines:
-                        continue
-                    # 逐行测量宽高
-                    line_sizes = []
-                    for ln in lines:
-                        bb = draw.textbbox((0, 0), ln, font=font, stroke_width=stroke_w)
-                        lw = max(1, bb[2] - bb[0])
-                        lh = max(1, bb[3] - bb[1])
-                        line_sizes.append((lw, lh))
-                    max_width = max(w for w, _ in line_sizes)
-                    # 行距：按首行高度的 0.25 估算
-                    base_h = line_sizes[0][1]
-                    line_gap = int(round(base_h * 0.25))
-                    total_h = sum(h for _, h in line_sizes) + line_gap * max(0, len(lines) - 1)
-
-                    # 以映射 box 的中心点为参照计算左右边界
-                    center_x = int(mapped.get("map_text_box_centerpoint_x", sbx + sbw // 2))
-                    center_y = int(mapped.get("map_text_box_centerpoint_y", sby + sbh // 2))
-                    left_edge = center_x - max_width // 2
-                    right_edge = center_x + max_width // 2
-                    # 垂直起始（顶边），保证整体在绘制区域内并尽量围绕中心
-                    start_y = center_y - total_h // 2
-
-                    # 先整体夹紧（水平：左右边；垂直：顶/底），通过平移中心来适配
-                    if left_edge < dl + 6:
-                        dx = (dl + 6) - left_edge
-                        left_edge += dx; right_edge += dx; center_x += dx
-                    if right_edge > dl + dw - 6:
-                        dx = right_edge - (dl + dw - 6)
-                        left_edge -= dx; right_edge -= dx; center_x -= dx
-                    if start_y < dt + 6:
-                        dy = (dt + 6) - start_y
-                        start_y += dy; center_y += dy
-                    if start_y + total_h > dt + dh - 6:
-                        dy = (start_y + total_h) - (dt + dh - 6)
-                        start_y -= dy; center_y -= dy
-
-                    # 背景矩形（按全块包围盒绘制）
-                    if rgba_bg[3] > 0:
-                        overlay_bg = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-                        ovr_bg = ImageDraw.Draw(overlay_bg)
-                        ovr_bg.rectangle([left_edge - 6, start_y - 6, right_edge + 6, start_y + total_h + 6], fill=rgba_bg)
-                        img_rgba = Image.alpha_composite(img_rgba, overlay_bg)
-                        draw = ImageDraw.Draw(img_rgba)
-
-                    # 绘制每一行：依据对齐方式选择起点
-                    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-                    ovr = ImageDraw.Draw(overlay)
-                    cur_y = start_y
-                    for (ln, (lw, lh)) in zip(lines, line_sizes):
-                        if balign == "center":
-                            x_line = center_x - lw // 2
-                        elif balign == "right":
-                            x_line = right_edge - lw
-                        else:
-                            x_line = left_edge
-                        # 逐行轻微夹紧（仅当超出）
-                        if x_line < dl + 6:
-                            x_line = dl + 6
-                        if x_line + lw > dl + dw - 6:
-                            x_line = dl + dw - lw - 6
-                        try:
-                            ovr.text((x_line, cur_y), ln, font=font, fill=rgba_text,
-                                     stroke_width=stroke_w if rgba_stroke[3] > 0 else 0,
-                                     stroke_fill=rgba_stroke if rgba_stroke[3] > 0 else None)
-                        except Exception:
-                            ovr.text((x_line, cur_y), ln, font=font, fill=rgba_text)
-                        cur_y += lh + line_gap
-                    img_rgba = Image.alpha_composite(img_rgba, overlay)
-                    draw = ImageDraw.Draw(img_rgba)
-                except Exception:
+                t = _ensure_unicode_text(block.get("text", ""))
+                if not t:
                     continue
+                balign = str(block.get("align", "left"))
+                color_hex = str(block.get("color", "#ffffffff"))
+                bg_hex = str(block.get("bgcolor", "#00000000"))
+                stroke_hex = str(block.get("stroke_color", "#00000000"))
+                font_family = str(block.get("font_family", "SourceHanSansCN-Regular"))
+                bbold = bool(block.get("font_bold", False))
 
-            # 转回 BGR ndarray
-            return _pil_rgba_to_np_bgr(img_rgba)
-        except Exception:
-            # Pillow 路径失败则继续尝试 Qt
-            pass
-    else:
-        return base_img
+                # 使用活动区映射计算绘制坐标与字号
+                mapped = map_block_to_draw_area(block, draw_rect)
+                px_size = int(mapped.get("map_text_font_px", 18))
+                stroke_w = int(max(0, round(px_size * 0.12))) + (1 if bbold else 0)
+
+                # 加载中文字体（优先项目字体）
+                font_path = _resolve_chinese_font(bold=bbold, font_family=font_family)
+                if font_path:
+                    try:
+                        try:
+                            font = ImageFont.truetype(font_path, px_size, layout_engine=getattr(ImageFont, "LAYOUT_BASIC", None))
+                        except Exception:
+                            font = ImageFont.truetype(font_path, px_size)
+                    except Exception:
+                        font = ImageFont.load_default()
+                else:
+                    font = ImageFont.load_default()
+
+                # 多行字幕优化对齐：以“最长行居中时”的左右边界作为全局参照
+                dl, dt, dw, dh = draw_rect
+                sbx = int(mapped.get("map_text_box_x", dl))
+                sby = int(mapped.get("map_text_box_y", dt))
+                sbw = int(mapped.get("map_text_box_width", 0))
+                sbh = int(mapped.get("map_text_box_height", 0))
+
+                # 颜色
+                rgba_text = _rgba_hex_to_rgba(color_hex)
+                rgba_stroke = _rgba_hex_to_rgba(stroke_hex)
+                rgba_bg = _rgba_hex_to_rgba(bg_hex)
+
+                # 分行与测量
+                lines = t.splitlines() if "\n" in t else [t]
+                if not lines:
+                    continue
+                # 逐行测量宽高
+                line_sizes = []
+                for ln in lines:
+                    bb = draw.textbbox((0, 0), ln, font=font, stroke_width=stroke_w)
+                    lw = max(1, bb[2] - bb[0])
+                    lh = max(1, bb[3] - bb[1])
+                    line_sizes.append((lw, lh))
+                max_width = max(w for w, _ in line_sizes)
+                # 行距：按首行高度的 0.25 估算
+                base_h = line_sizes[0][1]
+                line_gap = int(round(base_h * 0.25))
+                total_h = sum(h for _, h in line_sizes) + line_gap * max(0, len(lines) - 1)
+
+                # 以映射 box 的中心点为参照计算左右边界
+                center_x = int(mapped.get("map_text_box_centerpoint_x", sbx + sbw // 2))
+                center_y = int(mapped.get("map_text_box_centerpoint_y", sby + sbh // 2))
+                left_edge = center_x - max_width // 2
+                right_edge = center_x + max_width // 2
+                # 垂直起始（顶边），保证整体在绘制区域内并尽量围绕中心
+                start_y = center_y - total_h // 2
+
+                # 先整体夹紧（水平：左右边；垂直：顶/底），通过平移中心来适配
+                if left_edge < dl + 6:
+                    dx = (dl + 6) - left_edge
+                    left_edge += dx; right_edge += dx; center_x += dx
+                if right_edge > dl + dw - 6:
+                    dx = right_edge - (dl + dw - 6)
+                    left_edge -= dx; right_edge -= dx; center_x -= dx
+                if start_y < dt + 6:
+                    dy = (dt + 6) - start_y
+                    start_y += dy; center_y += dy
+                if start_y + total_h > dt + dh - 6:
+                    dy = (start_y + total_h) - (dt + dh - 6)
+                    start_y -= dy; center_y -= dy
+
+                # 背景矩形（按全块包围盒绘制）
+                if rgba_bg[3] > 0:
+                    overlay_bg = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                    ovr_bg = ImageDraw.Draw(overlay_bg)
+                    ovr_bg.rectangle([left_edge - 6, start_y - 6, right_edge + 6, start_y + total_h + 6], fill=rgba_bg)
+                    img_rgba = Image.alpha_composite(img_rgba, overlay_bg)
+                    draw = ImageDraw.Draw(img_rgba)
+
+                # 绘制每一行：依据对齐方式选择起点
+                overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                ovr = ImageDraw.Draw(overlay)
+                cur_y = start_y
+                for (ln, (lw, lh)) in zip(lines, line_sizes):
+                    if balign == "center":
+                        x_line = center_x - lw // 2
+                    elif balign == "right":
+                        x_line = right_edge - lw
+                    else:
+                        x_line = left_edge
+                    # 逐行轻微夹紧（仅当超出）
+                    if x_line < dl + 6:
+                        x_line = dl + 6
+                    if x_line + lw > dl + dw - 6:
+                        x_line = dl + dw - lw - 6
+                    try:
+                        ovr.text((x_line, cur_y), ln, font=font, fill=rgba_text,
+                                    stroke_width=stroke_w if rgba_stroke[3] > 0 else 0,
+                                    stroke_fill=rgba_stroke if rgba_stroke[3] > 0 else None)
+                    except Exception:
+                        ovr.text((x_line, cur_y), ln, font=font, fill=rgba_text)
+                    cur_y += lh + line_gap
+                img_rgba = Image.alpha_composite(img_rgba, overlay)
+                draw = ImageDraw.Draw(img_rgba)
+            except Exception:
+                continue
+
+        # 转回 BGR ndarray
+        return _pil_rgba_to_np_bgr(img_rgba)
+    except Exception:
+        return base_img 
 
 def list_images(images_dir: str) -> List[str]:
     """列出目录中的图片文件路径。
@@ -690,6 +617,7 @@ def choose_images(candidates: List[str], k: int) -> List[str]:
     """
     if not candidates:
         return []
+    random.seed(int(time.time()))
     if len(candidates) >= k:
         return random.sample(candidates, k)
     return random.choices(candidates, k=k)
@@ -763,6 +691,7 @@ def generate_thumbnail_single(
         stitched = render_caption_blocks(stitched, caption_blocks)
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"stitched_cover_{uuid.uuid4().hex[:8]}.jpg")
+    print(tmp_path)
     ok = cv2.imwrite(tmp_path, stitched)
     if not ok:
         raise IOError("Failed to write stitched cover image")
@@ -793,24 +722,22 @@ def generate_thumbnail(
 
     ok_count = 0
     tasks: List[List[str]] = [choose_images(image_paths, per_cover) for _ in range(max(1, int(count)))]
+   
     for i, picks in enumerate(tasks, start=1):
         print(f"[queued {i}/{count}] Using images: {', '.join(os.path.basename(p) for p in picks)}")
-
-    for i, picks in enumerate(tasks, start=1):
         try:
             # 生成临时封面并保存到输出目录的 `封面/` 子目录
             stitched_path = generate_thumbnail_single(image_paths=picks, caption_blocks=caption_blocks)
             if not stitched_path or not os.path.exists(stitched_path):
-                print(f"[done {i}/{count}] Failed to generate cover")
+                # print(f"[done {i}/{count}] Failed to generate cover")
                 continue
 
             out_path = save_stitched_cover(stitched_path, output_dir)
             ok_count += 1
-            print(f"[done {i}/{count}] Generated cover: {out_path}")
+            # print(f"[done {i}/{count}] Generated cover: {out_path}")
 
             # 回调当前封面分辨率
             try:
-                import cv2
                 im = _imread_unicode(out_path, flags=cv2.IMREAD_UNCHANGED)
                 if im is not None:
                     h, w = im.shape[:2]
@@ -820,7 +747,8 @@ def generate_thumbnail(
                 if callable(progress_cb):
                     progress_cb(i, out_path, (0, 0))
         except Exception as e:
-            print(f"[done {i}/{count}] Exception: {e}")
+            pass
+            # print(f"[done {i}/{count}] Exception: {e}")
 
     return ok_count
 
