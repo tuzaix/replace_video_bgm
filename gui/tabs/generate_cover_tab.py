@@ -2139,3 +2139,5 @@ class GenerateCoverTab(QtWidgets.QWidget):
             self.action_btn.setFixedHeight(height)
         except Exception:
             pass
+
+
