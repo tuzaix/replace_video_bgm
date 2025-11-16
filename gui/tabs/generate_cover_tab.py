@@ -145,6 +145,10 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         结构：[{
             "text": str,
             "position": (x_ratio, y_ratio),
+            "active_w": int,       # 16:9 活动区宽度（像素）
+            "active_h": int,       # 16:9 活动区高度（像素）
+            "pixel_x": int,        # 字幕块在活动区内的 X（像素，基于左上角）
+            "pixel_y": int,        # 字幕块在活动区内的 Y（像素，基于左上角）
             "box_w": int,           # 文本包围框宽度（像素）
             "box_h": int,           # 文本包围框高度（像素）
             "font_family": str,
@@ -167,6 +171,11 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             yr = (float(p.y()) - rect.top()) / max(1.0, rect.height())
             xr = max(0.0, min(1.0, xr))
             yr = max(0.0, min(1.0, yr))
+            # 像素坐标（相对于活动区左上角），与归一化坐标保持一致的夹紧逻辑
+            active_w = int(round(rect.width()))
+            active_h = int(round(rect.height()))
+            pixel_x = int(round(xr * rect.width()))
+            pixel_y = int(round(yr * rect.height()))
             # 文本包围框尺寸（像素）
             bbox = self._text_bbox(b)
             box_w = int(round(bbox.width()))
@@ -182,6 +191,10 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             blocks.append({
                 "text": str(b.get("text", "")),
                 "position": (xr, yr),
+                "active_w": active_w,
+                "active_h": active_h,
+                "pixel_x": pixel_x,
+                "pixel_y": pixel_y,
                 "box_w": box_w,
                 "box_h": box_h,
                 "font_family": bf.family(),
