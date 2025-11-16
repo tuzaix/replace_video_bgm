@@ -115,29 +115,28 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         return str(self._align)
 
     def get_position(self) -> Tuple[float, float]:
-        """返回第一个字幕块的归一化坐标 (x_ratio, y_ratio)，原点为左上角。"""
-        w = max(1, self.width())
-        h = max(1, self.height())
+        """返回第一个字幕块在“16:9 活动区”内的归一化坐标 (x_ratio, y_ratio)。
+
+        活动区为横屏 16:9 比例的矩形，优先以控件宽度为基准计算高度；
+        若高度超出控件范围，则按控件高度回算活动区宽度，并水平居中。
+        """
         if not self._blocks:
             return 0.0, 0.0
+        rect = self._active_rect_16_9()
         pos = self._blocks[0]["pos"]
-        x_ratio = max(0.0, min(1.0, float(pos.x()) / float(w)))
-        y_ratio = max(0.0, min(1.0, float(pos.y()) / float(h)))
-        return x_ratio, y_ratio
+        x_ratio = (float(pos.x()) - rect.left()) / max(1.0, rect.width())
+        y_ratio = (float(pos.y()) - rect.top()) / max(1.0, rect.height())
+        return max(0.0, min(1.0, x_ratio)), max(0.0, min(1.0, y_ratio))
 
     def get_positions(self) -> list[Tuple[float, float]]:
-        """返回所有字幕块的归一化坐标列表。"""
-        w = max(1, self.width())
-        h = max(1, self.height())
+        """返回所有字幕块在“16:9 活动区”内的归一化坐标列表。"""
+        rect = self._active_rect_16_9()
         out: list[Tuple[float, float]] = []
         for b in self._blocks:
             p = b["pos"]
-            out.append(
-                (
-                    max(0.0, min(1.0, float(p.x()) / float(w))),
-                    max(0.0, min(1.0, float(p.y()) / float(h)))
-                )
-            )
+            xr = (float(p.x()) - rect.left()) / max(1.0, rect.width())
+            yr = (float(p.y()) - rect.top()) / max(1.0, rect.height())
+            out.append((max(0.0, min(1.0, xr)), max(0.0, min(1.0, yr))))
         return out
 
     def get_blocks(self) -> list[dict]:
@@ -158,13 +157,14 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         }]
         用于封面生成时将多个字幕块叠加到最终图像。
         """
-        w = max(1, self.width())
-        h = max(1, self.height())
+        rect = self._active_rect_16_9()
         blocks: list[dict] = []
         for b in self._blocks:
             p = b.get("pos", QtCore.QPointF(0.0, 0.0))
-            xr = max(0.0, min(1.0, float(p.x()) / float(w)))
-            yr = max(0.0, min(1.0, float(p.y()) / float(h)))
+            xr = (float(p.x()) - rect.left()) / max(1.0, rect.width())
+            yr = (float(p.y()) - rect.top()) / max(1.0, rect.height())
+            xr = max(0.0, min(1.0, xr))
+            yr = max(0.0, min(1.0, yr))
             bf: QtGui.QFont = b.get("font", self.font())
             al: str = b.get("align", self._align)
             # 默认字体颜色为黑色；背景默认透明
@@ -335,18 +335,19 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         return ""
 
     def _clamp_pos_within(self, b: dict, new_pos: QtCore.QPointF) -> QtCore.QPointF:
-        """将给定新位置夹紧到控件范围（基于包围框大小）。"""
+        """将给定新位置夹紧到“16:9 活动区”范围（基于包围框大小）。"""
+        rect = self._active_rect_16_9()
         bbox = self._text_bbox(b, override_pos=new_pos)
         dx = 0.0
         dy = 0.0
-        if bbox.left() < 0:
-            dx = -bbox.left()
-        if bbox.right() > self.width():
-            dx = self.width() - bbox.right()
-        if bbox.top() < 0:
-            dy = -bbox.top()
-        if bbox.bottom() > self.height():
-            dy = self.height() - bbox.bottom()
+        if bbox.left() < rect.left():
+            dx = rect.left() - bbox.left()
+        if bbox.right() > rect.right():
+            dx = rect.right() - bbox.right()
+        if bbox.top() < rect.top():
+            dy = rect.top() - bbox.top()
+        if bbox.bottom() > rect.bottom():
+            dy = rect.bottom() - bbox.bottom()
         return QtCore.QPointF(new_pos.x() + dx, new_pos.y() + dy)
 
     def _start_resize(self, idx: int, event: QtGui.QMouseEvent) -> None:
@@ -496,7 +497,8 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         fm = QtGui.QFontMetricsF(font)
 
         # 约束文本框最大宽度，避免过长一行溢出控件；多行或超宽会自动换行
-        max_box_w = max(50.0, float(self.width()) * 0.9)
+        rect_active = self._active_rect_16_9()
+        max_box_w = max(50.0, float(rect_active.width()) * 0.9)
         text_rect_wrapped = fm.boundingRect(
             QtCore.QRectF(0.0, 0.0, max_box_w, 1e9),
             QtCore.Qt.TextWordWrap,
@@ -521,9 +523,10 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         """
         # 首次显示时，将第一个文本框居中一次（固定左上角锚点）
         if not self._pos_centered_once and self.width() > 0 and self.height() > 0 and self._blocks:
-            bbox0 = self._text_bbox(self._blocks[0], QtCore.QPointF(0.0, 0.0))
-            nx = max(0.0, (float(self.width()) - bbox0.width()) / 2.0)
-            ny = max(0.0, (float(self.height()) - bbox0.height()) / 2.0)
+            rect = self._active_rect_16_9()
+            bbox0 = self._text_bbox(self._blocks[0], QtCore.QPointF(rect.left(), rect.top()))
+            nx = max(rect.left(), rect.left() + (rect.width() - bbox0.width()) / 2.0)
+            ny = max(rect.top(), rect.top() + (rect.height() - bbox0.height()) / 2.0)
             self._blocks[0]["pos"] = QtCore.QPointF(nx, ny)
             self._pos_centered_once = True
 
@@ -531,7 +534,19 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         # 背景指示文字
         painter.setPen(QtGui.QPen(QtGui.QColor("#888")))
-        painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft, "右键添加/删除字幕块；拖拽字幕进行定位")
+        painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft, "右键添加/删除字幕块；拖拽字幕进行定位（活动区：16:9）")
+        rect = self._active_rect_16_9()
+        pen_area = QtGui.QPen(QtGui.QColor(180, 180, 200))
+        pen_area.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen_area)
+        painter.drawRect(rect)
+        pen_axes = QtGui.QPen(QtGui.QColor(160, 160, 220))
+        pen_axes.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen_axes)
+        cx = rect.left() + rect.width() / 2.0
+        cy = rect.top() + rect.height() / 2.0
+        painter.drawLine(QtCore.QPointF(rect.left(), cy), QtCore.QPointF(rect.right(), cy))
+        painter.drawLine(QtCore.QPointF(cx, rect.top()), QtCore.QPointF(cx, rect.bottom()))
         # 绘制所有字幕块（支持旋转与交互手柄）
         for idx, b in enumerate(self._blocks):
             bbox = self._text_bbox(b)
@@ -592,6 +607,30 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                 painter.drawEllipse(tr)  # 旋转手柄（右上角）
                 painter.restore()
         painter.end()
+
+    # -------------------------
+    # 16:9 活动区计算
+    # -------------------------
+    def _active_rect_16_9(self) -> QtCore.QRectF:
+        """返回控件内部的“16:9 横屏活动区”矩形。
+
+        计算规则：
+        - 以控件宽度为基准计算高度：`h_desired = width * 9 / 16`；
+        - 若超过控件高度，则回算适配宽度：`w_fit = height * 16 / 9` 并水平居中；
+        - 否则按计算高度垂直居中。
+        """
+        w = float(max(1, self.width()))
+        h = float(max(1, self.height()))
+        h_desired = w * 9.0 / 16.0
+        if h_desired <= h:
+            x0 = 0.0
+            y0 = (h - h_desired) / 2.0
+            return QtCore.QRectF(x0, y0, w, h_desired)
+        # 高度不够：根据高度回算适配宽度，并水平居中
+        w_fit = h * 16.0 / 9.0
+        x0 = (w - w_fit) / 2.0
+        y0 = 0.0
+        return QtCore.QRectF(x0, y0, w_fit, h)
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
         """双击命中字幕块时进入编辑状态，创建内嵌 QTextEdit。"""
