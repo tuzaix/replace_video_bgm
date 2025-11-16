@@ -204,6 +204,64 @@ def _rgba_hex_to_rgba(s: str) -> tuple[int, int, int, int]:
     b, g, r, a = _rgba_hex_to_bgra(s)
     return (r, g, b, a)
 
+def _compute_edges_with_pad(center_x: int, center_y: int,
+                            max_width: int, total_h: int,
+                            draw_rect: tuple[int, int, int, int],
+                            pad: int = 10,
+                            bias_y: int = 16) -> tuple[int, int, int, int, int, int, int, int]:
+    """Compute text block edges from center and expand with padding.
+
+    Inputs:
+    - `center_x`, `center_y`: block center in image coordinates.
+    - `max_width`: widest line pixel width.
+    - `total_h`: total text height including line gaps.
+    - `draw_rect`: `(left, top, width, height)` of the 16:9 drawing area.
+    - `pad`: expansion pixels added to all four sides for background rectangle.
+    - `bias_y`: downward bias (in pixels) applied to the background rectangle only
+      to visually compensate baseline measurement, moving the background down.
+
+    Returns:
+    - `(left_edge, right_edge, top_edge, bottom_edge, left_bg, top_bg, right_bg, bottom_bg)`
+      where `*_edge` is the tight text bounding box built around the center,
+      and `*_bg` is the expanded background rectangle, all clamped into `draw_rect`.
+    """
+    dl, dt, dw, dh = draw_rect
+
+    # Tight edges from center
+    left_edge = int(center_x - max_width // 2)
+    right_edge = int(center_x + max_width // 2)
+    top_edge = int(center_y - total_h // 2)
+    bottom_edge = int(center_y + total_h // 2)
+
+    # Clamp horizontally with padding by shifting center
+    if (left_edge - pad) < dl:
+        dx = dl - (left_edge - pad)
+        left_edge += dx; right_edge += dx; center_x += dx
+    if (right_edge + pad) > dl + dw:
+        dx = (right_edge + pad) - (dl + dw)
+        left_edge -= dx; right_edge -= dx; center_x -= dx
+
+    # Clamp vertically with padding by shifting center
+    if (top_edge - pad) < dt:
+        dy = dt - (top_edge - pad)
+        top_edge += dy; bottom_edge += dy; center_y += dy
+    if (bottom_edge + pad) > dt + dh:
+        dy = (bottom_edge + pad) - (dt + dh)
+        top_edge -= dy; bottom_edge -= dy; center_y -= dy
+
+    # Expanded background rectangle
+    left_bg = max(dl, left_edge - pad)
+    right_bg = min(dl + dw, right_edge + pad)
+    top_bg = max(dt, top_edge - pad)
+    bottom_bg = min(dt + dh, bottom_edge + pad)
+
+    # Apply downward bias to background rectangle only, then clamp
+    if bias_y != 0:
+        top_bg = max(dt, min(dt + dh, top_bg + bias_y))
+        bottom_bg = max(dt, min(dt + dh, bottom_bg + bias_y))
+
+    return left_edge, right_edge, top_edge, bottom_edge, left_bg, top_bg, right_bg, bottom_bg
+
 def _resolve_chinese_font(bold: bool, font_family: Optional[str] = None) -> Optional[str]:
     """Resolve Chinese font path strictly from project fonts under `gui/fonts`.
 
@@ -562,50 +620,49 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
                 rgba_stroke = _rgba_hex_to_rgba(stroke_hex)
                 rgba_bg = _rgba_hex_to_rgba(bg_hex)
 
-                # 分行与测量
+                # 分行与测量（使用字体度量修正行高与中心）
                 lines = t.splitlines() if "\n" in t else [t]
                 if not lines:
                     continue
-                # 逐行测量宽高
+                # 字体度量：ascent + descent 为基线高度
+                try:
+                    ascent, descent = font.getmetrics()  # type: ignore[attr-defined]
+                except Exception:
+                    # 兜底：无法获取度量时使用首行 textbbox 高度近似
+                    bb0 = draw.textbbox((0, 0), lines[0], font=font, stroke_width=stroke_w)
+                    ascent = max(1, bb0[3] - bb0[1])
+                    descent = max(1, int(round(ascent * 0.25)))
+                baseline_h = max(1, int(ascent + descent))
+
+                # 宽度按 textbbox 测量，高度统一使用 baseline_h，避免上下偏移
                 line_sizes = []
                 for ln in lines:
                     bb = draw.textbbox((0, 0), ln, font=font, stroke_width=stroke_w)
                     lw = max(1, bb[2] - bb[0])
-                    lh = max(1, bb[3] - bb[1])
-                    line_sizes.append((lw, lh))
+                    line_sizes.append((lw, baseline_h))
                 max_width = max(w for w, _ in line_sizes)
-                # 行距：按首行高度的 0.25 估算
-                base_h = line_sizes[0][1]
-                line_gap = int(round(base_h * 0.25))
-                total_h = sum(h for _, h in line_sizes) + line_gap * max(0, len(lines) - 1)
 
-                # 以映射 box 的中心点为参照计算左右边界
+                # 行距按 baseline 的 0.25 估算
+                line_gap = int(round(baseline_h * 0.25))
+                total_h = baseline_h * len(lines) + line_gap * max(0, len(lines) - 1)
+
+                # 以映射 box 的中心点为参照，计算紧致边界并扩展 10px 背景区域
                 center_x = int(mapped.get("map_text_box_centerpoint_x", sbx + sbw // 2))
                 center_y = int(mapped.get("map_text_box_centerpoint_y", sby + sbh // 2))
-                left_edge = center_x - max_width // 2
-                right_edge = center_x + max_width // 2
-                # 垂直起始（顶边），保证整体在绘制区域内并尽量围绕中心
-                start_y = center_y - total_h // 2
+                # 使用字体 descent 动态修正背景下移量，替代固定 16px
+                dyn_bias = max(0, min(16, int(round(descent * 0.6))))
+                left_edge, right_edge, top_edge, bottom_edge, left_bg, top_bg, right_bg, bottom_bg = _compute_edges_with_pad(
+                    center_x=center_x, center_y=center_y, max_width=max_width, total_h=total_h,
+                    draw_rect=draw_rect, pad=10, bias_y=dyn_bias,
+                )
+                # 行绘制起始于紧致上边界
+                start_y = top_edge
 
-                # 先整体夹紧（水平：左右边；垂直：顶/底），通过平移中心来适配
-                if left_edge < dl + 6:
-                    dx = (dl + 6) - left_edge
-                    left_edge += dx; right_edge += dx; center_x += dx
-                if right_edge > dl + dw - 6:
-                    dx = right_edge - (dl + dw - 6)
-                    left_edge -= dx; right_edge -= dx; center_x -= dx
-                if start_y < dt + 6:
-                    dy = (dt + 6) - start_y
-                    start_y += dy; center_y += dy
-                if start_y + total_h > dt + dh - 6:
-                    dy = (start_y + total_h) - (dt + dh - 6)
-                    start_y -= dy; center_y -= dy
-
-                # 背景矩形（按全块包围盒绘制）
+                # 背景矩形（按扩展后的包围盒绘制，四边各 +10px）
                 if rgba_bg[3] > 0:
                     overlay_bg = Image.new("RGBA", (W, H), (0, 0, 0, 0))
                     ovr_bg = ImageDraw.Draw(overlay_bg)
-                    ovr_bg.rectangle([left_edge - 6, start_y - 6, right_edge + 6, start_y + total_h + 6], fill=rgba_bg)
+                    ovr_bg.rectangle([left_bg, top_bg, right_bg, bottom_bg], fill=rgba_bg)
                     img_rgba = Image.alpha_composite(img_rgba, overlay_bg)
                     draw = ImageDraw.Draw(img_rgba)
 
