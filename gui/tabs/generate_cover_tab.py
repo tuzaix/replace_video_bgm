@@ -44,6 +44,13 @@ class CaptionPositionWidget(QtWidgets.QWidget):
     # 选中变化信号：携带当前选中块索引（-1 表示未选中）
     selection_changed = QtCore.Signal(int)
 
+    # 交互与绘制常量（类级属性，供实例访问）
+    HANDLE_SIZE: float = 10.0           # 交互手柄尺寸（像素）
+    ROTATE_SENSITIVITY: float = 4.0     # 旋转灵敏度：水平每 4 像素约 1 度
+    RESIZE_SENSITIVITY: float = 4.0     # 缩放灵敏度：单步像素换算字号
+    MIN_FONT_SIZE: int = 6              # 最小字号
+    MAX_FONT_SIZE: int = 96             # 最大字号
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         # 默认对齐采用“居中”
@@ -275,6 +282,117 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         except Exception:
             pass
 
+    # -------------------------
+    # 交互与绘制辅助（封装性优化）
+    # -------------------------
+    def _emit_selection(self, idx: int) -> None:
+        """安全发射选中索引变化信号。"""
+        try:
+            self.selection_changed.emit(int(idx))
+        except Exception:
+            pass
+
+    def _hit_test_index(self, pos: QtCore.QPointF) -> int:
+        """从顶部到底部命中文本块，返回索引；未命中为 -1。"""
+        hit = -1
+        if not self._blocks:
+            return -1
+        for idx in range(len(self._blocks) - 1, -1, -1):
+            if self._text_bbox(self._blocks[idx]).contains(pos):
+                hit = idx
+                break
+        return hit
+
+    def _handle_rects(self, bbox: QtCore.QRectF) -> tuple[QtCore.QRectF, QtCore.QRectF]:
+        """返回缩放/旋转手柄的矩形区域（右下角、右上角）。"""
+        hs = float(self.HANDLE_SIZE)
+        br = QtCore.QRectF(bbox.right() - hs, bbox.bottom() - hs, hs, hs)  # bottom-right: resize
+        tr = QtCore.QRectF(bbox.right() - hs, bbox.top(), hs, hs)           # top-right: rotate
+        return br, tr
+
+    def _hit_handle_kind(self, bbox: QtCore.QRectF, pos: QtCore.QPointF) -> str:
+        """命中手柄时返回 'resize' 或 'rotate'；否则返回空字符串。"""
+        br, tr = self._handle_rects(bbox)
+        if br.contains(pos):
+            return "resize"
+        if tr.contains(pos):
+            return "rotate"
+        return ""
+
+    def _clamp_pos_within(self, b: dict, new_pos: QtCore.QPointF) -> QtCore.QPointF:
+        """将给定新位置夹紧到控件范围（基于包围框大小）。"""
+        bbox = self._text_bbox(b, override_pos=new_pos)
+        dx = 0.0
+        dy = 0.0
+        if bbox.left() < 0:
+            dx = -bbox.left()
+        if bbox.right() > self.width():
+            dx = self.width() - bbox.right()
+        if bbox.top() < 0:
+            dy = -bbox.top()
+        if bbox.bottom() > self.height():
+            dy = self.height() - bbox.bottom()
+        return QtCore.QPointF(new_pos.x() + dx, new_pos.y() + dy)
+
+    def _start_resize(self, idx: int, event: QtGui.QMouseEvent) -> None:
+        """进入缩放模式，记录初始字号与起始鼠标位置。"""
+        self._resizing_idx = idx
+        b = self._blocks[idx]
+        f = b.get("font", self.font())
+        sz = f.pointSize() if f.pointSize() > 0 else (f.pixelSize() or 18)
+        self._resize_start_size = int(sz)
+        self._last_mouse_pos = event.position()
+
+    def _start_rotate(self, idx: int, event: QtGui.QMouseEvent) -> None:
+        """进入旋转模式，记录初始角度与起始鼠标位置。"""
+        self._rotate_idx = idx
+        b = self._blocks[idx]
+        self._rotate_start_angle = float(b.get("angle", 0.0))
+        self._last_mouse_pos = event.position()
+
+    def _start_drag(self, idx: int, event: QtGui.QMouseEvent) -> None:
+        """进入拖拽模式，记录拖拽偏移。"""
+        self._dragging_idx = idx
+        b = self._blocks[idx]
+        self._drag_offset = event.position() - b["pos"]
+
+    def _resize_update(self, event: QtGui.QMouseEvent) -> None:
+        """缩放更新：根据拖动距离换算新字号并应用。"""
+        if self._resizing_idx < 0 or self._resizing_idx >= len(self._blocks):
+            return
+        dx = float(event.position().x() - self._last_mouse_pos.x())
+        dy = float(event.position().y() - self._last_mouse_pos.y())
+        delta = max(abs(dx), abs(dy)) * (1 if dx + dy >= 0 else -1)
+        new_size = int(max(self.MIN_FONT_SIZE, min(self.MAX_FONT_SIZE, self._resize_start_size + delta / self.RESIZE_SENSITIVITY)))
+        b = self._blocks[self._resizing_idx]
+        f = b.get("font", self.font())
+        f.setPointSize(new_size)
+        self.set_block_font(self._resizing_idx, f)
+        # 触发界面控件同步刷新（字号实时显示）
+        self._emit_selection(self._resizing_idx)
+
+    def _rotate_update(self, event: QtGui.QMouseEvent) -> None:
+        """旋转更新：水平拖动像素转换为角度。"""
+        if self._rotate_idx < 0 or self._rotate_idx >= len(self._blocks):
+            return
+        dx = float(event.position().x() - self._last_mouse_pos.x())
+        new_angle = self._rotate_start_angle + dx / self.ROTATE_SENSITIVITY
+        self.set_block_angle(self._rotate_idx, new_angle)
+
+    def _drag_update(self, event: QtGui.QMouseEvent) -> None:
+        """拖拽更新：根据拖动位置更新块坐标并进行夹紧。"""
+        if self._dragging_idx < 0 or self._dragging_idx >= len(self._blocks):
+            return
+        b = self._blocks[self._dragging_idx]
+        new_pos = event.position() - self._drag_offset
+        b["pos"] = self._clamp_pos_within(b, new_pos)
+
+    def _end_interaction(self) -> None:
+        """结束任何交互，统一重置状态。"""
+        self._dragging_idx = -1
+        self._resizing_idx = -1
+        self._rotate_idx = -1
+
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
         """开始拖拽：命中任一字幕块时记录对应偏移。"""
         # 若正在编辑，仅当左键点击字幕块外部时结束编辑并提交；回车作为换行由 QTextEdit 默认处理
@@ -284,68 +402,32 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                 self._finish_edit(commit=True)
                 # 继续处理选择/拖拽逻辑
         if event.button() == QtCore.Qt.LeftButton:
-            hit = -1
-            if self._blocks:
-                # 从上至下命中，优先最近添加的块
-                for idx in range(len(self._blocks) - 1, -1, -1):
-                    b = self._blocks[idx]
-                    bbox = self._text_bbox(b)
-                    if bbox.contains(event.position()):
-                        hit = idx
-                        break
+            hit = self._hit_test_index(event.position())
             if hit >= 0:
                 # 手柄命中优先
                 b = self._blocks[hit]
                 bbox = self._text_bbox(b)
-                handle_size = 10.0
-                hs = handle_size
-                br = QtCore.QRectF(bbox.right() - hs, bbox.bottom() - hs, hs, hs)
-                tr = QtCore.QRectF(bbox.right() - hs, bbox.top(), hs, hs)
-                if br.contains(event.position()):
-                    # 进入缩放模式
-                    self._resizing_idx = hit
-                    f = b.get("font", self.font())
-                    sz = f.pointSize() if f.pointSize() > 0 else (f.pixelSize() or 18)
-                    self._resize_start_size = int(sz)
-                    self._last_mouse_pos = event.position()
-                    self._selected_idx = hit
-                    try:
-                        self.selection_changed.emit(hit)
-                    except Exception:
-                        pass
+                kind = self._hit_handle_kind(bbox, event.position())
+                self._selected_idx = hit
+                self._emit_selection(hit)
+                if kind == "resize":
+                    self._start_resize(hit, event)
                     self.update()
                     super().mousePressEvent(event)
                     return
-                if tr.contains(event.position()):
-                    # 进入旋转模式
-                    self._rotate_idx = hit
-                    self._rotate_start_angle = float(b.get("angle", 0.0))
-                    self._last_mouse_pos = event.position()
-                    self._selected_idx = hit
-                    try:
-                        self.selection_changed.emit(hit)
-                    except Exception:
-                        pass
+                if kind == "rotate":
+                    self._start_rotate(hit, event)
                     self.update()
                     super().mousePressEvent(event)
                     return
                 # 默认：进入拖拽模式
-                self._dragging_idx = hit
-                self._drag_offset = event.position() - b["pos"]
-                self._selected_idx = hit
-                try:
-                    self.selection_changed.emit(hit)
-                except Exception:
-                    pass
+                self._start_drag(hit, event)
                 self.update()
             else:
                 # 点击空白处则取消选中
                 self._selected_idx = -1
                 self._dragging_idx = -1
-                try:
-                    self.selection_changed.emit(-1)
-                except Exception:
-                    pass
+                self._emit_selection(-1)
                 self.update()
         super().mousePressEvent(event)
 
@@ -355,45 +437,24 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         if self._editor is not None:
             super().mouseMoveEvent(event)
             return
-        # 旋转交互：水平拖动改变角度，每移动 4 像素约 1 度
+        # 旋转交互
         if self._rotate_idx >= 0 and self._rotate_idx < len(self._blocks):
-            dx = float(event.position().x() - self._last_mouse_pos.x())
-            new_angle = self._rotate_start_angle + dx / 4.0
-            self.set_block_angle(self._rotate_idx, new_angle)
+            self._rotate_update(event)
             self.update()
             super().mouseMoveEvent(event)
             return
-        # 缩放交互：按水平/垂直拖动改变字号，取两者的较大绝对值，灵敏度适中
+        # 缩放交互
         if self._resizing_idx >= 0 and self._resizing_idx < len(self._blocks):
-            dx = float(event.position().x() - self._last_mouse_pos.x())
-            dy = float(event.position().y() - self._last_mouse_pos.y())
-            delta = max(abs(dx), abs(dy)) * (1 if dx + dy >= 0 else -1)
-            new_size = int(max(6, min(96, self._resize_start_size + delta / 4.0)))
-            b = self._blocks[self._resizing_idx]
-            f = b.get("font", self.font())
-            f.setPointSize(new_size)
-            self.set_block_font(self._resizing_idx, f)
+            self._resize_update(event)
             self.update()
             super().mouseMoveEvent(event)
             return
+        # 拖拽交互
         if self._dragging_idx >= 0 and self._dragging_idx < len(self._blocks):
-            b = self._blocks[self._dragging_idx]
-            new_pos = event.position() - self._drag_offset
-            # 夹紧：避免文本框超出控件区域
-            bbox = self._text_bbox(b, override_pos=new_pos)
-            dx = 0.0
-            dy = 0.0
-            if bbox.left() < 0:
-                dx = -bbox.left()
-            if bbox.right() > self.width():
-                dx = self.width() - bbox.right()
-            if bbox.top() < 0:
-                dy = -bbox.top()
-            if bbox.bottom() > self.height():
-                dy = self.height() - bbox.bottom()
-            b["pos"] = QtCore.QPointF(new_pos.x() + dx, new_pos.y() + dy)
+            self._drag_update(event)
             self.update()
             try:
+                b = self._blocks[self._dragging_idx]
                 rx, ry = self.get_position()
                 print(f"drag idx={self._dragging_idx}, pos=({b['pos'].x():.1f},{b['pos'].y():.1f}), ratio=({rx:.3f},{ry:.3f}) [origin top-left]")
             except Exception:
@@ -402,9 +463,7 @@ class CaptionPositionWidget(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
         """结束拖拽。"""
-        self._dragging_idx = -1
-        self._resizing_idx = -1
-        self._rotate_idx = -1
+        self._end_interaction()
         super().mouseReleaseEvent(event)
 
     def _text_bbox(self, block: Optional[dict] = None, override_pos: Optional[QtCore.QPointF] = None) -> QtCore.QRectF:
@@ -1109,6 +1168,17 @@ class GenerateCoverTab(QtWidgets.QWidget):
             "QToolButton{border:1px solid #cfcfcf; background: rgba(0,0,0,0);}"
         )
         self.font_bg_color_btn.clicked.connect(self._on_font_bg_color_clicked)
+        # 为背景色按钮添加下拉菜单：选择颜色/无背景色
+        try:
+            bg_menu = QtWidgets.QMenu(self.font_bg_color_btn)
+            act_pick = bg_menu.addAction("选择背景色…")
+            act_clear = bg_menu.addAction("无背景色")
+            act_pick.triggered.connect(self._on_font_bg_color_clicked)
+            act_clear.triggered.connect(self._on_font_bg_color_cleared)
+            self.font_bg_color_btn.setMenu(bg_menu)
+            self.font_bg_color_btn.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        except Exception:
+            pass
         row_style.addWidget(QtWidgets.QLabel("字体背景色:"))
         row_style.addWidget(self.font_bg_color_btn)
 
@@ -1336,7 +1406,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
             pass
 
     def _on_font_bg_color_clicked(self) -> None:
-        """选择背景颜色：仅作用于选中块，并更新预览按钮样式。"""
+        """选择背景颜色（含透明度），通过模态弹窗确认应用，并支持透明选项。"""
         try:
             idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
             if idx is None or int(idx) < 0:
@@ -1345,26 +1415,62 @@ class GenerateCoverTab(QtWidgets.QWidget):
                 if len(blocks0) == 0:
                     QtWidgets.QMessageBox.information(self, "提示", "当前无字幕块可设置背景颜色。请先添加字幕块。")
                     return
-                    
                 idx = 0
-            # 默认背景颜色为透明
+
+            # 当前背景色（默认透明）
             cur = QtGui.QColor(0, 0, 0, 0)
             blocks = getattr(self.pos_widget, "_blocks", [])
             if 0 <= int(idx) < len(blocks):
-                cur = blocks[int(idx)].get("bgcolor", cur)
-            # 允许选择透明度
-            c = QtWidgets.QColorDialog.getColor(cur, self, "选择背景颜色", QtWidgets.QColorDialog.ShowAlphaChannel)
-            if not c.isValid():
-                return
+                cur = QtGui.QColor(blocks[int(idx)].get("bgcolor", cur))
+
+            # 模态颜色对话框，强制启用透明度滑块（禁用原生对话框以显示 alpha）
+            dlg = QtWidgets.QColorDialog(self)
+            dlg.setWindowTitle("选择背景颜色")
+            dlg.setOption(QtWidgets.QColorDialog.ShowAlphaChannel, True)
+            dlg.setOption(QtWidgets.QColorDialog.DontUseNativeDialog, True)
+            dlg.setCurrentColor(cur)
+
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                c = dlg.selectedColor()
+                if not c.isValid():
+                    return
+                # 若用户只改了颜色未动透明度，且原值/新值透明度均为0，则默认设为不透明，避免“看起来没变化”
+                try:
+                    if int(QtGui.QColor(cur).alpha()) == 0 and int(c.alpha()) == 0:
+                        if (c.red(), c.green(), c.blue()) != (QtGui.QColor(cur).red(), QtGui.QColor(cur).green(), QtGui.QColor(cur).blue()):
+                            c.setAlpha(255)
+                except Exception:
+                    pass
+                # 应用到块并更新预览与画布
+                self._apply_bg_color_to_block(int(idx), c)
+        except Exception:
+            pass
+
+    def _on_font_bg_color_cleared(self) -> None:
+        """清除选中块的背景色（无背景），并更新预览与画布。"""
+        try:
+            idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
+            if idx is None or int(idx) < 0:
+                blocks0 = getattr(self.pos_widget, "_blocks", [])
+                if len(blocks0) == 0:
+                    QtWidgets.QMessageBox.information(self, "提示", "当前无字幕块可清除背景颜色。请先添加字幕块。")
+                    return
+                idx = 0
+            # 设为完全透明
+            transparent = QtGui.QColor(0, 0, 0, 0)
+            self._apply_bg_color_to_block(int(idx), transparent)
+        except Exception:
+            pass
+
+    def _apply_bg_color_to_block(self, idx: int, color: QtGui.QColor) -> None:
+        """将背景色应用到指定块，并更新按钮预览与画布。"""
+        try:
             if hasattr(self.pos_widget, "set_block_bgcolor"):
-                self.pos_widget.set_block_bgcolor(int(idx), c)
-            try:
-                a = max(0, min(255, int(c.alpha())))
-                self.font_bg_color_btn.setStyleSheet(
-                    f"QToolButton{{border:1px solid #cfcfcf; background: rgba({c.red()},{c.green()},{c.blue()},{a});}}"
-                )
-            except Exception:
-                pass
+                self.pos_widget.set_block_bgcolor(int(idx), QtGui.QColor(color))
+            a = max(0, min(255, int(color.alpha())))
+            self.font_bg_color_btn.setStyleSheet(
+                f"QToolButton{{border:1px solid #cfcfcf; background: rgba({color.red()},{color.green()},{color.blue()},{a});}}"
+            )
             self.pos_widget.update()
         except Exception:
             pass
@@ -1714,3 +1820,9 @@ class GenerateCoverTab(QtWidgets.QWidget):
             self.action_btn.setFixedHeight(height)
         except Exception:
             pass
+    # -- 交互与绘制常量（封装性优化） --
+    HANDLE_SIZE: float = 10.0           # 交互手柄尺寸（像素）
+    ROTATE_SENSITIVITY: float = 4.0     # 旋转灵敏度：水平每 4 像素约 1 度
+    RESIZE_SENSITIVITY: float = 4.0     # 缩放灵敏度：单步像素换算字号
+    MIN_FONT_SIZE: int = 6              # 最小字号
+    MAX_FONT_SIZE: int = 96             # 最大字号
