@@ -519,10 +519,7 @@ def render_caption_blocks(base_img: object, caption_blocks: Optional[list[dict]]
 
         # 计算 16:9 居中绘制区域（左右各 5% 留白）
         draw_rect = compute_draw_area_16_9_by_width(W, H, padding_pct=(0.03, 0.01, 0.03, 0.01))
-        import pprint
         for block in caption_blocks:
-            pprint.pprint(block)
-            print()
             try:
                 t = _ensure_unicode_text(block.get("text", ""))
                 if not t:
