@@ -24,6 +24,7 @@ import os
 import shutil
 from PySide6 import QtWidgets, QtCore, QtGui
 from gui.utils import theme
+from gui.precheck import run_preflight_checks
 
 
 class CaptionPositionWidget(QtWidgets.QWidget):
@@ -1039,6 +1040,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
         self._thread: Optional[QtCore.QThread] = None
         self._worker: Optional[GenerateCoverWorker] = None
         self._is_running: bool = False
+        # 缓存预检授权结果，避免重复弹窗与检查
+        self._preflight_passed: bool = False
         self._build_page()
 
     def _build_page(self) -> None:
@@ -1893,8 +1896,32 @@ class GenerateCoverTab(QtWidgets.QWidget):
             return False, str(e)
 
     def _on_start_clicked(self) -> None:
-        """开始执行封面生成任务：在需要时确认清理输出目录后，启动线程与工作者。"""
+        """开始执行封面生成任务：在需要时确认清理输出目录后，启动线程与工作者。
+
+        优化：在真正开始前执行一次 GUI 预检（GPU/授权）。若未通过授权或
+        环境不满足，则直接中止开始流程，并更新阶段提示文案。
+        """
         if self._is_running:
+            return
+
+        # --- 预检授权（只要未通过或尚未检查，就执行一次） ---
+        try:
+            if not self._preflight_passed:
+                app = QtWidgets.QApplication.instance()
+                ok = bool(run_preflight_checks(app)) if app is not None else False
+                self._preflight_passed = ok
+                if not ok:
+                    try:
+                        self.phase_label.setText("未授权或环境不满足，无法开始")
+                    except Exception:
+                        pass
+                    return
+        except Exception:
+            # 兜底：出现异常则视为未通过，避免误放行
+            try:
+                self.phase_label.setText("预检失败：未授权或环境不满足")
+            except Exception:
+                pass
             return
         # 每次点击开始，先重置右侧结果列表内容
         try:

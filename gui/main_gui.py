@@ -31,11 +31,10 @@ if not getattr(sys, "frozen", False):
 
 from gui.workers.video_concat_worker import VideoConcatWorker
 from concat_tool.settings import Settings  # type: ignore
-from gui.precheck import run_preflight_checks
 from gui.tabs.extract_frames_tab import ExtractFramesTab
 from gui.tabs.video_concat_tab import VideoConcatTab
 from gui.tabs.generate_cover_tab import GenerateCoverTab
-from gui.utils.table_helpers import resolve_display_name, set_table_row_colors
+# from gui.utils.table_helpers import resolve_display_name, set_table_row_colors
 # 预检逻辑已抽象到 gui.precheck.preflight 模块，main_gui 保留调用点即可。
 
 # Settings dataclass已迁移至 concat_tool.settings 供 GUI/CLI 复用。
@@ -611,10 +610,6 @@ def main() -> None:
     Creates the Qt application and displays the main window.
     """
     app = QtWidgets.QApplication(sys.argv)
-    # 在显示主窗口之前执行启动自检（英伟达显卡与授权切面）
-    if not run_preflight_checks(app):
-        # 用户确认后退出，或授权校验失败
-        return
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
