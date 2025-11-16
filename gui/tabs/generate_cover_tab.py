@@ -1096,8 +1096,16 @@ class GenerateCoverTab(QtWidgets.QWidget):
         # 设置预览控件默认对齐为居中，并统一默认字号 18
         try:
             self.pos_widget.set_alignment("center")
-            pf = self.pos_widget.font()
-            pf.setPointSize(18)
+            # 使用“字幕参数”中的默认字体与字号，作为字幕块的默认字体
+            fam = None
+            size = 18
+            try:
+                fam = self.font_combo.currentText() if hasattr(self, "font_combo") else None
+                size = self.font_size_spin.value() if hasattr(self, "font_size_spin") else 18
+            except Exception:
+                pass
+            pf = QtGui.QFont(fam) if fam else self.pos_widget.font()
+            pf.setPointSize(int(size))
             self.pos_widget.setFont(pf)
         except Exception:
             pass
@@ -1397,7 +1405,17 @@ class GenerateCoverTab(QtWidgets.QWidget):
         try:
             idx = self.pos_widget.get_selected_index() if hasattr(self.pos_widget, "get_selected_index") else getattr(self.pos_widget, "_selected_idx", -1)
             if idx is None or int(idx) < 0:
-                QtWidgets.QMessageBox.information(self, "提示", "请先选择一个字幕块后再调整字体或字号。")
+                # 无选中：将当前“字幕参数”中的字体与字号应用为默认字体到位置控件
+                fam = self.font_combo.currentText() if hasattr(self, "font_combo") else self.font().family()
+                size = self.font_size_spin.value() if hasattr(self, "font_size_spin") else 18
+                qf = QtGui.QFont(fam)
+                qf.setPointSize(int(size))
+                try:
+                    self.pos_widget.setFont(qf)
+                    self.pos_widget.update()
+                except Exception:
+                    pass
+                # 不再弹窗提示，默认字体已设置
                 self._refresh_controls_for_selection(-1)
                 return
             # 基于下拉选中的族名创建字体，并保持当前块的粗体/斜体样式
