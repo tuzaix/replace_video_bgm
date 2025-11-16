@@ -246,6 +246,8 @@ def render_caption_blocks(
 
     返回合成后图片（同输入类型）。
     """
+    if not caption_blocks: # 没字幕则直接返回
+        return base_img
     # 本地工程根与文本处理工具
     import os as _os_local
     try:
@@ -261,15 +263,14 @@ def render_caption_blocks(
                 return x.decode("utf-8", errors="ignore")
         return str(x)
 
-    if not caption_blocks:
-        return base_img
-
     # 尝试使用 Pillow（推荐，支持中文 TrueType 字体）
     try:
         from PIL import Image, ImageDraw, ImageFont
         import numpy as np
         pil_available = True
     except Exception:
+        import traceback
+        traceback.print_exc()
         pil_available = False
 
     if pil_available:
@@ -325,8 +326,10 @@ def render_caption_blocks(
             # 基准缩放与字体大小近似（保持与原 cv2 路径视觉相近）
             base_scale = max(0.6, min(1.5, H / 480.0))
 
+            import pprint 
+            pprint.pprint(caption_blocks)
+
             for block in caption_blocks:
-                print("block:", block)
                 try:
                     t = _ensure_unicode_text(block.get("text", ""))
                     if not t:
@@ -405,226 +408,8 @@ def render_caption_blocks(
         except Exception:
             # Pillow 路径失败则继续尝试 Qt
             pass
-
-    # Qt 路径（PySide6）作为回退，支持 Unicode 字体
-    try:
-        from PySide6 import QtGui
-        import numpy as np
-        import cv2
-
-        def _resolve_font_qt(bold: bool) -> QtGui.QFont:
-            fam = "Source Han Sans CN"
-            font = QtGui.QFont(fam)
-            font.setBold(bool(bold))
-            # 若项目字体未注册，尝试加载
-            try:
-                import os as _os_qt
-                fonts_dir = _os_qt.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts")
-                if _os_qt.path.isdir(fonts_dir):
-                    for name in _os_qt.listdir(fonts_dir):
-                        lower = name.lower()
-                        if lower.endswith(".ttf") or lower.endswith(".otf"):
-                            lp = _os_qt.path.join(fonts_dir, name)
-                            QtGui.QFontDatabase.addApplicationFont(lp)
-            except Exception:
-                pass
-            return font
-
-        img = base_img.copy()
-        h, w = img.shape[:2]
-        base_scale = max(0.6, min(1.5, h / 480.0))
-
-        # 转 QImage
-        qimg = QtGui.QImage(img.data, w, h, img.strides[0], QtGui.QImage.Format.Format_BGR888)
-        qimg = qimg.copy()  # detatch
-        painter = QtGui.QPainter(qimg)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
-
-        for block in caption_blocks:
-            try:
-                t = _ensure_unicode_text(block.get("text", ""))
-                if not t:
-                    continue
-                pos = block.get("position", (0.0, 0.0))
-                xr = max(0.0, min(1.0, float(pos[0])))
-                yr = max(0.0, min(1.0, float(pos[1])))
-                balign = str(block.get("align", default_align if default_align in {"left", "center", "right"} else "left"))
-                color_hex = str(block.get("color", "#ffffffff"))
-                bg_hex = str(block.get("bgcolor", "#00000000"))
-                stroke_hex = str(block.get("stroke_color", "#00000000"))
-                bfont_size = int(block.get("font_size", 18))
-                bbold = bool(block.get("font_bold", False))
-
-                font_scale_b = max(0.4, min(4.0, base_scale * (bfont_size / 18.0)))
-                px_size = int(max(8, round(font_scale_b * 18)))
-
-                font = _resolve_font_qt(bbold)
-                font.setPixelSize(px_size)
-                painter.setFont(font)
-
-                # 文本度量
-                fm = QtGui.QFontMetrics(font)
-                tw = max(1, fm.horizontalAdvance(t))
-                th = max(1, fm.height())
-                x = int(round(xr * w))
-                y = int(round(yr * h))
-                if balign == "center":
-                    x -= tw // 2
-                elif balign == "right":
-                    x -= tw
-                y = max(th + 6, min(h - 6, y))
-
-                # 背景矩形
-                _, _, _, ba = _rgba_hex_to_bgra(bg_hex)
-                if ba > 0:
-                    bb, bg, br, ba2 = _rgba_hex_to_bgra(bg_hex)
-                    painter.fillRect(x - 6, y - th - 6, tw + 12, th + 12, QtGui.QColor(br, bg, bb, ba2))
-
-                # 描边（通过多次偏移绘制近似描边）
-                sb, sg, sr, sa = _rgba_hex_to_bgra(stroke_hex)
-                cb, cg, cr, ca = _rgba_hex_to_bgra(color_hex)
-                if sa > 0:
-                    pen = QtGui.QPen(QtGui.QColor(sr, sg, sb, sa))
-                    pen.setWidth(max(1, int(round(px_size * 0.12))))
-                    painter.setPen(pen)
-                    painter.drawText(x, y, t)
-                pen = QtGui.QPen(QtGui.QColor(cr, cg, cb, ca))
-                painter.setPen(pen)
-                painter.drawText(x, y, t)
-            except Exception:
-                continue
-
-        painter.end()
-        # 转回 BGR ndarray
-        ptr = qimg.bits()
-        ptr.setsize(qimg.height() * qimg.bytesPerLine())
-        arr = np.array(ptr, dtype=np.uint8).reshape((qimg.height(), qimg.width(), 3))
-        return arr.copy()
-    except Exception:
-        pass
-
-    # 最后兜底：OpenCV（不支持中文，会出现乱码，仅保留以避免崩溃）
-    try:
-        import cv2
-        img = base_img
-        h, w = img.shape[0], img.shape[1]
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        base_scale = max(0.6, min(1.5, h / 480.0))
-        for block in caption_blocks:
-            try:
-                t = _ensure_unicode_text(block.get("text", ""))
-                if not t:
-                    continue
-                pos = block.get("position", (0.0, 0.0))
-                xr = max(0.0, min(1.0, float(pos[0])))
-                yr = max(0.0, min(1.0, float(pos[1])))
-                balign = str(block.get("align", default_align if default_align in {"left", "center", "right"} else "left"))
-                color_hex = str(block.get("color", "#ffffffff"))
-                bg_hex = str(block.get("bgcolor", "#00000000"))
-                stroke_hex = str(block.get("stroke_color", "#00000000"))
-                bfont_size = int(block.get("font_size", 18))
-                bbold = bool(block.get("font_bold", False))
-                font_scale_b = max(0.4, min(4.0, base_scale * (bfont_size / 18.0)))
-                thickness_b = int(max(1, round(font_scale_b * 2))) + (1 if bbold else 0)
-                cb, cg, cr, ca = _rgba_hex_to_bgra(color_hex)
-                (tw, th), baseline = cv2.getTextSize(t, font, font_scale_b, thickness_b)
-                x = int(round(xr * w))
-                y = int(round(yr * h))
-                if balign == "center":
-                    x -= tw // 2
-                elif balign == "right":
-                    x -= tw
-                y = max(th + 6, min(h - 6, y))
-                cv2.putText(img, t, (x, y), font, font_scale_b, (cb, cg, cr), thickness_b, lineType=cv2.LINE_AA)
-            except Exception:
-                continue
-        return img
-    except Exception:
-        # 如果连 OpenCV 路径也失败，直接返回原图
+    else:
         return base_img
-
-
-# def overlay_captions(
-#     base_img: object,
-#     caption_blocks: Optional[list[dict]] = None,
-#     default_align: str = "left",
-#     legacy_caption: Optional[str] = None,
-#     legacy_position: Optional[tuple[float, float]] = None,
-#     legacy_color: str = "yellow",
-#     legacy_captions: Optional[list[tuple[str, tuple[float, float]]]] = None,
-# ) -> object:
-#     """在基础拼接图上叠加字幕（公共封装）。
-
-#     优先使用带样式的 `caption_blocks`；若未提供则回退到老接口的单/多字幕：
-#     - `legacy_captions`: [(text, (xr, yr))] 列表，统一颜色与对齐。
-#     - `legacy_caption` + `legacy_position`: 单字幕。
-
-#     参数：
-#     - `base_img`: 基础拼接图（BGR ndarray）。
-#     - `caption_blocks`: 新版多字幕块（含样式）。
-#     - `default_align`: 新版字幕块的默认对齐。
-#     - `legacy_caption`: 旧版单字幕文本。
-#     - `legacy_position`: 旧版单字幕位置 (xr, yr) 范围 [0,1]。
-#     - `legacy_color`: 旧版字幕颜色（名称）。
-#     - `legacy_captions`: 旧版多字幕列表。
-
-#     返回：
-#     - 合成字幕后的图片（BGR ndarray）。
-#     """
-#     if caption_blocks and len(caption_blocks) > 0:
-#         return render_caption_blocks(base_img, caption_blocks, default_align=default_align)
-
-#     # 旧版路径：使用统一样式进行叠加
-#     try:
-#         import cv2
-#     except ImportError:
-#         raise ImportError("OpenCV (cv2) 未安装。请执行 `pip install opencv-python-headless` 后重试封面生成。")
-
-#     img = base_img
-#     h, w = img.shape[0], img.shape[1]
-#     font = cv2.FONT_HERSHEY_SIMPLEX
-#     font_scale = max(0.6, min(1.5, h / 480.0))
-#     thickness = int(round(font_scale * 2))
-#     bgr = _color_to_bgr(legacy_color)
-
-#     def draw_one_legacy(text: str, xr: float, yr: float, align: str = default_align) -> None:
-#         nonlocal img
-#         text = str(text or "")
-#         if not text:
-#             return
-#         (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-#         xr = max(0.0, min(1.0, float(xr))); yr = max(0.0, min(1.0, float(yr)))
-#         x = int(round(xr * w))
-#         y = int(round(yr * h))
-#         if align == "center":
-#             x -= tw // 2
-#         elif align == "right":
-#             x -= tw
-#         y = max(th + 6, min(h - 6, y))
-#         x0, y0 = x - 6, y - th - 6
-#         x1, y1 = x + tw + 6, y + baseline + 6
-#         overlay = img.copy()
-#         cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), thickness=cv2.FILLED)
-#         alpha = 0.35
-#         img = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)
-#         cv2.putText(img, text, (x, y), font, font_scale, bgr, thickness, lineType=cv2.LINE_AA)
-
-#     if legacy_captions and len(legacy_captions) > 0:
-#         for item in legacy_captions:
-#             try:
-#                 t, pos = item
-#                 xr, yr = float(pos[0]), float(pos[1])
-#             except Exception:
-#                 t, xr, yr = "", 0.02, 0.95
-#             if t:
-#                 draw_one_legacy(t, xr, yr, default_align)
-#     elif legacy_caption:
-#         xr, yr = (0.02, 0.95) if legacy_position is None else (float(legacy_position[0]), float(legacy_position[1]))
-#         draw_one_legacy(str(legacy_caption), xr, yr, default_align)
-
-#     return img
-
 
 def list_images(images_dir: str) -> List[str]:
     """列出目录中的图片文件路径。
