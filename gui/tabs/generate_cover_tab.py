@@ -58,6 +58,12 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         # 当前拖拽的块索引；-1 表示无拖拽
         self._dragging_idx: int = -1
         self._drag_offset: QtCore.QPointF = QtCore.QPointF(0.0, 0.0)
+        # 缩放与旋转交互状态
+        self._resizing_idx: int = -1
+        self._rotate_idx: int = -1
+        self._last_mouse_pos: QtCore.QPointF = QtCore.QPointF(0.0, 0.0)
+        self._resize_start_size: int = 18
+        self._rotate_start_angle: float = 0.0
         # 当前选中的块索引；-1 表示未选中，用于高对比边框渲染
         self._selected_idx: int = -1
         # 编辑器与状态：双击进入编辑，点击外部完成编辑
@@ -156,6 +162,7 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                 "color": _hex_rgba(col),
                 "bgcolor": _hex_rgba(bgc),
                 "stroke_color": _hex_rgba(sc),
+                "rotation": float(b.get("angle", 0.0)),
             })
         return blocks
 
@@ -254,6 +261,20 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def set_block_angle(self, idx: int, angle_deg: float) -> None:
+        """设置指定字幕块的旋转角度（单位：度），并重绘。
+
+        取值范围建议 [-180, 180]，超出范围不报错但会按给定角度绘制。
+        若索引无效则忽略。
+        """
+        try:
+            if idx < 0 or idx >= len(self._blocks):
+                return
+            self._blocks[idx]["angle"] = float(angle_deg)
+            self.update()
+        except Exception:
+            pass
+
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
         """开始拖拽：命中任一字幕块时记录对应偏移。"""
         # 若正在编辑，仅当左键点击字幕块外部时结束编辑并提交；回车作为换行由 QTextEdit 默认处理
@@ -273,8 +294,43 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                         hit = idx
                         break
             if hit >= 0:
-                self._dragging_idx = hit
+                # 手柄命中优先
                 b = self._blocks[hit]
+                bbox = self._text_bbox(b)
+                handle_size = 10.0
+                hs = handle_size
+                br = QtCore.QRectF(bbox.right() - hs, bbox.bottom() - hs, hs, hs)
+                tr = QtCore.QRectF(bbox.right() - hs, bbox.top(), hs, hs)
+                if br.contains(event.position()):
+                    # 进入缩放模式
+                    self._resizing_idx = hit
+                    f = b.get("font", self.font())
+                    sz = f.pointSize() if f.pointSize() > 0 else (f.pixelSize() or 18)
+                    self._resize_start_size = int(sz)
+                    self._last_mouse_pos = event.position()
+                    self._selected_idx = hit
+                    try:
+                        self.selection_changed.emit(hit)
+                    except Exception:
+                        pass
+                    self.update()
+                    super().mousePressEvent(event)
+                    return
+                if tr.contains(event.position()):
+                    # 进入旋转模式
+                    self._rotate_idx = hit
+                    self._rotate_start_angle = float(b.get("angle", 0.0))
+                    self._last_mouse_pos = event.position()
+                    self._selected_idx = hit
+                    try:
+                        self.selection_changed.emit(hit)
+                    except Exception:
+                        pass
+                    self.update()
+                    super().mousePressEvent(event)
+                    return
+                # 默认：进入拖拽模式
+                self._dragging_idx = hit
                 self._drag_offset = event.position() - b["pos"]
                 self._selected_idx = hit
                 try:
@@ -297,6 +353,27 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         """拖拽时更新命中的字幕块位置，并夹紧到控件范围。"""
         # 编辑时不允许拖拽移动
         if self._editor is not None:
+            super().mouseMoveEvent(event)
+            return
+        # 旋转交互：水平拖动改变角度，每移动 4 像素约 1 度
+        if self._rotate_idx >= 0 and self._rotate_idx < len(self._blocks):
+            dx = float(event.position().x() - self._last_mouse_pos.x())
+            new_angle = self._rotate_start_angle + dx / 4.0
+            self.set_block_angle(self._rotate_idx, new_angle)
+            self.update()
+            super().mouseMoveEvent(event)
+            return
+        # 缩放交互：按水平/垂直拖动改变字号，取两者的较大绝对值，灵敏度适中
+        if self._resizing_idx >= 0 and self._resizing_idx < len(self._blocks):
+            dx = float(event.position().x() - self._last_mouse_pos.x())
+            dy = float(event.position().y() - self._last_mouse_pos.y())
+            delta = max(abs(dx), abs(dy)) * (1 if dx + dy >= 0 else -1)
+            new_size = int(max(6, min(96, self._resize_start_size + delta / 4.0)))
+            b = self._blocks[self._resizing_idx]
+            f = b.get("font", self.font())
+            f.setPointSize(new_size)
+            self.set_block_font(self._resizing_idx, f)
+            self.update()
             super().mouseMoveEvent(event)
             return
         if self._dragging_idx >= 0 and self._dragging_idx < len(self._blocks):
@@ -326,6 +403,8 @@ class CaptionPositionWidget(QtWidgets.QWidget):
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
         """结束拖拽。"""
         self._dragging_idx = -1
+        self._resizing_idx = -1
+        self._rotate_idx = -1
         super().mouseReleaseEvent(event)
 
     def _text_bbox(self, block: Optional[dict] = None, override_pos: Optional[QtCore.QPointF] = None) -> QtCore.QRectF:
@@ -379,27 +458,38 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         # 背景指示文字
         painter.setPen(QtGui.QPen(QtGui.QColor("#888")))
         painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft, "右键添加/删除字幕块；拖拽字幕进行定位")
-        # 绘制所有字幕块
+        # 绘制所有字幕块（支持旋转与交互手柄）
         for idx, b in enumerate(self._blocks):
             bbox = self._text_bbox(b)
-            # 背景颜色：优先使用块自定义颜色；默认透明，不强制设置不透明度
+            angle = float(b.get("angle", 0.0))
+            cx = bbox.center().x()
+            cy = bbox.center().y()
+
+            painter.save()
+            if abs(angle) > 0.001:
+                painter.translate(cx, cy)
+                painter.rotate(angle)
+                painter.translate(-cx, -cy)
+
+            # 背景颜色：透明时不绘制
             bg = QtGui.QColor(b.get("bgcolor", QtGui.QColor(0, 0, 0, 0)))
             if bg.alpha() > 0:
                 painter.fillRect(bbox, bg)
-            # 文本边框：仅在选中且未拖拽时绘制；未选中不画边框，拖拽时也不画边框
-            if idx == self._selected_idx and self._dragging_idx != idx:
+
+            # 文本边框：选中且未拖拽/未缩放/未旋转时绘制
+            if idx == self._selected_idx and self._dragging_idx != idx and self._resizing_idx != idx and self._rotate_idx != idx:
                 sel_color = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#2563eb")))
                 painter.setPen(QtGui.QPen(sel_color, 2))
                 painter.drawRect(bbox)
-            # 文本颜色：优先使用块自定义颜色，否则默认黑色
+
+            # 文本颜色与字体
             color = QtGui.QColor(b.get("color", QtGui.QColor("#000000")))
-            # 文本位置：在 bbox 内侧留 6 像素内边距
             font: QtGui.QFont = b.get("font", self.font())
             painter.setFont(font)
             text_rect = QtCore.QRectF(bbox.left() + 6.0, bbox.top() + 6.0, bbox.width() - 12.0, bbox.height() - 12.0)
             b_align = b.get("align", self._align)
             align_flag = QtCore.Qt.AlignLeft if b_align == "left" else (QtCore.Qt.AlignCenter if b_align == "center" else QtCore.Qt.AlignRight)
-            # 支持自动换行与多行文本绘制；水平对齐由用户选择的单选框控制
+
             # 描边：若设置了非透明的描边颜色，则先绘制若干偏移层以模拟字符边框
             stroke = QtGui.QColor(b.get("stroke_color", QtGui.QColor(0, 0, 0, 0)))
             if stroke.alpha() > 0:
@@ -411,6 +501,22 @@ class CaptionPositionWidget(QtWidgets.QWidget):
                         painter.drawText(text_rect.translated(dx, dy), align_flag | QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, str(b.get("text", "")))
             painter.setPen(QtGui.QPen(color))
             painter.drawText(text_rect, align_flag | QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, str(b.get("text", "")))
+
+            painter.restore()
+            # 交互手柄：仅在选中时绘制（不旋转手柄，便于命中）
+            if idx == self._selected_idx:
+                handle_size = 10.0
+                hs = handle_size
+                br = QtCore.QRectF(bbox.right() - hs, bbox.bottom() - hs, hs, hs)
+                tr = QtCore.QRectF(bbox.right() - hs, bbox.top(), hs, hs)
+                painter.save()
+                painter.setBrush(QtGui.QBrush(QtGui.QColor("#2563eb")))
+                painter.setPen(QtGui.QPen(QtGui.QColor("#2563eb")))
+                painter.drawRect(br)  # 缩放手柄（右下角）
+                painter.setBrush(QtGui.QBrush(QtGui.QColor("#10b981")))
+                painter.setPen(QtGui.QPen(QtGui.QColor("#10b981")))
+                painter.drawEllipse(tr)  # 旋转手柄（右上角）
+                painter.restore()
         painter.end()
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
