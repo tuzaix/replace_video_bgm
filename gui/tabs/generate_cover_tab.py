@@ -490,12 +490,6 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         if self._dragging_idx >= 0 and self._dragging_idx < len(self._blocks):
             self._drag_update(event)
             self.update()
-            try:
-                b = self._blocks[self._dragging_idx]
-                rx, ry = self.get_position()
-                # print(f"drag idx={self._dragging_idx}, pos=({b['pos'].x():.1f},{b['pos'].y():.1f}), ratio=({rx:.3f},{ry:.3f}) [origin top-left]")
-            except Exception:
-                pass
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
