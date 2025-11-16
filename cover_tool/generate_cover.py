@@ -152,7 +152,6 @@ def _imread_unicode(path: str, flags: int = 1):
         except Exception:
             return None
 
-
 def _rgba_hex_to_bgra(hex_rgba: str) -> tuple[int, int, int, int]:
     """将 '#rrggbbaa' 或 '#rrggbb' 转换为 BGRA 元组。
 
@@ -169,7 +168,6 @@ def _rgba_hex_to_bgra(hex_rgba: str) -> tuple[int, int, int, int]:
     else:
         r, g, b, a = 0, 0, 0, 0
     return b, g, r, a
-
 
 def stitch_images(image_paths: List[str]) -> object:
     """生成基础拼接图（不含字幕）。
@@ -224,7 +222,6 @@ def stitch_images(image_paths: List[str]) -> object:
         stitched = np.hstack(padded)
     return stitched
 
-
 def build_stitched_image(image_paths: List[str]) -> object:
     """构建基础拼接图（公共封装）。
 
@@ -250,7 +247,6 @@ def build_stitched_image(image_paths: List[str]) -> object:
     # except Exception:
     #     return img
     return img 
-
 
 def stitch_images_with_blend(image_paths: List[str], blend_width: int = 24) -> object:
     """生成带横向过渡的拼接图（在相邻图片的接缝处做线性混合）。
