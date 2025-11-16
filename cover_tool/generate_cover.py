@@ -557,57 +557,88 @@ def render_caption_blocks(
                     else:
                         font = ImageFont.load_default()
 
-                    # 文本尺寸与定位（依照映射后的包围框与基线）
-                    # 先用一个临时位置测量真实 bbox
-                    bbox = draw.textbbox((0, 0), t, font=font, stroke_width=stroke_w)
-                    tw = max(1, bbox[2] - bbox[0])
-                    th = max(1, bbox[3] - bbox[1])
-
-                    # 映射后的包围框与基线（基线为 box 底部）
+                    # 多行字幕优化对齐：以“最长行居中时”的左右边界作为全局参照
                     dl, dt, dw, dh = draw_rect
                     sbx = int(mapped.get("map_text_box_x", dl))
                     sby = int(mapped.get("map_text_box_y", dt))
                     sbw = int(mapped.get("map_text_box_width", 0))
                     sbh = int(mapped.get("map_text_box_height", 0))
-                    y = sby + sbh*0.75 # 重新计算y轴坐标，非常重要
 
-                    # 根据对齐选择锚点并换算文本左上角 x
-                    if balign == "center":
-                        anchor_x = sbx + sbw // 2
-                        x = anchor_x - tw // 2
-                    elif balign == "right":
-                        anchor_x = sbx + sbw
-                        x = anchor_x - tw
-                    else:
-                        x = sbx
-
-                    # 夹紧到绘制区域范围（保留 6px 边距；y 为基线，绘制时会减去 th）
-                    y = max(dt + th + 6, min(dt + dh - 6, y))
-                    x = max(dl + 6, min(dl + dw - tw - 6, x))
-
-                    # 背景矩形（半透明）
-                    rgba_bg = _rgba_hex_to_rgba(bg_hex)
-                    if rgba_bg[3] > 0:
-                        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-                        ovr = ImageDraw.Draw(overlay)
-                        x0, y0 = x - 6, y - th - 6
-                        x1, y1 = x + tw + 6, y + 6
-                        ovr.rectangle([x0, y0, x1, y1], fill=rgba_bg)
-                        img_rgba = Image.alpha_composite(img_rgba, overlay)
-                        draw = ImageDraw.Draw(img_rgba)
-
-                    # 文本颜色与描边颜色
+                    # 颜色
                     rgba_text = _rgba_hex_to_rgba(color_hex)
                     rgba_stroke = _rgba_hex_to_rgba(stroke_hex)
+                    rgba_bg = _rgba_hex_to_rgba(bg_hex)
 
-                    # 在透明层上绘制文本以便 alpha 叠加
+                    # 分行与测量
+                    lines = t.splitlines() if "\n" in t else [t]
+                    if not lines:
+                        continue
+                    # 逐行测量宽高
+                    line_sizes = []
+                    for ln in lines:
+                        bb = draw.textbbox((0, 0), ln, font=font, stroke_width=stroke_w)
+                        lw = max(1, bb[2] - bb[0])
+                        lh = max(1, bb[3] - bb[1])
+                        line_sizes.append((lw, lh))
+                    max_width = max(w for w, _ in line_sizes)
+                    # 行距：按首行高度的 0.25 估算
+                    base_h = line_sizes[0][1]
+                    line_gap = int(round(base_h * 0.25))
+                    total_h = sum(h for _, h in line_sizes) + line_gap * max(0, len(lines) - 1)
+
+                    # 以映射 box 的中心点为参照计算左右边界
+                    center_x = int(mapped.get("map_text_box_centerpoint_x", sbx + sbw // 2))
+                    center_y = int(mapped.get("map_text_box_centerpoint_y", sby + sbh // 2))
+                    left_edge = center_x - max_width // 2
+                    right_edge = center_x + max_width // 2
+                    # 垂直起始（顶边），保证整体在绘制区域内并尽量围绕中心
+                    start_y = center_y - total_h // 2
+
+                    # 先整体夹紧（水平：左右边；垂直：顶/底），通过平移中心来适配
+                    if left_edge < dl + 6:
+                        dx = (dl + 6) - left_edge
+                        left_edge += dx; right_edge += dx; center_x += dx
+                    if right_edge > dl + dw - 6:
+                        dx = right_edge - (dl + dw - 6)
+                        left_edge -= dx; right_edge -= dx; center_x -= dx
+                    if start_y < dt + 6:
+                        dy = (dt + 6) - start_y
+                        start_y += dy; center_y += dy
+                    if start_y + total_h > dt + dh - 6:
+                        dy = (start_y + total_h) - (dt + dh - 6)
+                        start_y -= dy; center_y -= dy
+
+                    # 背景矩形（按全块包围盒绘制）
+                    if rgba_bg[3] > 0:
+                        overlay_bg = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                        ovr_bg = ImageDraw.Draw(overlay_bg)
+                        ovr_bg.rectangle([left_edge - 6, start_y - 6, right_edge + 6, start_y + total_h + 6], fill=rgba_bg)
+                        img_rgba = Image.alpha_composite(img_rgba, overlay_bg)
+                        draw = ImageDraw.Draw(img_rgba)
+
+                    # 绘制每一行：依据对齐方式选择起点
                     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
                     ovr = ImageDraw.Draw(overlay)
-                    try:
-                        ovr.text((x, y - th), t, font=font, fill=rgba_text, stroke_width=stroke_w if rgba_stroke[3] > 0 else 0, stroke_fill=rgba_stroke if rgba_stroke[3] > 0 else None)
-                    except Exception:
-                        # 某些 Pillow 版本不支持 stroke_*；退化为无描边
-                        ovr.text((x, y - th), t, font=font, fill=rgba_text)
+                    cur_y = start_y
+                    for (ln, (lw, lh)) in zip(lines, line_sizes):
+                        if balign == "center":
+                            x_line = center_x - lw // 2
+                        elif balign == "right":
+                            x_line = right_edge - lw
+                        else:
+                            x_line = left_edge
+                        # 逐行轻微夹紧（仅当超出）
+                        if x_line < dl + 6:
+                            x_line = dl + 6
+                        if x_line + lw > dl + dw - 6:
+                            x_line = dl + dw - lw - 6
+                        try:
+                            ovr.text((x_line, cur_y), ln, font=font, fill=rgba_text,
+                                     stroke_width=stroke_w if rgba_stroke[3] > 0 else 0,
+                                     stroke_fill=rgba_stroke if rgba_stroke[3] > 0 else None)
+                        except Exception:
+                            ovr.text((x_line, cur_y), ln, font=font, fill=rgba_text)
+                        cur_y += lh + line_gap
                     img_rgba = Image.alpha_composite(img_rgba, overlay)
                     draw = ImageDraw.Draw(img_rgba)
                 except Exception:
