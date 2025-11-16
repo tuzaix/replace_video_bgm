@@ -145,6 +145,8 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         结构：[{
             "text": str,
             "position": (x_ratio, y_ratio),
+            "box_w": int,           # 文本包围框宽度（像素）
+            "box_h": int,           # 文本包围框高度（像素）
             "font_family": str,
             "font_size": int,
             "font_bold": bool,
@@ -165,6 +167,10 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             yr = (float(p.y()) - rect.top()) / max(1.0, rect.height())
             xr = max(0.0, min(1.0, xr))
             yr = max(0.0, min(1.0, yr))
+            # 文本包围框尺寸（像素）
+            bbox = self._text_bbox(b)
+            box_w = int(round(bbox.width()))
+            box_h = int(round(bbox.height()))
             bf: QtGui.QFont = b.get("font", self.font())
             al: str = b.get("align", self._align)
             # 默认字体颜色为黑色；背景默认透明
@@ -176,6 +182,8 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             blocks.append({
                 "text": str(b.get("text", "")),
                 "position": (xr, yr),
+                "box_w": box_w,
+                "box_h": box_h,
                 "font_family": bf.family(),
                 "font_size": bf.pointSize() if bf.pointSize() > 0 else bf.pixelSize() or 12,
                 "font_bold": bool(bf.bold()),
