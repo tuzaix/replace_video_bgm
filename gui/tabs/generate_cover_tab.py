@@ -1790,19 +1790,25 @@ class GenerateCoverTab(QtWidgets.QWidget):
         msg_box.setText(
             f"检测到输出目录非空：\n{output_dir}\n\n是否删除旧文件后开始？"
         )
-        delete_button = msg_box.addButton("删除后开始", QtWidgets.QMessageBox.YesRole)
-        keep_button = msg_box.addButton("直接开始", QtWidgets.QMessageBox.NoRole)
+        delete_button = msg_box.addButton("删除", QtWidgets.QMessageBox.YesRole)
+        keep_button = msg_box.addButton("不删除", QtWidgets.QMessageBox.NoRole)
+        cancel_button = msg_box.addButton("取消", QtWidgets.QMessageBox.RejectRole)
         msg_box.setDefaultButton(delete_button)
         status = msg_box.exec()
         clicked = msg_box.clickedButton()
-        # 若用户通过右上角 X 关闭或对话框被拒绝，视为取消开始
+        # 若用户通过右上角 X 关闭（Rejected）或未点任何按钮，视为取消开始
         print(f"clicked: {clicked}, status: {status}, {QtWidgets.QMessageBox.Rejected}")
+        print(clicked, status, delete_button, keep_button, cancel_button)
         try:
-            if clicked is None or status == QtWidgets.QMessageBox.Rejected:
+            if clicked is None or clicked == cancel_button:
+                return False
+            # 使用 QDialog.Rejected 更稳妥地判断被拒绝状态
+            if status == QtWidgets.QDialog.Rejected:
                 return False
         except Exception:
-            # 兼容性兜底：继续通过按钮对象判断
-            pass
+            # 兜底：若返回值异常，则仅接受明确的两个按钮，其他情况取消
+            if clicked not in (delete_button, keep_button):
+                return False
         if clicked is delete_button:
             # 尝试清理（失败不打断流程，不额外弹窗）
             try:
