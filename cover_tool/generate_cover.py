@@ -691,7 +691,6 @@ def generate_thumbnail_single(
         stitched = render_caption_blocks(stitched, caption_blocks)
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"stitched_cover_{uuid.uuid4().hex[:8]}.jpg")
-    print(tmp_path)
     ok = cv2.imwrite(tmp_path, stitched)
     if not ok:
         raise IOError("Failed to write stitched cover image")
@@ -724,7 +723,7 @@ def generate_thumbnail(
     tasks: List[List[str]] = [choose_images(image_paths, per_cover) for _ in range(max(1, int(count)))]
    
     for i, picks in enumerate(tasks, start=1):
-        print(f"[queued {i}/{count}] Using images: {', '.join(os.path.basename(p) for p in picks)}")
+        # print(f"[queued {i}/{count}] Using images: {', '.join(os.path.basename(p) for p in picks)}")
         try:
             # 生成临时封面并保存到输出目录的 `封面/` 子目录
             stitched_path = generate_thumbnail_single(image_paths=picks, caption_blocks=caption_blocks)

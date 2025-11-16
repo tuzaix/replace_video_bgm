@@ -1796,6 +1796,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
         status = msg_box.exec()
         clicked = msg_box.clickedButton()
         # 若用户通过右上角 X 关闭或对话框被拒绝，视为取消开始
+        print(f"clicked: {clicked}, status: {status}, {QtWidgets.QMessageBox.Rejected}")
         try:
             if clicked is None or status == QtWidgets.QMessageBox.Rejected:
                 return False
@@ -1868,12 +1869,11 @@ class GenerateCoverTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "提示", "请先填写合成封面目录")
             return
         # 开始前确认是否清理旧输出目录（仅在非空时提示）
-        try:
-            if not self._confirm_and_cleanup_output_dir_before_start():
-                # 用户关闭弹窗或取消，直接返回，不继续启动任务
-                return
-        except Exception:
-            pass
+        
+        if not self._confirm_and_cleanup_output_dir_before_start():
+            # 用户关闭弹窗或取消，直接返回，不继续启动任务
+            return
+    
         # 收集所有字幕块（包含样式）以支持多字幕块生成
         caption_blocks_full: list[dict] = []
         try:
