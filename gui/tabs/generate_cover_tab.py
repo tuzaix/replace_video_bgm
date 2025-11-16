@@ -493,7 +493,7 @@ class CaptionPositionWidget(QtWidgets.QWidget):
             try:
                 b = self._blocks[self._dragging_idx]
                 rx, ry = self.get_position()
-                print(f"drag idx={self._dragging_idx}, pos=({b['pos'].x():.1f},{b['pos'].y():.1f}), ratio=({rx:.3f},{ry:.3f}) [origin top-left]")
+                # print(f"drag idx={self._dragging_idx}, pos=({b['pos'].x():.1f},{b['pos'].y():.1f}), ratio=({rx:.3f},{ry:.3f}) [origin top-left]")
             except Exception:
                 pass
         super().mouseMoveEvent(event)

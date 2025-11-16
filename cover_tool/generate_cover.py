@@ -325,11 +325,9 @@ def render_caption_blocks(
 
             # 基准缩放与字体大小近似（保持与原 cv2 路径视觉相近）
             base_scale = max(0.6, min(1.5, H / 480.0))
-
-            import pprint 
-            pprint.pprint(caption_blocks)
-
+            import pprint
             for block in caption_blocks:
+                pprint.pprint(block)
                 try:
                     t = _ensure_unicode_text(block.get("text", ""))
                     if not t:
