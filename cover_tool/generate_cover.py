@@ -533,6 +533,15 @@ def render_caption_blocks(
                     px_size = int(mapped.get("map_text_font_px", 18))
                     stroke_w = int(max(0, round(px_size * 0.12))) + (1 if bbold else 0)
 
+                    map_text_box_centerpoint_x = int(mapped.get("map_text_box_centerpoint_x", mid_x))
+                    map_text_box_centerpoint_y = int(mapped.get("map_text_box_centerpoint_y", mid_y))
+                    # 换一个蓝点，用于定位
+                    draw.ellipse(
+                        [map_text_box_centerpoint_x - 10, map_text_box_centerpoint_y - 10, map_text_box_centerpoint_x + 10, map_text_box_centerpoint_y + 10],
+                        fill=(0, 0, 255, 128),
+                        outline=(0, 0, 255, 255),
+                        width=2,
+                    )
                    
 
                     # 加载中文字体（优先项目字体）

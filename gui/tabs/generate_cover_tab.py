@@ -624,9 +624,31 @@ class CaptionPositionWidget(QtWidgets.QWidget):
         painter.drawRect(rect)
         pen_axes = QtGui.QPen(QtGui.QColor(160, 160, 220))
         pen_axes.setStyle(QtCore.Qt.PenStyle.DashLine)
-        painter.setPen(pen_axes)
+        # 居中参考线高亮：当拖拽中的字幕块中心与活动区中心重合时，高亮两条中心线
         cx = rect.left() + rect.width() / 2.0
         cy = rect.top() + rect.height() / 2.0
+        highlight_axes = False
+        try:
+            if self._dragging_idx >= 0 and self._dragging_idx < len(self._blocks):
+                drag_bbox = self._text_bbox(self._blocks[self._dragging_idx])
+                bx = drag_bbox.center().x()
+                by = drag_bbox.center().y()
+                # 判定容差：取活动区的 0.6% 边长与固定像素的较大值
+                tol = max(4.0, min(rect.width(), rect.height()) * 0.006)
+                if abs(bx - cx) <= tol and abs(by - cy) <= tol:
+                    highlight_axes = True
+        except Exception:
+            highlight_axes = False
+
+        if highlight_axes:
+            try:
+                hl_color = QtGui.QColor(str(getattr(theme, "PRIMARY_BLUE", "#2563eb")))
+            except Exception:
+                hl_color = QtGui.QColor("#2563eb")
+            pen_axes = QtGui.QPen(hl_color)
+            pen_axes.setStyle(QtCore.Qt.PenStyle.SolidLine)
+            pen_axes.setWidth(2)
+        painter.setPen(pen_axes)
         painter.drawLine(QtCore.QPointF(rect.left(), cy), QtCore.QPointF(rect.right(), cy))
         painter.drawLine(QtCore.QPointF(cx, rect.top()), QtCore.QPointF(cx, rect.bottom()))
         painter.end()
