@@ -94,36 +94,43 @@ def map_block_to_draw_area(block: dict, draw_rect: tuple[int, int, int, int]) ->
     返回：位置信息与缩放关系，用于在图片上绘制：
     `{ "x": int, "y": int, "font_px": int, "scale_x": float, "scale_y": float, "draw_left": int, "draw_top": int, "draw_w": int, "draw_h": int }`。
     """
-    left, top, draw_w, draw_h = draw_rect
-    aw = int(block.get("active_w", 0))
-    ah = int(block.get("active_h", 0))
-    px = int(block.get("pixel_x", 0))
-    py = int(block.get("pixel_y", 0))
-    box_h = int(block.get("box_h", 0))
-    bfont_size = int(block.get("font_size", 0))
-    if aw <= 0 or ah <= 0:
-        sx = sy = 1.0
-    else:
-        sx = float(draw_w) / float(max(1, aw))
-        sy = float(draw_h) / float(max(1, ah))
-    x = int(round(left + px * sx))
-    y = int(round(top + py * sy))
-    if bfont_size > 0:
-        font_px = int(max(8, round(bfont_size * sy)))
-    else:
-        font_px = int(max(8, round(box_h * sy)))
-    return {
-        "x": x,
-        "y": y,
-        "font_px": font_px,
-        "scale_x": float(sx),
-        "scale_y": float(sy),
-        "draw_left": int(left),
-        "draw_top": int(top),
-        "draw_w": int(draw_w),
-        "draw_h": int(draw_h),
-    }
+    # 坐标，box宽度和高度
+    sx, sy, sw, sh = draw_rect
+    # 控件坐标
+    obx, oby, obw, obh = int(block.get("pixel_x", 0)), int(block.get("pixel_y", 0)), int(block.get("box_w", 0)), int(block.get("box_h", 0))
 
+    # 控件的有效区域宽高
+    ow = int(block.get("active_w", 0))
+    oh = int(block.get("active_h", 0))
+
+    # 映射的box宽和高
+    sbw = int(round((sw/ow) * obw))
+    sbh = int(round((sh/oh) * obh))
+
+    # 映射的坐标(box的左上角)
+    sbx = int(round((sw/ow) * obx + sx))
+    sby = int(round((sh/oh) * oby + sy))
+
+    # 映射的字体像素大小
+    font_px = int(max(8, round((sbh / obh) * int(block.get("font_size", 0)))))
+
+    # 调试用的映射box中心你点
+    mid_x = sbx + sbw / 2
+    mid_y = sby + sbh / 2
+
+    return {
+        "draw_ract_x": sx,      # 绘制区域的左上角x坐标
+        "draw_ract_y": sy,      # 绘制区域的左上角y坐标
+        "draw_ract_width": sw,  # 绘制区域的宽度
+        "draw_ract_height": sh, # 绘制区域的高度
+        "map_text_box_x": sbx,       # 映射box的左上角x坐标
+        "map_text_box_y": sby,       # 映射box的左上角y坐标
+        "map_text_box_width": sbw,   # 映射box的宽度
+        "map_text_box_height": sbh,  # 映射box的高度
+        "map_text_font_px": font_px, # 映射box的字体像素大小
+        "map_text_box_centerpoint_x": int(mid_x), # 映射box的中心x坐标，用于调试
+        "map_text_box_centerpoint_y": int(mid_y), # 映射box的中心y坐标，用于调试
+    }
 
 def _imread_unicode(path: str, flags: int = 1):
     """Safely read images from paths containing non-ASCII characters on Windows.
@@ -394,8 +401,64 @@ def render_caption_blocks(
                 b, g, r, a = _rgba_hex_to_bgra(s)
                 return (r, g, b, a)
 
-            def _resolve_chinese_font(bold: bool) -> Optional[str]:
-                # 优先项目内字体
+            def _resolve_chinese_font(bold: bool, font_family: Optional[str] = None) -> Optional[str]:
+                """根据 `font_family` 与粗体标志解析字体文件路径。
+
+                优先级：
+                1) 若 `font_family` 是存在的文件路径，直接使用；
+                2) 若为项目内已知家族名或文件名，匹配 `gui/fonts` 下的对应 OTF；
+                3) 若为 Windows 常见中文字体家族，映射到系统字体文件；
+                4) 以上都未命中时，按粗体与常用项目字体回退。
+                """
+                try:
+                    if font_family:
+                        ff = str(font_family).strip()
+                        # 显式文件路径
+                        if _os_local.path.isfile(ff):
+                            return ff
+
+                        # 规范化家族名
+                        ff_lower = ff.lower()
+                        fonts_dir = _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts")
+                        known_project = {
+                            "sourcehansanscn-regular": "SourceHanSansCN-Regular.otf",
+                            "sourcehansanscn-normal": "SourceHanSansCN-Normal.otf",
+                            "sourcehansanscn-medium": "SourceHanSansCN-Medium.otf",
+                            "sourcehansanscn-bold": "SourceHanSansCN-Bold.otf",
+                            "sourcehansanscn-heavy": "SourceHanSansCN-Heavy.otf",
+                            "sourcehansanscn-light": "SourceHanSansCN-Light.otf",
+                        }
+                        # 兼容不带权重的家族名：按粗体选择
+                        if ff_lower == "sourcehansanscn":
+                            ff_lower = "sourcehansanscn-bold" if bold else "sourcehansanscn-regular"
+                        if ff_lower in known_project:
+                            p = _os_local.path.join(fonts_dir, known_project[ff_lower])
+                            if _os_local.path.isfile(p):
+                                return p
+
+                        # Windows 字体家族映射
+                        win_map = {
+                            "microsoft yahei": r"C:\\Windows\\Fonts\\msyh.ttc",
+                            "微软雅黑": r"C:\\Windows\\Fonts\\msyh.ttc",
+                            "msyh": r"C:\\Windows\\Fonts\\msyh.ttc",
+                            "msyhbd": r"C:\\Windows\\Fonts\\msyhbd.ttc",  # 粗体
+                            "simhei": r"C:\\Windows\\Fonts\\simhei.ttf",
+                            "黑体": r"C:\\Windows\\Fonts\\simhei.ttf",
+                            "simsun": r"C:\\Windows\\Fonts\\simsun.ttc",
+                            "宋体": r"C:\\Windows\\Fonts\\simsun.ttc",
+                            "arial unicode ms": r"C:\\Windows\\Fonts\\arialuni.ttf",
+                            "arialuni": r"C:\\Windows\\Fonts\\arialuni.ttf",
+                            "notosanscjk": r"C:\\Windows\\Fonts\\NotoSansCJK-Regular.ttc",
+                        }
+                        # 针对粗体的 yahei 变体
+                        if bold and ff_lower in {"microsoft yahei", "微软雅黑", "msyh"}:
+                            ff_lower = "msyhbd" if "msyhbd" in win_map else ff_lower
+                        if ff_lower in win_map and _os_local.path.isfile(win_map[ff_lower]):
+                            return win_map[ff_lower]
+                except Exception:
+                    pass
+
+                # 默认项目字体回退
                 candidates = [
                     _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Bold.otf") if bold else _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Regular.otf"),
                     _os_local.path.join(PROJECT_ROOT_LOCAL, "gui", "fonts", "SourceHanSansCN-Normal.otf"),
@@ -408,13 +471,13 @@ def render_caption_blocks(
                             return p
                     except Exception:
                         continue
-                # Windows 常见中文字体作为回退
+                # Windows 常见中文字体作为兜底
                 win_candidates = [
-                    r"C:\\Windows\\Fonts\\msyh.ttc",  # 微软雅黑
-                    r"C:\\Windows\\Fonts\\simhei.ttf",  # 黑体
-                    r"C:\\Windows\\Fonts\\simsun.ttc",  # 宋体
-                    r"C:\\Windows\\Fonts\\arialuni.ttf",  # Arial Unicode MS
-                    r"C:\\Windows\\Fonts\\NotoSansCJK-Regular.ttc",  # Noto CJK（若安装）
+                    r"C:\\Windows\\Fonts\\msyh.ttc",
+                    r"C:\\Windows\\Fonts\\simhei.ttf",
+                    r"C:\\Windows\\Fonts\\simsun.ttc",
+                    r"C:\\Windows\\Fonts\\arialuni.ttf",
+                    r"C:\\Windows\\Fonts\\NotoSansCJK-Regular.ttc",
                 ]
                 for p in win_candidates:
                     try:
@@ -444,20 +507,19 @@ def render_caption_blocks(
                 )
             except Exception:
                 pass
-            
+              # 获取中心点
+            mid_x, mid_y = draw_rect[0] + draw_rect[2] / 2, draw_rect[1] + draw_rect[3] / 2
+            # 画个中心点
+            draw.ellipse(
+                [mid_x - 10, mid_y - 10, mid_x + 10, mid_y + 10],
+                fill=(255, 0, 0, 128),
+                outline=(255, 0, 0, 255),
+                width=2,
+            )
 
             import pprint
             for block in caption_blocks:
-                # pprint.pprint(block)
-
-                
-                original_box_center_x = block['pixel_x'] + block['box_w'] / 2
-                original_box_center_y = block['pixel_y'] + block['box_h'] / 2
-
-                a_x = block['active_w'] / 2
-                a_y = block['active_h'] / 2
-                print(draw_rect)
-                print(f"({original_box_center_x:.1f}, {original_box_center_y:.1f}) -> ({a_x:.1f}, {a_y:.1f})")
+                pprint.pprint(block)
 
                 try:
                     t = _ensure_unicode_text(block.get("text", ""))
@@ -467,15 +529,18 @@ def render_caption_blocks(
                     color_hex = str(block.get("color", "#ffffffff"))
                     bg_hex = str(block.get("bgcolor", "#00000000"))
                     stroke_hex = str(block.get("stroke_color", "#00000000"))
+                    font_family = str(block.get("font_family", "SourceHanSansCN-Regular"))
                     bbold = bool(block.get("font_bold", False))
 
                     # 使用活动区映射计算绘制坐标与字号
                     mapped = map_block_to_draw_area(block, draw_rect)
-                    px_size = int(mapped.get("font_px", 18))
+                    px_size = int(mapped.get("map_text_font_px", 18))
                     stroke_w = int(max(0, round(px_size * 0.12))) + (1 if bbold else 0)
 
+                   
+
                     # 加载中文字体（优先项目字体）
-                    font_path = _resolve_chinese_font(bold=bbold)
+                    font_path = _resolve_chinese_font(bold=bbold, font_family=font_family)
                     if font_path:
                         try:
                             try:
@@ -487,19 +552,31 @@ def render_caption_blocks(
                     else:
                         font = ImageFont.load_default()
 
-                    # 文本尺寸与定位
+                    # 文本尺寸与定位（依照映射后的包围框与基线）
                     # 先用一个临时位置测量真实 bbox
                     bbox = draw.textbbox((0, 0), t, font=font, stroke_width=stroke_w)
                     tw = max(1, bbox[2] - bbox[0])
                     th = max(1, bbox[3] - bbox[1])
-                    x = int(mapped.get("x", 0))
-                    y = int(mapped.get("y", 0))
-                    if balign == "center":
-                        x -= tw // 2
-                    elif balign == "right":
-                        x -= tw
-                    # 夹紧到绘制区域范围
+
+                    # 映射后的包围框与基线（基线为 box 底部）
                     dl, dt, dw, dh = draw_rect
+                    sbx = int(mapped.get("map_text_box_x", dl))
+                    sby = int(mapped.get("map_text_box_y", dt))
+                    sbw = int(mapped.get("map_text_box_width", 0))
+                    sbh = int(mapped.get("map_text_box_height", 0))
+                    y = sby + sbh
+
+                    # 根据对齐选择锚点并换算文本左上角 x
+                    if balign == "center":
+                        anchor_x = sbx + sbw // 2
+                        x = anchor_x - tw // 2
+                    elif balign == "right":
+                        anchor_x = sbx + sbw
+                        x = anchor_x - tw
+                    else:
+                        x = sbx
+
+                    # 夹紧到绘制区域范围（保留 6px 边距；y 为基线，绘制时会减去 th）
                     y = max(dt + th + 6, min(dt + dh - 6, y))
                     x = max(dl + 6, min(dl + dw - tw - 6, x))
 
