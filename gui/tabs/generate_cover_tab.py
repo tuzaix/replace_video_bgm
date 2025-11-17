@@ -1006,8 +1006,8 @@ class GenerateCoverWorker(QtCore.QObject):
                 progress_cb=on_cover,
             )
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            # import traceback
+            # traceback.print_exc()
             self.error.emit(f"并发生成封面失败: {e}")
             return
 

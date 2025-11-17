@@ -808,7 +808,7 @@ def save_stitched_cover(stitched_image_path: str, out_dir: str) -> str:
         shutil.move(stitched_image_path, out_path)
         return out_path
     except Exception as e:
-        print(f"Error copying stitched cover: {e}")
+        # print(f"Error copying stitched cover: {e}")
         return stitched_image_path
 
 
@@ -884,7 +884,7 @@ def generate_thumbnail(
     tasks: List[List[str]] = [choose_images(image_paths, per_cover) for _ in range(max(1, int(count)))]
    
     for i, picks in enumerate(tasks, start=1):
-        print(f"[queued {i}/{count}] Using images: {', '.join(os.path.basename(p) for p in picks)}")
+        # print(f"[queued {i}/{count}] Using images: {', '.join(os.path.basename(p) for p in picks)}")
         try:
             # 生成临时封面并保存到输出目录的 `封面/` 子目录
             stitched_path = generate_thumbnail_single(image_paths=picks, caption_blocks=caption_blocks)
