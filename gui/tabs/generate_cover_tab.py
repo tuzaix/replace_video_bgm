@@ -1114,15 +1114,30 @@ class GenerateCoverTab(QtWidgets.QWidget):
 
         # 数值参数：合成封面数、每次拼接截图数、并行数
         row_nums = QtWidgets.QHBoxLayout()
-        self.count_spin = QtWidgets.QSpinBox(); 
-        self.count_spin.setRange(1, 500); 
+        self.count_spin = QtWidgets.QSpinBox();
+        self.count_spin.setRange(1, 500);
         self.count_spin.setValue(10)
-        self.per_cover_spin = QtWidgets.QSpinBox(); 
-        self.per_cover_spin.setRange(1, 10); 
+        # 启用手动输入（键盘编辑与强焦点）
+        try:
+            self._enable_spinbox_manual_input(self.count_spin)
+        except Exception:
+            pass
+
+        self.per_cover_spin = QtWidgets.QSpinBox();
+        self.per_cover_spin.setRange(1, 10);
         self.per_cover_spin.setValue(4)
-        self.workers_spin = QtWidgets.QSpinBox(); 
-        self.workers_spin.setRange(1, 32); 
+        try:
+            self._enable_spinbox_manual_input(self.per_cover_spin)
+        except Exception:
+            pass
+
+        self.workers_spin = QtWidgets.QSpinBox();
+        self.workers_spin.setRange(1, 32);
         self.workers_spin.setValue(4)
+        try:
+            self._enable_spinbox_manual_input(self.workers_spin)
+        except Exception:
+            pass
         row_nums.addWidget(QtWidgets.QLabel("合成封面数"), 0)
         row_nums.addWidget(self.count_spin, 1)
         row_nums.addWidget(QtWidgets.QLabel("每次拼接截图数"), 0)
@@ -1191,6 +1206,31 @@ class GenerateCoverTab(QtWidgets.QWidget):
         splitter.setStretchFactor(2, 1)
         splitter.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         return splitter
+
+    def _enable_spinbox_manual_input(self, sb: QtWidgets.QSpinBox) -> None:
+        """
+        启用 QSpinBox 的手动输入（键盘编辑）。
+
+        目的
+        ----
+        - 允许用户通过键盘直接输入数值（非只读）；
+        - 打开键盘跟踪，使输入过程可实时响应；
+        - 设置强焦点，提升可编辑控件的易用性。
+
+        参数
+        ----
+        sb : QtWidgets.QSpinBox
+            需要启用手动输入的数值控件。
+        """
+        try:
+            sb.setReadOnly(False)
+            sb.setKeyboardTracking(True)
+            sb.setFocusPolicy(QtCore.Qt.StrongFocus)
+            le = sb.lineEdit()
+            if le is not None:
+                le.setReadOnly(False)
+        except Exception:
+            pass
 
     def _build_caption_params_group(self) -> QtWidgets.QGroupBox:
         """构建“字幕参数”分组。
