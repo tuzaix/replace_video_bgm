@@ -406,7 +406,7 @@ class ConcatWorker(QtCore.QObject):
         if not self.video_dirs:
             self.error.emit("请选择至少一个视频目录")
             return
-        out_dir = Path(self.output_dir) if self.output_dir else Path(self.video_dirs[0]).parent / "合成混剪"
+        out_dir = Path(self.output_dir) if self.output_dir else Path(self.video_dirs[0]).parent / "混剪"
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -1131,7 +1131,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         ------
         1) 读取正在运行或刚完成的 worker 的 `output_dir`
         2) 若 UI 中的输出编辑框有值，使用该值
-        3) 若无值，则以首个视频目录的上级目录下的 `合成混剪` 作为默认
+        3) 若无值，则以首个视频目录的上级目录下的 `混剪` 作为默认
 
         Returns
         -------
@@ -1156,7 +1156,7 @@ class VideoConcatTab(QtWidgets.QWidget):
             if self.video_list and self.video_list.count() > 0:
                 first = self.video_list.item(0).text().strip()
                 if first:
-                    return Path(first).parent / "合成混剪"
+                    return Path(first).parent / "混剪"
         except Exception:
             pass
 
