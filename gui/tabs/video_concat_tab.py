@@ -165,6 +165,37 @@ class ConcatWorker(QtCore.QObject):
             return None
         return None
 
+    def _choose_bgm_path(self) -> Optional[Path]:
+        """选择用于混剪的背景音乐文件路径。
+
+        逻辑
+        ----
+        - 若 `self.bgm_path` 指向一个文件，直接返回该文件路径。
+        - 若 `self.bgm_path` 指向一个目录，在其中随机选择一个匹配的音频文件（mp3 / wav）。
+        - 若未指定或未找到匹配项，返回 None。
+
+        Returns
+        -------
+        Optional[Path]
+            选中的 BGM 文件路径；若不可用则为 None。
+        """
+        try:
+            if not self.bgm_path:
+                return None
+            bgm_p = Path(self.bgm_path)
+            if bgm_p.is_file():
+                return bgm_p
+            if bgm_p.is_dir():
+                try:
+                    bgm_files = list(bgm_p.glob("*.mp3")) + list(bgm_p.glob("*.wav"))
+                    if bgm_files:
+                        return random.choice(bgm_files)
+                except Exception:
+                    return None
+        except Exception:
+            return None
+        return None
+
     # ----------------------------- 运行主流程 ----------------------------- #
     @QtCore.Slot()
     def run(self) -> None:
@@ -187,7 +218,7 @@ class ConcatWorker(QtCore.QObject):
         if not self.video_dirs:
             self.error.emit("请选择至少一个视频目录")
             return
-        out_dir = Path(self.output_dir) if self.output_dir else Path(self.video_dirs[0]).parent / "longvideo_outputs"
+        out_dir = Path(self.output_dir) if self.output_dir else Path(self.video_dirs[0]).parent / "合成混剪"
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -286,10 +317,14 @@ class ConcatWorker(QtCore.QObject):
             # 仅使用归一化后的素材作为拼接切片，不再做头尾裁剪
             slices: List[Path] = list(pick)
             out_path = out_dir / f"concat_{idx}.mp4"
+
+            # 根据设置选择合适的 BGM 文件（文件或目录随机）
+            bgm_path = self._choose_bgm_path()
+                    
             vc = VideoConcat(
                 slices=slices,
                 out_path=out_path,
-                bgm_path=Path(self.bgm_path) if self.bgm_path else None,
+                bgm_path=bgm_path,
                 quality=self.quality_profile,
                 use_gpu=True,
             )

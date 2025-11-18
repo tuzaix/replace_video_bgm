@@ -269,18 +269,32 @@ class VideoNormalizer:
             f"总体码率 {sb or '?'} → {ob or '?'}\n"
         )
 
+    # @staticmethod
+    # def _normalized_output_path(in_path: Path, out_dir: Path) -> Path:
+    #     """Return an available output path for normalized video.
+
+    #     This method preserves the previous behavior of generating a unique
+    #     filename by appending a numeric suffix when the base name already
+    #     exists. It is used where we explicitly want distinct outputs.
+    #     """
+    #     base = out_dir / f"{in_path.stem}_normalized.mp4"
+    #     if not base.exists():
+    #         return base
+    #     idx = 1
+    #     while True:
+    #         candidate = out_dir / f"{in_path.stem}_normalized_{idx}.mp4"
+    #         if not candidate.exists():
+    #             return candidate
+    #         idx += 1
+
     @staticmethod
-    def _normalized_output_path(in_path: Path, out_dir: Path) -> Path:
-        """Return output path `<stem>_normalized.mp4`, adding numeric suffix if needed."""
-        base = out_dir / f"{in_path.stem}_normalized.mp4"
-        if not base.exists():
-            return base
-        idx = 1
-        while True:
-            candidate = out_dir / f"{in_path.stem}_normalized_{idx}.mp4"
-            if not candidate.exists():
-                return candidate
-            idx += 1
+    def _base_output_path(in_path: Path, out_dir: Path) -> Path:
+        """Return base output path `<stem>_normalized.mp4` without suffix.
+
+        Used by `normalize()` when `skip_existing=True` to check whether the
+        intended normalized output already exists and skip reprocessing.
+        """
+        return out_dir / f"{in_path.stem}_normalized.mp4"
 
     def _build_ffmpeg_cmd(
         self,
@@ -375,6 +389,7 @@ class VideoNormalizer:
         dst_dir: str,
         trim_head_s: float = 0.0,
         trim_tail_s: float = 0.0,
+        skip_existing: bool = True,
         on_progress: Optional[Callable[[int, int], None]] = None,
     ) -> int:
         """Normalize all videos under `src_dir` and write outputs to `dst_dir`.
@@ -385,6 +400,9 @@ class VideoNormalizer:
             Source directory containing input videos (non-recursive, current directory only).
         dst_dir : str
             Destination directory to store normalized videos (.mp4).
+        skip_existing : bool, default True
+            If True, skip processing when the target normalized output file already
+            exists at `<stem>_normalized.mp4` in `dst_dir`.
         on_progress : Optional[Callable[[int, int], None]]
             Optional callback receiving (done, total) during processing.
         trim_head_s : float, default 0.0
@@ -417,7 +435,11 @@ class VideoNormalizer:
 
         def _process_one(v: Path) -> tuple[bool, int, int, str, Optional[dict], Optional[dict]]:
             try:
-                out_path = VideoNormalizer._normalized_output_path(v, out)
+                # Prefer base path for skip-existing logic
+                out_path = VideoNormalizer._base_output_path(v, out)
+                if skip_existing and out_path.exists():
+                    print(f"⏭️ 目标已存在，跳过 {v.name} → {out_path.name}")
+                    return (True, 0, 0, v.name, None, None)
                 # Probe duration if tail trimming requested, to compute end time
                 start_s = float(trim_head_s or 0.0)
                 end_s: Optional[float] = None

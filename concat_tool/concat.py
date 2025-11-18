@@ -22,17 +22,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List, Optional
-import tempfile
+import random 
 import subprocess
 import shutil
 import os
 
-try:
-    # Optional environment bootstrap; callers may choose to skip.
-    from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env  # type: ignore
-    bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
-except Exception:
-    pass
+from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env  # type: ignore
+bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
+
 from .config import resolve_quality
 
 class VideoConcat:
@@ -72,7 +69,11 @@ class VideoConcat:
         self.use_gpu = use_gpu
 
     def _write_concat_list(self) -> Path:
-        """Create a concat list file alongside `self.out_path`.
+        """Create a concat list file in the same directory as `self.out_path`.
+
+        This avoids using system temporary directories and writes a stable, readable
+        list file under the output directory. A numeric suffix is appended if the
+        base name exists to prevent overwriting.
 
         Returns
         -------
@@ -83,22 +84,24 @@ class VideoConcat:
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
-            # If mkdir fails, fall back to system temp dir
-            out_dir = Path(tempfile.gettempdir())
+            # Do not fallback to system temp per requirement; propagate usage of out_dir
+            pass
 
-        tf = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".txt",
-            mode="w",
-            encoding="utf-8",
-            dir=str(out_dir),
-        )
-        with tf as f:
+        # Determine a deterministic file name next to output
+        # 增加随机数作为后缀
+        base_name = f"{self.out_path.stem}.{random.randint(98888, 100000)}.concat_list.txt"
+        list_path = out_dir / base_name
+        idx = 1
+        while list_path.exists():
+            list_path = out_dir / f"{self.out_path.stem}.concat_list_{idx}.txt"
+            idx += 1
+
+        with open(list_path, "w", encoding="utf-8") as f:
             for p in self.slices:
                 abspath = os.path.abspath(str(p))
                 abspath = abspath.replace("\\", "/")
                 f.write(f"file '{abspath}'\n")
-        return Path(tf.name)
+        return list_path
 
     def _nvenc_available(self) -> bool:
         """Return True if local FFmpeg supports `h264_nvenc` encoder."""
@@ -234,11 +237,14 @@ class VideoConcat:
     def run(self) -> bool:
         """Execute the concat process and write the output file.
 
+        Also cleans up the temporary concat list file created for the run.
+
         Returns
         -------
         bool
             True on success; False otherwise.
         """
+        list_path: Optional[Path] = None
         try:
             list_path = self._write_concat_list()
             cmd = self._build_ffmpeg_cmd(list_path)
@@ -260,6 +266,13 @@ class VideoConcat:
         except Exception as e:
             print(f"[concat] Exception: {e}")
             return False
+        finally:
+            # Cleanup the temporary concat list file
+            try:
+                if list_path is not None and list_path.exists():
+                    list_path.unlink()
+            except Exception:
+                pass
 
 
 __all__ = ["VideoConcat"]
