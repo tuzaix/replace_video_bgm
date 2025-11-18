@@ -37,14 +37,6 @@ from .license_check import (
 )
 from .runtime_paths import runtime_base_dir, resource_path
 
-
-# GPU 检测逻辑已抽出至 gpu_detect 模块；
-# 运行时路径辅助函数抽出至 runtime_paths 模块。
-
-
-
-
-
 def run_preflight_checks(app: QtWidgets.QApplication) -> bool:
     """Run startup preflight checks: GPU requirement and license check.
 
@@ -63,14 +55,14 @@ def run_preflight_checks(app: QtWidgets.QApplication) -> bool:
     bool
         True to continue launching; False to terminate the app.
     """
-    # 1) NVIDIA GPU check
-    try:
-        has_nv = detect_nvidia_gpu()
-    except Exception:
-        has_nv = False
-    if not has_nv:
-        show_no_nvidia_dialog(app)
-        return False
+    # # 1) NVIDIA GPU check
+    # try:
+    #     has_nv = detect_nvidia_gpu()
+    # except Exception:
+    #     has_nv = False
+    # if not has_nv:
+    #     show_no_nvidia_dialog(app)
+    #     return False
 
     # 2) License/authorization check
     try:
