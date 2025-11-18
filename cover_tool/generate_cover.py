@@ -865,6 +865,7 @@ def generate_thumbnail(
     per_cover: int,
     caption_blocks: Optional[list[dict]] = None,
     progress_cb: Optional[callable] = None,
+    should_stop: Optional[callable] = None,
 ) -> int:
     """批量顺序生成封面图片（去并发），并保存到指定输出目录。
 
@@ -875,15 +876,26 @@ def generate_thumbnail(
     - `per_cover`: 每个封面拼接的图片数量。
     - `caption_blocks`: 字幕块列表（含文本、位置、字体参数、颜色与背景透明、描边、对齐等）。
     - `progress_cb`: 可选回调 `(idx, path, (w, h))`，每次生成成功后调用。
+    - `should_stop`: 可选回调，返回 True 时提前终止批量生成。
 
     返回
     - 成功生成的封面数量（int）。
+
+    取消机制
+    - 若提供 `should_stop`，在每次循环开始时检查；为 True 则立即中断生成。
     """
 
     ok_count = 0
     tasks: List[List[str]] = [choose_images(image_paths, per_cover) for _ in range(max(1, int(count)))]
    
     for i, picks in enumerate(tasks, start=1):
+        # 支持外部请求取消：在每次任务开始前检查
+        try:
+            if callable(should_stop) and bool(should_stop()):
+                break
+        except Exception:
+            # 若停止回调异常，忽略并继续生成，避免影响正常流程
+            pass
         # print(f"[queued {i}/{count}] Using images: {', '.join(os.path.basename(p) for p in picks)}")
         try:
             # 生成临时封面并保存到输出目录的 `封面/` 子目录

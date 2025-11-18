@@ -1004,6 +1004,7 @@ class GenerateCoverWorker(QtCore.QObject):
                 per_cover=max(1, int(per_cover)),
                 caption_blocks=caption_blocks,
                 progress_cb=on_cover,
+                should_stop=lambda: self._stopping,
             )
         except Exception as e:
             # import traceback
@@ -1078,7 +1079,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
 
         self.images_dir_edit.setPlaceholderText("选择截图目录…")
         # 默认值便于开发，正式发布要去掉
-        self.images_dir_edit.setText(r"E:\Download\社媒助手\抖音\Miya\截图")
+        self.images_dir_edit.setText(r"E:\Download\社媒助手\抖音\潮汕菲宝\截图")
         browse_images_btn = QtWidgets.QPushButton("浏览…")
         browse_images_btn.clicked.connect(self._on_browse_images_dir)
         row_img = QtWidgets.QHBoxLayout()
@@ -2139,6 +2140,42 @@ class GenerateCoverTab(QtWidgets.QWidget):
                     self._thread.wait(2000)
         except Exception:
             pass
+
+    def is_running(self) -> bool:
+        """Return whether a cover generation task is currently running.
+
+        同时检查线程运行状态与内部 `_is_running` 标志，提供稳健判断。
+
+        Returns
+        -------
+        bool
+            True 表示任务在运行；False 表示空闲或已停止。
+        """
+        try:
+            th_alive = bool(getattr(self, "_thread", None) and self._thread.isRunning())
+        except Exception:
+            th_alive = False
+        return bool(th_alive or getattr(self, "_is_running", False))
+
+    def request_stop(self) -> None:
+        """Public API to gracefully stop the cover generation task.
+
+        公开的停止请求入口：
+        - 优先复用 `_on_stop_clicked()` 的既有 UI 与停止逻辑；
+        - 若不可用则直接调用 `worker.stop()` 并请求线程退出。
+        """
+        try:
+            if hasattr(self, "_on_stop_clicked") and callable(self._on_stop_clicked):
+                self._on_stop_clicked()
+                return
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_worker", None) is not None:
+                self._worker.stop()
+        except Exception:
+            pass
+        self._request_thread_quit()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """窗口关闭事件：确保停止工作者并退出线程以避免 QThread 销毁警告。"""

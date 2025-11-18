@@ -356,7 +356,7 @@ class ExtractFramesTab(QtWidgets.QWidget):
         self.video_dir_edit = QtWidgets.QLineEdit()
         self.video_dir_edit.setPlaceholderText("选择视频目录…")
         # 默认值（可按需调整）
-        self.video_dir_edit.setText("E:\\Download\\社媒助手\\抖音\\Miya-test")
+        self.video_dir_edit.setText(r"E:\Download\社媒助手\抖音\潮汕菲宝")
 
         btn_browse_video = QtWidgets.QPushButton("浏览…")
         btn_browse_video.clicked.connect(self._on_browse_video_dir)
@@ -1081,6 +1081,48 @@ class ExtractFramesTab(QtWidgets.QWidget):
             pass
         self._thread = None
         self._worker = None
+
+    def is_running(self) -> bool:
+        """Return whether a background extraction task is currently running.
+
+        检查线程运行状态与内部 `_is_running` 标志，尽可能给出稳健结果。
+
+        Returns
+        -------
+        bool
+            True 表示任务仍在运行；False 表示空闲或已停止。
+        """
+        try:
+            th_alive = bool(getattr(self, "_thread", None) and self._thread.isRunning())
+        except Exception:
+            th_alive = False
+        return bool(th_alive or getattr(self, "_is_running", False))
+
+    def request_stop(self) -> None:
+        """Request a graceful stop of the extraction workflow.
+
+        公开的停止入口，用于窗口关闭或退出时统一调用：
+        - 优先复用本页既有的 `_stop_task()` 停止逻辑；
+        - 若不可用则直接调用 worker.stop() 并更新按钮状态。
+        """
+        try:
+            if hasattr(self, "_stop_task") and callable(self._stop_task):
+                self._stop_task()
+                return
+        except Exception:
+            pass
+        # 回退：直接停止 worker 并提示按钮状态
+        try:
+            if getattr(self, "_worker", None) is not None:
+                self._worker.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "action_btn") and self.action_btn is not None:
+                self.action_btn.setEnabled(False)
+                self.action_btn.setText("停止中…")
+        except Exception:
+            pass
 
     def _set_form_enabled(self, enabled: bool) -> None:
         """启用/禁用左侧表单控件。"""
