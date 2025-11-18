@@ -1094,9 +1094,73 @@ class VideoConcatTab(QtWidgets.QWidget):
         self._reset_run_state()
 
     def _on_finished(self, success_count: int, fail_count: int) -> None:
-        """任务完成后的状态更新。"""
-        QtWidgets.QMessageBox.information(self, "完成", f"成功 {success_count}，失败 {fail_count}")
-        self._reset_run_state()
+        """任务完成后的状态更新，并提供打开输出目录的操作。"""
+        try:
+            dlg = QtWidgets.QMessageBox(self)
+            dlg.setWindowTitle("完成")
+            dlg.setIcon(QtWidgets.QMessageBox.Information)
+            dlg.setText(f"成功 {success_count}，失败 {fail_count}")
+            open_btn = dlg.addButton("打开目录", QtWidgets.QMessageBox.AcceptRole)
+            close_btn = dlg.addButton("关闭", QtWidgets.QMessageBox.RejectRole)
+            dlg.exec()
+
+            if dlg.clickedButton() == open_btn:
+                out_dir = self._get_effective_output_dir()
+                if out_dir and out_dir.exists():
+                    try:
+                        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(out_dir)))
+                    except Exception:
+                        try:
+                            if os.name == "nt":
+                                os.startfile(str(out_dir))  # type: ignore[attr-defined]
+                            else:
+                                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(out_dir)))
+                        except Exception:
+                            QtWidgets.QMessageBox.warning(self, "提示", f"无法打开目录：{out_dir}")
+                else:
+                    QtWidgets.QMessageBox.warning(self, "提示", "输出目录不存在或不可用")
+        except Exception:
+            QtWidgets.QMessageBox.information(self, "完成", f"成功 {success_count}，失败 {fail_count}")
+        finally:
+            self._reset_run_state()
+
+    def _get_effective_output_dir(self) -> Optional[Path]:
+        """计算当前任务使用的输出目录路径。
+
+        优先级
+        ------
+        1) 读取正在运行或刚完成的 worker 的 `output_dir`
+        2) 若 UI 中的输出编辑框有值，使用该值
+        3) 若无值，则以首个视频目录的上级目录下的 `合成混剪` 作为默认
+
+        Returns
+        -------
+        Optional[Path]
+            有效的输出目录路径；若无法计算则返回 None。
+        """
+        try:
+            if self._worker and getattr(self._worker, "output_dir", ""):
+                return Path(self._worker.output_dir)
+        except Exception:
+            pass
+
+        try:
+            if self.output_edit:
+                text = self.output_edit.text().strip()
+                if text:
+                    return Path(text)
+        except Exception:
+            pass
+
+        try:
+            if self.video_list and self.video_list.count() > 0:
+                first = self.video_list.item(0).text().strip()
+                if first:
+                    return Path(first).parent / "合成混剪"
+        except Exception:
+            pass
+
+        return None
 
     def _on_results(self, paths: List[str]) -> None:
         """将结果填充到表格（路径、分辨率、大小），支持双击打开。"""
