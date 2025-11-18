@@ -21,7 +21,7 @@ from gui.utils import theme
 from gui.utils.table_helpers import ensure_table_headers, resolve_display_name, set_table_row_colors
 from gui.utils.overlay import BusyOverlay
 # 在当前阶段，逐步迁移右侧结果面板的构建到 Tab 内部
-from gui.precheck.preflight import run_preflight_checks
+from gui.precheck import run_preflight_checks
 
 
 def create_concat_tab(parent: Optional[QtWidgets.QWidget] = None) -> Tuple[QtWidgets.QWidget, QtWidgets.QHBoxLayout]:
@@ -51,6 +51,190 @@ def create_concat_tab(parent: Optional[QtWidgets.QWidget] = None) -> Tuple[QtWid
     return tab, root_layout
 
 
+class VideoConcatWorker(QtCore.QObject):
+    """Background worker for video concatenation (tab-local).
+
+    This worker mirrors the structure used in extract_frames_tab.py and bridges
+    signals to the business workflow in ``concat_tool.workflow``. It also
+    exposes a soft ``stop()`` interface to request cancellation.
+
+    Signals
+    -------
+    log(str):
+        Emitted for log lines redirected from stdout/stderr.
+    phase(str):
+        Human-readable phase description.
+    progress(int, int):
+        Progress values (done, total).
+    finished(int, int):
+        Emitted on completion with (success_count, fail_count).
+    results(list):
+        Emitted with a list of successful output file paths.
+    error(str):
+        Emitted when a non-recoverable error occurs or cancellation is requested.
+    """
+
+    log = QtCore.Signal(str)
+    phase = QtCore.Signal(str)
+    progress = QtCore.Signal(int, int)
+    finished = QtCore.Signal(int, int)
+    results = QtCore.Signal(list)
+    error = QtCore.Signal(str)
+
+    def __init__(self, settings_obj: object) -> None:
+        """Initialize the worker with a settings-like object.
+
+        Parameters
+        ----------
+        settings_obj : object
+            An instance compatible with ``concat_tool.settings.Settings``.
+        """
+        super().__init__()
+        self._settings = settings_obj
+        self._stopping = False
+
+    def stop(self) -> None:
+        """Request a soft stop for the running workflow."""
+        self._stopping = True
+
+    def _emit(self, msg: str) -> None:
+        """Emit a log line safely to the GUI."""
+        try:
+            self.log.emit(str(msg))
+        except Exception:
+            pass
+
+    def _validate(self) -> Optional[str]:
+        """Validate required settings fields before running.
+
+        Returns
+        -------
+        Optional[str]
+            Error string if validation fails; otherwise ``None``.
+        """
+        try:
+            from pathlib import Path as _P
+            video_dirs = getattr(self._settings, "video_dirs", [])
+            bgm_path = getattr(self._settings, "bgm_path", "")
+            if not video_dirs:
+                return "请选择至少一个视频目录"
+            for p in video_dirs:
+                d = _P(p)
+                if not d.exists() or not d.is_dir():
+                    return f"视频目录不存在或不是目录: {d}"
+            if not _P(bgm_path).exists():
+                return f"BGM路径不存在: {bgm_path}"
+            threads = int(getattr(self._settings, "threads", 0))
+            width = int(getattr(self._settings, "width", 0))
+            height = int(getattr(self._settings, "height", 0))
+            fps = int(getattr(self._settings, "fps", 0))
+            if threads < 1:
+                return "线程数必须大于0"
+            if width <= 0 or height <= 0:
+                return "width/height 必须为正整数"
+            if fps <= 0:
+                return "fps 必须为正整数"
+        except Exception:
+            return "采集或校验参数失败"
+        return None
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        """Run the video concatenation workflow on a background thread.
+
+        Notes
+        -----
+        - Redirects stdout/stderr to the GUI log via ``log`` signal.
+        - Emits phase/progress/finished/error/results signals to update the UI.
+        - Soft stop is supported via ``stop()``; if requested before start,
+          the worker emits an error and returns early.
+        """
+        if self._stopping:
+            # Cancellation requested before execution
+            try:
+                self.error.emit("任务已取消")
+            except Exception:
+                pass
+            return
+        # Validate settings
+        err = self._validate()
+        if err:
+            try:
+                self.error.emit(err)
+            except Exception:
+                pass
+            return
+        try:
+            # Lazy import business logic to keep GUI import surface minimal
+            from concat_tool.workflow import run_video_concat_workflow, WorkflowCallbacks  # type: ignore
+            # Redirect prints from workflow to GUI log
+            import sys as _sys
+
+            class _StreamRedirect:
+                def __init__(self, write_fn):
+                    self.write_fn = write_fn
+
+                def write(self, s):  # type: ignore[override]
+                    try:
+                        s = str(s)
+                        s = s.replace("\r\n", "\n")
+                        for line in s.split("\n"):
+                            if line:
+                                self.write_fn(line)
+                    except Exception:
+                        pass
+
+                def flush(self):
+                    return
+
+            _orig_out, _orig_err = _sys.stdout, _sys.stderr
+            _sys.stdout = _StreamRedirect(self._emit)
+            _sys.stderr = _StreamRedirect(self._emit)
+
+            callbacks = WorkflowCallbacks(
+                on_log=self._emit,
+                on_phase=self.phase.emit,
+                on_progress=self.progress.emit,
+                on_error=self.error.emit,
+            )
+
+            # Execute business workflow
+            success_count, fail_count, success_outputs = run_video_concat_workflow(self._settings, callbacks)
+
+            # Emit completion signals
+            try:
+                self.finished.emit(success_count, fail_count)
+            except Exception:
+                pass
+            try:
+                self.results.emit(success_outputs or [])
+            except Exception:
+                pass
+            if success_outputs:
+                self._emit("\n🎉 成功生成的文件:")
+                for p in success_outputs:
+                    try:
+                        from pathlib import Path as _P2
+                        size_mb = _P2(p).stat().st_size / (1024 * 1024)
+                        self._emit(f"  - {p} ({size_mb:.1f} MB)")
+                    except Exception:
+                        self._emit(f"  - {p}")
+
+        except Exception as e:
+            try:
+                self.error.emit(str(e))
+            except Exception:
+                pass
+        finally:
+            # Restore stdout/stderr
+            try:
+                import sys as _sys2
+                _sys2.stdout = _orig_out
+                _sys2.stderr = _orig_err
+            except Exception:
+                pass
+
+
 class VideoConcatTab(QtWidgets.QWidget):
     """
     Encapsulated "视频混剪" tab widget.
@@ -72,24 +256,7 @@ class VideoConcatTab(QtWidgets.QWidget):
       compatibility. MainWindow can choose either approach.
     """
 
-    # Signals exposed to MainWindow for worker orchestration
-    start_requested = QtCore.Signal(object)
-    """
-    Emitted when the user requests to start the concat task.
-
-    Payload: a Settings-like object (or dict) that represents the
-    current form values. To keep compatibility during migration,
-    this signal can carry an opaque object. MainWindow remains
-    responsible for creating the VideoConcatWorker and wiring
-    thread lifecycle.
-    """
-
-    stop_requested = QtCore.Signal()
-    """
-    Emitted when the user requests to stop the running task.
-
-    MainWindow should handle soft-stop or cleanup behavior.
-    """
+    # 无需向 MainWindow 暴露信号；线程与生命周期由本 Tab 自行管理
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         """
@@ -102,9 +269,9 @@ class VideoConcatTab(QtWidgets.QWidget):
         """
         super().__init__(parent)
         self.root_layout = QtWidgets.QHBoxLayout(self)
-        # 在当前迁移阶段，Tab 仅作为容器，具体控件仍由 MainWindow 构建并加入到此 root_layout。
-        # 后续将逐步把控件与事件处理迁移到 Tab 内部。
-        # 右侧面板控件占位：由 MainWindow 构建后注入（attach），以便本类的 update_* 方法直接控制
+        # Tab 内部构建左/右面板与分割器，并统一管理控件与线程生命周期。
+        # MainWindow 仅负责注册此标签页，不直接管理右侧控件或信号。
+        # 右侧面板控件引用（进度/结果/按钮）由本 Tab 自行创建并持有。
         self.phase_label: Optional[QtWidgets.QLabel] = None
         self.progress_bar: Optional[QtWidgets.QProgressBar] = None
         self.results_table: Optional[QtWidgets.QTableWidget] = None
@@ -117,6 +284,9 @@ class VideoConcatTab(QtWidgets.QWidget):
         self._output_autofill: bool = True
         # 授权/环境预检通过标记（首过缓存）
         self._preflight_passed: bool = False
+        # 工作线程与工作者引用（由 Tab 统一管理生命周期）
+        self._thread: Optional[QtCore.QThread] = None
+        self._worker: Optional[VideoConcatWorker] = None
 
         # 质量档位与填充模式映射（在本 Tab 内维护一份，便于构建控件与展示）
         self._profile_display_to_code = {
@@ -130,6 +300,13 @@ class VideoConcatTab(QtWidgets.QWidget):
             "裁剪满屏": "crop",
         }
         self._fill_code_to_display = {v: k for k, v in self._fill_display_to_code.items()}
+
+        # 在初始化阶段自动构建页面，保持与 ExtractFramesTab 的结构一致
+        try:
+            self.build_page()
+        except Exception:
+            # 页面构建失败不阻塞窗口初始化，用户将看到空白页
+            pass
 
     def get_root_layout(self) -> QtWidgets.QHBoxLayout:
         """
@@ -728,8 +905,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.start_btn = start_btn
         self.stop_btn = stop_btn
 
-        # 在迁移阶段，将开始/停止按钮的点击信号接入到 Tab 的请求信号上，
-        # 由 MainWindow 统一处理线程生命周期。
+        # 连接开始/停止按钮到本 Tab 的处理方法，线程生命周期由本 Tab 管理。
         try:
             if self.start_btn is not None:
                 self.start_btn.clicked.connect(self._on_start_clicked)
@@ -741,14 +917,27 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     def _on_start_clicked(self) -> None:
         """
-        处理“开始”按钮点击事件。
+        处理“开始”按钮点击事件并启动后台工作者。
 
-        职责：采集当前表单设置并通过 start_requested 信号通知 MainWindow。
-        在首次点击时执行授权/环境预检，未通过则提示并拦截开始。
-
-        注意：实际的工作线程创建与运行由 MainWindow 负责，本方法不直接
-        启动任何耗时任务，确保 UI 模块与业务逻辑解耦。
+        逻辑
+        ----
+        - 首次点击执行授权/环境预检（缓存结果）；失败则提示并拦截。
+        - 采集当前表单设置，进行基础必填校验（视频目录与 BGM 路径）。
+        - 创建并启动 QThread + VideoConcatWorker，连接信号以更新 UI。
+        - 显示结果蒙层并切换运行态样式。
+        
+        说明
+        ----
+        该实现将线程生命周期迁移至 Tab 内部，MainWindow 不再路由开始/停止，
+        以实现更简洁的结构与更强的内聚性。
         """
+        # 已有任务在运行则提示
+        try:
+            if getattr(self, "_thread", None) is not None:
+                QtWidgets.QMessageBox.warning(self, "提示", "已有任务在运行")
+                return
+        except Exception:
+            pass
         # --- 预检授权（只要未通过或尚未检查，就执行一次） ---
         try:
             if not self._preflight_passed:
@@ -774,32 +963,165 @@ class VideoConcatTab(QtWidgets.QWidget):
             settings_obj = self.collect_settings()
         except Exception:
             settings_obj = None
-        # 发出开始请求信号
+        # 基础必填校验（简洁版）
         try:
-            self.start_requested.emit(settings_obj)
+            video_dirs = getattr(settings_obj, "video_dirs", [])
+            bgm_path = getattr(settings_obj, "bgm_path", "")
+            if not video_dirs:
+                QtWidgets.QMessageBox.warning(self, "提示", "请先选择至少一个视频目录")
+                return
+            if not bgm_path:
+                QtWidgets.QMessageBox.warning(self, "提示", "请先选择 BGM 路径（文件或目录）")
+                return
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "提示", "采集参数失败，请检查表单输入")
+            return
+
+        # 显示右下“输出结果”蒙层并禁用列表交互
+        try:
+            self.show_results_overlay()
         except Exception:
             pass
 
+        # 创建并启动后台线程与工作者
+        try:
+            self._thread = QtCore.QThread(self)
+            self._worker = VideoConcatWorker(settings_obj)  # type: ignore[arg-type]
+            self._worker.moveToThread(self._thread)
+            # 线程启动时运行
+            self._thread.started.connect(self._worker.run)
+            # 信号路由到 Tab 的更新接口
+            self._worker.phase.connect(self.set_progress_stage)
+            self._worker.progress.connect(self.set_progress_value)
+            self._worker.finished.connect(self._on_worker_finished)
+            self._worker.results.connect(self.update_results)
+            self._worker.error.connect(self._on_worker_error)
+            self._thread.finished.connect(self._cleanup_thread)
+            self._thread.start()
+            # 切换运行态 UI
+            self.set_running_ui_state(True)
+        except Exception as e:
+            try:
+                QtWidgets.QMessageBox.critical(self, "错误", f"启动任务失败：{e}")
+            except Exception:
+                pass
+            try:
+                self.hide_results_overlay()
+            except Exception:
+                pass
+            self._cleanup_thread()
+
     def _on_stop_clicked(self) -> None:
         """
-        处理“结束”按钮点击事件。
+        处理“结束”按钮点击事件：软停止并清理线程资源。
 
-        职责：通知 MainWindow 执行软停止或清理线程资源。
+        说明
+        ----
+        - 隐藏结果蒙层，避免遮挡交互。
+        - 调用工作者 ``stop()`` 请求软停止（若可用）。
+        - 退出并清理工作线程与工作者引用。
         """
         try:
-            self.stop_requested.emit()
+            self.hide_results_overlay()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_worker", None) is not None and hasattr(self._worker, "stop"):
+                # 请求工作者软停止；随后退出线程事件循环
+                try:
+                    self._worker.stop()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._cleanup_thread()
+
+    def _on_worker_finished(self, ok_count: int, fail_count: int) -> None:
+        """
+        工作者完成事件：更新样式并清理资源。
+
+        参数
+        ----
+        ok_count : int
+            成功输出数量。
+        fail_count : int
+            失败输出数量。
+        """
+        # 完成后以绿色显示块，直到下一次开始
+        try:
+            self.apply_progress_style(chunk_color="#22c55e")
+        except Exception:
+            pass
+        # 关闭蒙层，恢复交互
+        try:
+            self.hide_results_overlay()
+        except Exception:
+            pass
+        self._cleanup_thread()
+
+    def _on_worker_error(self, msg: str) -> None:
+        """
+        工作者错误事件：显示错误并清理资源。
+
+        参数
+        ----
+        msg : str
+            错误信息。
+        """
+        try:
+            QtWidgets.QMessageBox.critical(self, "错误", msg)
+        except Exception:
+            pass
+        try:
+            self.hide_results_overlay()
+        except Exception:
+            pass
+        self._cleanup_thread()
+
+    def _cleanup_thread(self) -> None:
+        """
+        释放线程与工作者资源，并复位运行态 UI。
+
+        说明
+        ----
+        - 退出线程并等待短时间。
+        - 清理引用，避免悬挂对象。
+        - 切换到空闲态并回到 idle 阶段标签。
+        """
+        try:
+            if getattr(self, "_thread", None) is not None:
+                try:
+                    self._thread.quit()
+                    self._thread.wait(2000)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._thread = None
+        self._worker = None
+        # 恢复运行态 UI
+        try:
+            self.set_running_ui_state(False)
+        except Exception:
+            pass
+        # 阶段标签回到 idle，进度值保持不变
+        try:
+            self.set_stage("idle")
         except Exception:
             pass
 
     def _on_action_clicked(self) -> None:
         """单一动作按钮点击事件处理。
 
-        逻辑互斥：
-        - 若当前为空闲（未运行），则触发“开始”，并将按钮文案切换为“结束”；
-        - 若当前为运行中，则触发“结束”，并将按钮文案切换为“开始”。
+        行为
+        ----
+        - 若当前为空闲（未运行），触发“开始”，并切换按钮文案为“结束”。
+        - 若当前为运行中，触发“结束”，并切换按钮文案为“开始”。
 
-        注意：实际运行态以 MainWindow 的生命周期控制为准；本方法仅发出请求信号，
-        UI 的最终状态由 set_running_ui_state 同步更新，确保一致性。
+        说明
+        ----
+        - 本方法负责在 Tab 范围内发起开始/停止请求并更新按钮的即时文案。
+        - 运行态的最终一致性由 `set_running_ui_state` 统一同步，不依赖外部窗口回退。
         """
         try:
             running = bool(getattr(self, "_is_running", False))
@@ -981,30 +1303,53 @@ class VideoConcatTab(QtWidgets.QWidget):
             # 样式失败不影响功能
             pass
 
-    # ---- Transitional UI update helpers (delegating to MainWindow) ----
-    def update_progress(self, done: int, total: int) -> None:
+    def is_running(self) -> bool:
         """
-        Update progress on the tab.
+        判断当前 Tab 是否有后台任务在运行。
 
-        During the migration phase, delegate to MainWindow's
-        existing handler if available. This keeps behavior unchanged
-        while providing a clear tab-level API.
+        Returns
+        -------
+        bool
+            True 表示正在运行（存在活动线程或运行态标记为真），否则为 False。
+
+        Notes
+        -----
+        - 该方法为 MainWindow 提供一个稳定的公共接口，用于在关闭或退出时判断是否需要提示或隐藏到托盘。
+        - 逻辑采用双重判定：优先检查后台线程是否存在且处于运行中；其次回退到 `_is_running` 逻辑标记。
         """
-        # 优先更新注入到 Tab 的控件
-        if self.progress_bar is not None:
-            try:
-                self.progress_bar.setMaximum(total)
-                self.progress_bar.setValue(done)
-            except Exception:
-                pass
-            return
-        # 迁移阶段：回退到 MainWindow 的处理器
         try:
-            mw = self._get_main_window()
-            if mw and hasattr(mw, "_on_progress"):
-                mw._on_progress(done, total)
+            th = getattr(self, "_thread", None)
+            if th is not None:
+                try:
+                    return bool(th.isRunning())
+                except Exception:
+                    # 无法检测运行态则回退到存在线程即认为在运行
+                    return True
+            # 线程对象不存在时，使用内部运行态标记
+            return bool(getattr(self, "_is_running", False))
         except Exception:
+            return False
+
+    def request_stop(self) -> None:
+        """
+        请求停止当前任务并进行必要的资源清理。
+
+        行为
+        ----
+        - 触发 Tab 内部的软停止逻辑（当前实现调用 `_on_stop_clicked`）。
+        - 统一入口供 MainWindow 在退出/隐藏到托盘时调用，避免窗口直接访问私有方法。
+
+        注意
+        ----
+        - `VideoConcatWorker` 目前不提供显式的 `stop()` 接口；停止通过退出线程事件循环完成。
+        - 若未来引入更优雅的停止机制（例如 worker.stop()），只需在此方法内部升级实现，MainWindow 无需改动。
+        """
+        try:
+            self._on_stop_clicked()
+        except Exception:
+            # 停止失败不抛至上层，确保退出流程可继续
             pass
+
 
     def update_phase(self, phase_text: str) -> None:
         """
@@ -1013,7 +1358,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         说明：
         - 原先显示在独立 QLabel 的阶段文字，现统一并入进度条的文字中；
         - 颜色样式依旧根据阶段键应用，保证运行态的视觉反馈一致；
-        - 若进度条不可用，则回退到 MainWindow 的处理器。
+        - 若进度控件尚未构建，静默返回。
         """
         # 归一化阶段键与展示文本
         try:
@@ -1024,7 +1369,9 @@ class VideoConcatTab(QtWidgets.QWidget):
             display_text = theme.STAGE_TEXT_MAP.get(stage_key, phase_text)
         except Exception:
             display_text = phase_text
-        # 优先更新注入到 Tab 的控件
+        # 更新 Tab 内的进度控件
+        if self.progress_bar is None:
+            return
         if self.progress_bar is not None:
             try:
                 # 将阶段文本合并到进度条的显示文字中
@@ -1035,13 +1382,6 @@ class VideoConcatTab(QtWidgets.QWidget):
             except Exception:
                 pass
             return
-        # 迁移阶段：回退到 MainWindow 的处理器
-        try:
-            mw = self._get_main_window()
-            if mw and hasattr(mw, "_on_phase"):
-                mw._on_phase(display_text)
-        except Exception:
-            pass
 
     def apply_progress_style(self, chunk_color: str = "#3b82f6") -> None:
         """
@@ -1168,20 +1508,19 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     def set_progress_value(self, value: int, total: int = 1000) -> None:
         """
-        Alias for update_progress to provide a more semantic API name.
+        设置进度条当前值（语义化别名），等价于 `update_progress`。
 
-        Parameters
-        ----------
+        参数
+        ----
         value : int
-            Current progress on a fixed or dynamic scale.
-        total : int, default 1000
-            The total units of progress. Defaults to 1000 to match worker emissions.
+            当前进度值（固定或动态量纲）。
+        total : int, 默认 1000
+            总进度单位，默认与工作线程的发射值保持一致。
 
-        Notes
-        -----
-        - This method simply forwards to update_progress(value, total).
-        - Keeping both names allows MainWindow and future code to use
-          a unified, semantic interface.
+        说明
+        ----
+        - 仅更新 Tab 内的进度控件，不涉及任何外部回退逻辑。
+        - 提供语义化 API 名称，便于调用方表达意图。
         """
         try:
             self.update_progress(value, total)
@@ -1190,17 +1529,17 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     def set_progress_stage(self, stage_text: str) -> None:
         """
-        Alias for update_phase to provide a more semantic API name.
+        设置阶段文字（语义化别名），等价于 `update_phase`。
 
-        Parameters
-        ----------
+        参数
+        ----
         stage_text : str
-            The user-visible phase text, e.g., "预处理", "拼接", "完成".
+            用户可见的阶段文字，如 "预处理"、"拼接"、"完成"。
 
-        Notes
-        -----
-        - This method simply forwards to update_phase(stage_text).
-        - Keeping both names allows callers to express intent more clearly.
+        说明
+        ----
+        - 仅更新 Tab 内的进度控件，不涉及任何外部回退逻辑。
+        - 保留语义化接口以提升可读性和可维护性。
         """
         try:
             self.update_phase(stage_text)
@@ -1229,10 +1568,17 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     def update_results(self, paths: List[str]) -> None:
         """
-        Populate result items in the tab.
-        在迁移阶段，优先由 Tab 直接填充 results_table；若表格尚未注入，回退到
-        MainWindow 的处理器以保持行为。
+        填充结果表数据（路径、文件名、大小）。
+
+        行为
+        ----
+        - 规范化路径并检测存在性，填充到结果表。
+        - 应用行配色与列宽调整以提升可读性。
+        - 若结果表尚未构建，静默返回。
         """
+        # 仅在表格存在时进行填充
+        if self.results_table is None:
+            return
         # 优先更新注入到 Tab 的控件
         if self.results_table is not None:
             try:
@@ -1281,19 +1627,12 @@ class VideoConcatTab(QtWidgets.QWidget):
                         pass
                 except Exception:
                     pass
-            # 迁移：填充完成后统一调整列宽
+            # 填充完成后统一调整列宽
             try:
                 self._adjust_results_columns()
             except Exception:
                 pass
             return
-        # 迁移阶段：完全回退到 MainWindow 的处理器
-        try:
-            mw = self._get_main_window()
-            if mw and hasattr(mw, "_on_results_ready"):
-                mw._on_results_ready(paths)
-        except Exception:
-            pass
 
     def get_selected_paths(self) -> List[Path]:
         """
@@ -1541,23 +1880,6 @@ class VideoConcatTab(QtWidgets.QWidget):
             pass
         return None
 
-    def _get_main_window(self) -> Optional[QtWidgets.QWidget]:
-        """
-        Return the top-level MainWindow if available.
-
-        This helper navigates the parent chain to find the hosting
-        main window. It is used to delegate updates during the
-        transition period.
-        """
-        try:
-            p = self.parent()
-            while p is not None:
-                if isinstance(p, QtWidgets.QMainWindow):
-                    return p
-                p = p.parent()
-        except Exception:
-            pass
-        return None
 
     def on_results_table_double_clicked(self, item: QtWidgets.QTableWidgetItem) -> None:
         """Handle double-click on a results table row: reveal the file in the system explorer."""

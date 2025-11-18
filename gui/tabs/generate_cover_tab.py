@@ -2089,6 +2089,11 @@ class GenerateCoverTab(QtWidgets.QWidget):
         except Exception:
             pass
         self._set_running_ui(False)
+        # 完成后提供打开目录的快捷提示
+        try:
+            self._prompt_open_dir_after_finish(out_dir)
+        except Exception:
+            pass
 
     def _on_error(self, msg: str) -> None:
         """错误时提示并复位控件。"""
@@ -2117,6 +2122,35 @@ class GenerateCoverTab(QtWidgets.QWidget):
                 self.action_btn.setToolTip("点击停止" if running else "点击开始")
                 self._apply_action_button_style(running=running)
         except Exception:
+            pass
+
+    def _prompt_open_dir_after_finish(self, out_dir: str) -> None:
+        """在封面任务完成后弹出提示框，提供“打开目录/取消”选项。
+
+        参数
+        ----
+        out_dir : str
+            封面输出目录。当用户点击“打开目录”时，用系统文件管理器打开该目录。
+        """
+        try:
+            if not out_dir or not os.path.isdir(out_dir):
+                return
+            msg = QtWidgets.QMessageBox(self)
+            msg.setWindowTitle("提示")
+            msg.setIcon(QtWidgets.QMessageBox.Information)
+            msg.setText("封面生成已完成，是否打开封面目录？")
+            open_btn = msg.addButton("打开目录", QtWidgets.QMessageBox.AcceptRole)
+            cancel_btn = msg.addButton("取消", QtWidgets.QMessageBox.RejectRole)
+            msg.exec()
+            if msg.clickedButton() == open_btn:
+                opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(out_dir))
+                if not opened:
+                    try:
+                        os.startfile(out_dir)
+                    except Exception:
+                        pass
+        except Exception:
+            # 保持安静失败，不影响主流程
             pass
 
     def _on_action_clicked(self) -> None:
