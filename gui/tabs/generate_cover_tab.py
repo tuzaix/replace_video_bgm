@@ -1455,6 +1455,7 @@ class GenerateCoverTab(QtWidgets.QWidget):
         phase_row.addWidget(self.phase_label, 1)
         gpl.addLayout(phase_row)
 
+
         row_progress = QtWidgets.QHBoxLayout()
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -1479,6 +1480,11 @@ class GenerateCoverTab(QtWidgets.QWidget):
         layout.addWidget(group_progress)
 
         # 结果表
+        result_group = QtWidgets.QGroupBox("执行结果")
+        result_vbox = QtWidgets.QVBoxLayout(result_group)
+        result_vbox.setContentsMargins(8, 8, 8, 8)
+        result_vbox.setSpacing(8)
+
         self.results_table = QtWidgets.QTableWidget(0, 2)
         self.results_table.setHorizontalHeaderLabels(["封面路径", "分辨率"])
         # 设置列宽比例为 70% / 30%，并在容器尺寸变化时保持比例
@@ -1500,7 +1506,8 @@ class GenerateCoverTab(QtWidgets.QWidget):
             self._apply_results_table_column_ratio()
         except Exception:
             pass
-        layout.addWidget(self.results_table, 1)
+        result_vbox.addWidget(self.results_table, 1)
+        layout.addWidget(result_group)
         return container
 
     def _on_align_changed(self) -> None:
@@ -2293,19 +2300,23 @@ class GenerateCoverTab(QtWidgets.QWidget):
         danger_bg = theme.DANGER_RED
         danger_bg_hover = theme.DANGER_RED_HOVER
 
-        idle_style = (
-            f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{theme.BUTTON_PADDING_VERTICAL}px {theme.BUTTON_PADDING_HORIZONTAL}px;"
-            f"border:none;border-radius:{theme.BUTTON_RADIUS}px;color:#ffffff;background-color:{primary_bg};}}"
-            f"QPushButton:hover{{background-color:{primary_bg_hover};}}"
-            f"QPushButton:pressed{{background-color:{primary_bg_hover};}}"
-            f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#93c5fd;}}"
+        idle_style = theme.build_button_stylesheet(
+            height=height,
+            bg_color=primary_bg,
+            hover_color=primary_bg_hover,
+            disabled_bg=theme.PRIMARY_BLUE_DISABLED,
+            radius=theme.BUTTON_RADIUS,
+            pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+            pad_v=theme.BUTTON_PADDING_VERTICAL,
         )
-        running_style = (
-            f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{theme.BUTTON_PADDING_VERTICAL}px {theme.BUTTON_PADDING_HORIZONTAL}px;"
-            f"border:none;border-radius:{theme.BUTTON_RADIUS}px;color:#ffffff;background-color:{danger_bg};}}"
-            f"QPushButton:hover{{background-color:{danger_bg_hover};}}"
-            f"QPushButton:pressed{{background-color:{danger_bg_hover};}}"
-            f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#fca5a5;}}"
+        running_style = theme.build_button_stylesheet(
+            height=height,
+            bg_color=danger_bg,
+            hover_color=danger_bg_hover,
+            disabled_bg=theme.DANGER_RED_DISABLED,
+            radius=theme.BUTTON_RADIUS,
+            pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+            pad_v=theme.BUTTON_PADDING_VERTICAL,
         )
 
         try:

@@ -545,7 +545,7 @@ class ExtractFramesTab(QtWidgets.QWidget):
         # 双击行打开对应分辨率子目录
         self.results_table.cellDoubleClicked.connect(self._on_results_double_clicked)
 
-        group_results = QtWidgets.QGroupBox("截图文件目录")
+        group_results = QtWidgets.QGroupBox("执行结果")
         grl = QtWidgets.QVBoxLayout(group_results)
         grl.setContentsMargins(6, 6, 6, 6)
         grl.addWidget(self.results_table)
@@ -1275,19 +1275,23 @@ class ExtractFramesTab(QtWidgets.QWidget):
         gray_bg = theme.GRAY_BG
         gray_text = theme.GRAY_TEXT
 
-        idle_style = (
-            f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{theme.BUTTON_PADDING_VERTICAL}px {theme.BUTTON_PADDING_HORIZONTAL}px;"
-            f"border:none;border-radius:{theme.BUTTON_RADIUS}px;color:#ffffff;background-color:{primary_bg};}}"
-            f"QPushButton:hover{{background-color:{primary_bg_hover};}}"
-            f"QPushButton:pressed{{background-color:{primary_bg_hover};}}"
-            f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#93c5fd;}}"
+        idle_style = theme.build_button_stylesheet(
+            height=height,
+            bg_color=primary_bg,
+            hover_color=primary_bg_hover,
+            disabled_bg=theme.PRIMARY_BLUE_DISABLED,
+            radius=theme.BUTTON_RADIUS,
+            pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+            pad_v=theme.BUTTON_PADDING_VERTICAL,
         )
-        running_style = (
-            f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{theme.BUTTON_PADDING_VERTICAL}px {theme.BUTTON_PADDING_HORIZONTAL}px;"
-            f"border:none;border-radius:{theme.BUTTON_RADIUS}px;color:#ffffff;background-color:{danger_bg};}}"
-            f"QPushButton:hover{{background-color:{danger_bg_hover};}}"
-            f"QPushButton:pressed{{background-color:{danger_bg_hover};}}"
-            f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#fca5a5;}}"
+        running_style = theme.build_button_stylesheet(
+            height=height,
+            bg_color=danger_bg,
+            hover_color=danger_bg_hover,
+            disabled_bg=theme.DANGER_RED_DISABLED,
+            radius=theme.BUTTON_RADIUS,
+            pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+            pad_v=theme.BUTTON_PADDING_VERTICAL,
         )
 
         try:

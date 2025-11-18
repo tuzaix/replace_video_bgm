@@ -511,7 +511,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         vbox.setSpacing(10)
 
         # 顶部控制区（分组：执行状态）
-        status_group = QtWidgets.QGroupBox("执行状态")
+        status_group = QtWidgets.QGroupBox("运行状态")
         status_vbox = QtWidgets.QVBoxLayout(status_group)
         status_vbox.setContentsMargins(8, 8, 8, 8)
         status_vbox.setSpacing(8)
@@ -629,23 +629,24 @@ class VideoConcatTab(QtWidgets.QWidget):
             primary_bg_hover = theme.PRIMARY_BLUE_HOVER
             danger_bg = theme.DANGER_RED
             danger_bg_hover = theme.DANGER_RED_HOVER
-            pad_v = int(theme.BUTTON_PADDING_VERTICAL)
-            pad_h = int(theme.BUTTON_PADDING_HORIZONTAL)
-            radius = int(theme.BUTTON_RADIUS)
-
-            idle_style = (
-                f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{pad_v}px {pad_h}px;"
-                f"border:none;border-radius:{radius}px;color:#ffffff;background-color:{primary_bg};}}"
-                f"QPushButton:hover{{background-color:{primary_bg_hover};}}"
-                f"QPushButton:pressed{{background-color:{primary_bg_hover};}}"
-                f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#93c5fd;}}"
+           
+            idle_style = theme.build_button_stylesheet(
+                height=height,
+                bg_color=primary_bg,
+                hover_color=primary_bg_hover,
+                disabled_bg=theme.PRIMARY_BLUE_DISABLED,
+                radius=theme.BUTTON_RADIUS,
+                pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+                pad_v=theme.BUTTON_PADDING_VERTICAL,
             )
-            running_style = (
-                f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{pad_v}px {pad_h}px;"
-                f"border:none;border-radius:{radius}px;color:#ffffff;background-color:{danger_bg};}}"
-                f"QPushButton:hover{{background-color:{danger_bg_hover};}}"
-                f"QPushButton:pressed{{background-color:{danger_bg_hover};}}"
-                f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#fca5a5;}}"
+            running_style = theme.build_button_stylesheet(
+                height=height,
+                bg_color=danger_bg,
+                hover_color=danger_bg_hover,
+                disabled_bg=theme.DANGER_RED_DISABLED,
+                radius=theme.BUTTON_RADIUS,
+                pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+                pad_v=theme.BUTTON_PADDING_VERTICAL,
             )
 
             # 采用与进度条一致的字体大小

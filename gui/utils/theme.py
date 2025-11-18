@@ -12,10 +12,12 @@ cross-module GUI dependencies.
 # Primary brand colors
 PRIMARY_BLUE = "#2563eb"         # Tailwind blue-600
 PRIMARY_BLUE_HOVER = "#1d4ed8"   # Tailwind blue-700
+PRIMARY_BLUE_DISABLED = "#93c5fd" # Tailwind blue-300
 
 # Danger/accent colors
 DANGER_RED = "#ef4444"           # Tailwind red-500
 DANGER_RED_HOVER = "#dc2626"     # Tailwind red-600
+DANGER_RED_DISABLED = "#fca5a5"  # Tailwind red-300
 
 # Neutral colors
 GRAY_BG = "#e5e7eb"              # Tailwind gray-200
@@ -127,4 +129,61 @@ def build_progressbar_stylesheet(height: int, chunk_color: str = PRIMARY_BLUE) -
     return (
         f"QProgressBar{{min-height:{h}px;max-height:{h}px;border:1px solid #bbb;border-radius:4px;text-align:center;}}"
         f"QProgressBar::chunk{{background-color:{color};margin:0px;}}"
+    )
+
+
+def build_button_stylesheet(
+    height: int,
+    bg_color: str,
+    hover_color: str,
+    text_color: str = "#ffffff",
+    disabled_bg: str | None = None,
+    radius: int = BUTTON_RADIUS,
+    pad_h: int = BUTTON_PADDING_HORIZONTAL,
+    pad_v: int = BUTTON_PADDING_VERTICAL,
+) -> str:
+    """构造统一的 QPushButton 样式字符串（QSS）。
+
+    Parameters
+    ----------
+    height : int
+        按钮高度，应用到 min/max-height。
+    bg_color : str
+        默认背景色。
+    hover_color : str
+        悬停/按压背景色。
+    text_color : str, optional
+        文字颜色，默认白色。
+    disabled_bg : str | None, optional
+        禁用态背景色，默认与 bg_color 一致。
+    radius : int, optional
+        圆角半径，默认使用主题常量。
+    pad_h : int, optional
+        水平内边距，默认使用主题常量。
+    pad_v : int, optional
+        垂直内边距，默认使用主题常量。
+
+    Returns
+    -------
+    str
+        可用于 `QPushButton.setStyleSheet` 的 QSS 字符串。
+    """
+    try:
+        h = int(height)
+    except Exception:
+        h = BUTTON_HEIGHT
+    try:
+        base = str(bg_color)
+    except Exception:
+        base = PRIMARY_BLUE
+    try:
+        hover = str(hover_color)
+    except Exception:
+        hover = PRIMARY_BLUE_HOVER
+    dis_bg = str(disabled_bg) if disabled_bg else base
+    return (
+        f"QPushButton{{min-height:{h}px;max-height:{h}px;padding:{pad_v}px {pad_h}px;border:none;border-radius:{radius}px;color:{text_color};background-color:{base};}}"
+        f"QPushButton:hover{{background-color:{hover};}}"
+        f"QPushButton:pressed{{background-color:{hover};}}"
+        f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:{dis_bg};}}"
     )
