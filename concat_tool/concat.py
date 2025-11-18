@@ -30,6 +30,9 @@ import os
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env  # type: ignore
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
 
+# Hardware encoder detection utilities
+from utils.gpu_detect import is_nvenc_available
+from utils.xprint import xprint
 from .config import resolve_quality
 
 class VideoConcat:
@@ -103,26 +106,26 @@ class VideoConcat:
                 f.write(f"file '{abspath}'\n")
         return list_path
 
-    def _nvenc_available(self) -> bool:
-        """Return True if local FFmpeg supports `h264_nvenc` encoder."""
-        ffmpeg_bin = shutil.which("ffmpeg")
-        if not ffmpeg_bin:
-            return False
-        try:
-            res = subprocess.run([ffmpeg_bin, "-hide_banner", "-encoders"], capture_output=True)
-            if res.returncode != 0:
-                return False
-            stdout = ""
-            try:
-                stdout = (res.stdout or b"").decode("utf-8", errors="ignore")
-            except Exception:
-                try:
-                    stdout = (res.stdout or b"").decode("mbcs", errors="ignore")
-                except Exception:
-                    stdout = ""
-            return "h264_nvenc" in stdout
-        except Exception:
-            return False
+    # def _nvenc_available(self) -> bool:
+    #     """Return True if local FFmpeg supports `h264_nvenc` encoder."""
+    #     ffmpeg_bin = shutil.which("ffmpeg")
+    #     if not ffmpeg_bin:
+    #         return False
+    #     try:
+    #         res = subprocess.run([ffmpeg_bin, "-hide_banner", "-encoders"], capture_output=True)
+    #         if res.returncode != 0:
+    #             return False
+    #         stdout = ""
+    #         try:
+    #             stdout = (res.stdout or b"").decode("utf-8", errors="ignore")
+    #         except Exception:
+    #             try:
+    #                 stdout = (res.stdout or b"").decode("mbcs", errors="ignore")
+    #             except Exception:
+    #                 stdout = ""
+    #         return "h264_nvenc" in stdout
+    #     except Exception:
+    #         return False
 
     def _build_ffmpeg_cmd(self, list_path: Path) -> List[str]:
         """Build the FFmpeg command for concat and optional BGM replacement.
@@ -166,7 +169,7 @@ class VideoConcat:
         q_nvenc_cq, q_x264_crf, q_audio_bitrate = resolve_quality(self.quality)
 
         cmd = base.copy()
-        if self.use_gpu and self._nvenc_available():
+        if self.use_gpu and is_nvenc_available():
             cmd += [
                 "-c:v",
                 "h264_nvenc",
@@ -249,7 +252,7 @@ class VideoConcat:
             list_path = self._write_concat_list()
             cmd = self._build_ffmpeg_cmd(list_path)
             # Print for debugging/traceability
-            print("[concat] ffmpeg cmd:", " ".join(cmd))
+            xprint("[concat] ffmpeg cmd:", " ".join(cmd))
             res = subprocess.run(cmd, capture_output=True)
             if res.returncode == 0 and self.out_path.exists():
                 return True
@@ -261,10 +264,10 @@ class VideoConcat:
                     stderr_text = (res.stderr or b"").decode("mbcs", errors="ignore")
                 except Exception:
                     stderr_text = ""
-            print("[concat] ffmpeg failed, stderr tail:\n", stderr_text[-800:])
+            xprint("[concat] ffmpeg failed, stderr tail:\n", stderr_text[-800:])
             return False
         except Exception as e:
-            print(f"[concat] Exception: {e}")
+            xprint(f"[concat] Exception: {e}")
             return False
         finally:
             # Cleanup the temporary concat list file

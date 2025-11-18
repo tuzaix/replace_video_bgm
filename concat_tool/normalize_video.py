@@ -33,6 +33,7 @@ except Exception:
 
 # Hardware encoder detection utilities
 from utils.gpu_detect import is_nvenc_available
+from utils.xprint import xprint
 
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".m4v"}
 
@@ -226,9 +227,9 @@ class VideoNormalizer:
     @staticmethod
     def _print_attr_diff(name: str, src_attrs: Optional[dict], out_attrs: Optional[dict]) -> None:
         """Print attribute mapping lines for debug comparing original vs normalized output."""
-        print(f"🔍 属性对比 {name}:")
+        xprint(f"🔍 属性对比 {name}:")
         if not src_attrs or not out_attrs:
-            print("  (ffprobe 不可用或属性获取失败)\n")
+            xprint("  (ffprobe 不可用或属性获取失败)\n")
             return
 
         sv = src_attrs.get("video") or {}
@@ -250,20 +251,20 @@ class VideoNormalizer:
             fps = x.get("fps")
             return f"{fps:.2f}" if isinstance(fps, (float, int)) and fps else "?"
 
-        print(
+        xprint(
             "  视频: "
             f"分辨率 {fmt_res(sv)} → {fmt_res(ov)}; "
             f"帧率 {fmt_fps(sv)} → {fmt_fps(ov)}; "
             f"像素 {sv.get('pix_fmt') or '?'} → {ov.get('pix_fmt') or '?'}; "
             f"编码 {sv.get('codec') or '?'} → {ov.get('codec') or '?'}"
         )
-        print(
+        xprint(
             "  音频: "
             f"编码 {sa.get('codec') or '?'} → {oa.get('codec') or '?'}; "
             f"采样率 {sa.get('sample_rate') or '?'} → {oa.get('sample_rate') or '?'}; "
             f"声道 {sa.get('channels') or '?'} → {oa.get('channels') or '?'}"
         )
-        print(
+        xprint(
             "  容器/码率: "
             f"容器 {so or '?'} → {oo or '?'}; "
             f"总体码率 {sb or '?'} → {ob or '?'}\n"
@@ -380,7 +381,7 @@ class VideoNormalizer:
             "-ac", "2",
             str(out_path),
         ]
-        print(f"ffmpeg 命令: {' '.join(cmd)}")
+        xprint(f"ffmpeg 命令: {' '.join(cmd)}")
         return cmd
 
     def normalize(
@@ -422,7 +423,7 @@ class VideoNormalizer:
         videos = VideoNormalizer.find_videos(src)
         total = len(videos)
         if total == 0:
-            print("❌ 未在输入目录找到可处理的视频")
+            xprint("❌ 未在输入目录找到可处理的视频")
             return 0
 
         ffmpeg_bin = shutil.which("ffmpeg")
@@ -438,7 +439,7 @@ class VideoNormalizer:
                 # Prefer base path for skip-existing logic
                 out_path = VideoNormalizer._base_output_path(v, out)
                 if skip_existing and out_path.exists():
-                    print(f"⏭️ 目标已存在，跳过 {v.name} → {out_path.name}")
+                    xprint(f"⏭️ 目标已存在，跳过 {v.name} → {out_path.name}")
                     return (True, 0, 0, v.name, None, None)
                 # Probe duration if tail trimming requested, to compute end time
                 start_s = float(trim_head_s or 0.0)
@@ -472,10 +473,10 @@ class VideoNormalizer:
                         stderr_text = (res.stderr or b"").decode("mbcs", errors="ignore")
                     except Exception:
                         stderr_text = ""
-                print(f"❌ 归一化失败 {v.name}: {stderr_text[-500:]}")
+                xprint(f"❌ 归一化失败 {v.name}: {stderr_text[-500:]}")
                 return (False, 0, 0, v.name, None, None)
             except Exception as e:
-                print(f"❌ 归一化异常 {v.name}: {e}")
+                xprint(f"❌ 归一化异常 {v.name}: {e}")
                 return (False, 0, 0, v.name, None, None)
 
         done = 0
@@ -492,10 +493,10 @@ class VideoNormalizer:
                         fmt_new = VideoNormalizer._format_size(new_sz)
                         pct = VideoNormalizer._percent_change(orig_sz, new_sz)
                         if pct is None:
-                            print(f"✅ {name} 大小: 原始 {fmt_orig} → 新 {fmt_new}")
+                            xprint(f"✅ {name} 大小: 原始 {fmt_orig} → 新 {fmt_new}")
                         else:
                             sign = "-" if pct >= 0 else "+"
-                            print(f"✅ {name} 大小: 原始 {fmt_orig} → 新 {fmt_new} 变化 {sign}{abs(pct):.2f}%")
+                            xprint(f"✅ {name} 大小: 原始 {fmt_orig} → 新 {fmt_new} 变化 {sign}{abs(pct):.2f}%")
                         # Print attribute mapping for debug
                         # VideoNormalizer._print_attr_diff(name, src_attrs, out_attrs)
                 except Exception:
@@ -513,12 +514,12 @@ class VideoNormalizer:
             fmt_n = VideoNormalizer._format_size(new_total)
             overall_pct = VideoNormalizer._percent_change(original_total, new_total)
             if overall_pct is None:
-                print(f"📦 总体大小: 原始 {fmt_o} → 新 {fmt_n}")
+                xprint(f"📦 总体大小: 原始 {fmt_o} → 新 {fmt_n}")
             else:
                 sign = "-" if overall_pct >= 0 else "+"
-                print(f"📦 总体大小: 原始 {fmt_o} → 新 {fmt_n} 变化 {sign}{abs(overall_pct):.2f}%")
+                xprint(f"📦 总体大小: 原始 {fmt_o} → 新 {fmt_n} 变化 {sign}{abs(overall_pct):.2f}%")
 
-        print(f"✅ 已归一化 {ok_count}/{total} 个视频 → {out}")
+        xprint(f"✅ 已归一化 {ok_count}/{total} 个视频 → {out}")
         return ok_count
 
 

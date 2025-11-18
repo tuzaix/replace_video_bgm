@@ -34,6 +34,7 @@ import os
 import shutil
 import subprocess
 import random
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -894,7 +895,13 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     # ----------------------------- 交互逻辑 ----------------------------- #
     def _on_add_video_dir(self) -> None:
-        """添加一个视频目录到列表。"""
+        """添加一个视频目录到列表，并动态更新“混剪输出”目录。
+
+        逻辑
+        ----
+        - 支持一次选择多个目录，逐一去重后添加到列表。
+        - 成功添加后，将下方“混剪输出”设置为“最后一个新增目录/混剪”。
+        """
         dlg = QtWidgets.QFileDialog(self, "选择视频目录")
         dlg.setFileMode(QtWidgets.QFileDialog.Directory)
         dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
@@ -902,6 +909,7 @@ class VideoConcatTab(QtWidgets.QWidget):
             dirs = dlg.selectedFiles()
             if not self.video_list:
                 return
+            last_added: Optional[str] = None
             for d in dirs:
                 if d and os.path.isdir(d):
                     # 避免重复
@@ -912,6 +920,14 @@ class VideoConcatTab(QtWidgets.QWidget):
                             break
                     if not exists:
                         self.video_list.addItem(d)
+                        last_added = d
+
+            # 动态更新“混剪输出”为“最后一个新增目录/混剪”
+            try:
+                if last_added and self.output_edit:
+                    self.output_edit.setText(os.path.join(last_added, "混剪"))
+            except Exception:
+                pass
 
     def _on_remove_selected_dirs(self) -> None:
         """移除列表中选中的目录。"""
@@ -1189,10 +1205,14 @@ class VideoConcatTab(QtWidgets.QWidget):
         """将结果填充到表格（路径、分辨率、大小），支持双击打开。"""
         self.results_table.setRowCount(0)
         for p in paths:
-            dur = self._worker._probe_duration(Path(p))
+            pt = Path(p)
+            dur = self._worker._probe_duration(pt)
+            # 秒转换成 HH:MM:SS
+            if dur:
+                dur = time.strftime("%H:%M:%S", time.gmtime(dur))
             
             try:
-                size_mb = Path(p).stat().st_size / (1024 * 1024)
+                size_mb = pt.stat().st_size / (1024 * 1024)
                 size_text = f"{size_mb:.1f} MB"
             except Exception:
                 size_text = "?"

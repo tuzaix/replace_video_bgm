@@ -64,6 +64,7 @@ def is_nvenc_available(timeout: int = 8) -> bool:
         Subprocess timeout in seconds.
     """
     enc = ffmpeg_output(["-hide_banner", "-encoders"], timeout)
+    # return False
     return ("h264_nvenc" in enc) or ("hevc_nvenc" in enc)
 
 
