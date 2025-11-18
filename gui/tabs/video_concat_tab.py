@@ -159,6 +159,36 @@ class ConcatWorker(QtCore.QObject):
             return None
         return None
 
+    # 获取视频时长
+    @staticmethod
+    def _probe_duration(path: Path) -> Optional[float]:
+        """使用 ffprobe 探测视频时长（秒）。"""
+        ffprobe_bin = shutil.which("ffprobe")
+        if not ffprobe_bin:
+            return None
+        cmd = [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0:nokey=1",
+            str(path),
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode != 0:
+                return None
+            out = (res.stdout or b"").decode("utf-8", errors="ignore").strip()
+            if out:
+                return float(out)
+        except Exception:
+            return None
+        return None
+
     def _choose_bgm_path(self) -> Optional[Path]:
         """选择用于混剪的背景音乐文件路径。
 
@@ -351,7 +381,7 @@ class ConcatWorker(QtCore.QObject):
                 pick = candidates[:min(self.slices_per_output, len(candidates))]
             # 仅使用归一化后的素材作为拼接切片，不再做头尾裁剪
             slices: List[Path] = list(pick)
-            out_path = out_dir / f"concat_{idx}.mp4"
+            out_path = out_dir / f"concat_{idx}_{best_res[0]}x{best_res[1]}.mp4"
 
             # 根据设置选择合适的 BGM 文件（文件或目录随机）
             bgm_path = self._choose_bgm_path()
@@ -406,7 +436,11 @@ class ConcatWorker(QtCore.QObject):
         if not self.video_dirs:
             self.error.emit("请选择至少一个视频目录")
             return
-        out_dir = Path(self.output_dir) if self.output_dir else Path(self.video_dirs[0]).parent / "混剪"
+        
+        if not self.output_dir:
+            self.error.emit("请选择输出目录")
+            return
+        out_dir = Path(self.output_dir)
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -539,9 +573,10 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.output_edit = QtWidgets.QLineEdit()
         self.output_edit.setPlaceholderText("选择输出目录…")
         self.output_edit.setText(os.path.join(self.video_list.item(0).text(), "混剪"))
+
         btn_out = QtWidgets.QPushButton("浏览…")
         btn_out.clicked.connect(self._on_browse_output_dir)
-        out_row.addWidget(QtWidgets.QLabel("合成输出"), 0)
+        out_row.addWidget(QtWidgets.QLabel("混剪输出"), 0)
         out_row.addWidget(self.output_edit, 1)
         out_row.addWidget(btn_out)
         g1.addLayout(out_row)
@@ -649,8 +684,8 @@ class VideoConcatTab(QtWidgets.QWidget):
         result_vbox.setContentsMargins(8, 8, 8, 8)
         result_vbox.setSpacing(8)
 
-        self.results_table = QtWidgets.QTableWidget(0, 2)
-        self.results_table.setHorizontalHeaderLabels(["文件输出路径", "文件大小"])
+        self.results_table = QtWidgets.QTableWidget(0, 3)
+        self.results_table.setHorizontalHeaderLabels(["文件输出路径", "时长", "文件大小"])
         # 列宽比例：输出路径 80%，分辨率 10%，大小 10%
         header = self.results_table.horizontalHeader()
         try:
@@ -834,15 +869,12 @@ class VideoConcatTab(QtWidgets.QWidget):
             total = self.results_table.viewport().width()
             if not total or total <= 0:
                 total = self.results_table.width()
-            # 计算宽度，设置最小像素宽度以保证可读性
-            # w0 = max(200, int(total * 0.80))  # 输出路径
-            # w1 = max(80, int(total * 0.10))   # 分辨率
-            # w2 = max(80, int(total * 0.10))   # 文件大小
-            w0 = int(total * 0.80)  # 输出路径
-            # w1 = int(total * 0.10)   # 分辨率
-            w2 = int(total * 0.20)   # 文件大小
+
+            w0 = int(total * 0.70)  # 输出路径
+            w1 = int(total * 0.15)   # 分辨率
+            w2 = int(total * 0.15)   # 文件大小
             self.results_table.setColumnWidth(0, w0)
-            # self.results_table.setColumnWidth(1, w1)
+            self.results_table.setColumnWidth(1, w1)
             self.results_table.setColumnWidth(2, w2)
         except Exception:
             pass
@@ -859,7 +891,6 @@ class VideoConcatTab(QtWidgets.QWidget):
             return super().eventFilter(obj, event)
         except Exception:
             return False
-
 
     # ----------------------------- 交互逻辑 ----------------------------- #
     def _on_add_video_dir(self) -> None:
@@ -1152,24 +1183,14 @@ class VideoConcatTab(QtWidgets.QWidget):
         except Exception:
             pass
 
-        try:
-            if self.video_list and self.video_list.count() > 0:
-                first = self.video_list.item(0).text().strip()
-                if first:
-                    return Path(first).parent / "混剪"
-        except Exception:
-            pass
-
         return None
 
     def _on_results(self, paths: List[str]) -> None:
         """将结果填充到表格（路径、分辨率、大小），支持双击打开。"""
         self.results_table.setRowCount(0)
         for p in paths:
-            try:
-                res = self._probe_resolution(Path(p))
-            except Exception:
-                res = None
+            dur = self._worker._probe_duration(Path(p))
+            
             try:
                 size_mb = Path(p).stat().st_size / (1024 * 1024)
                 size_text = f"{size_mb:.1f} MB"
@@ -1178,7 +1199,7 @@ class VideoConcatTab(QtWidgets.QWidget):
             row = self.results_table.rowCount()
             self.results_table.insertRow(row)
             self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(p))
-            # self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{res[0]}x{res[1]}" if res else "?"))
+            self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(dur) if dur else "?"))
             self.results_table.setItem(row, 2, QtWidgets.QTableWidgetItem(size_text))
 
     def _on_open_selected_file(self) -> None:
@@ -1218,26 +1239,4 @@ class VideoConcatTab(QtWidgets.QWidget):
         except Exception:
             pass
 
-
-def create_concat_tab(parent: Optional[QtWidgets.QWidget] = None) -> Tuple[QtWidgets.QWidget, QtWidgets.QHBoxLayout]:
-    """工厂方法：创建“视频混剪”标签页容器与其根布局。
-
-    Parameters
-    ----------
-    parent : Optional[QtWidgets.QWidget]
-        父控件。
-
-    Returns
-    -------
-    Tuple[QtWidgets.QWidget, QtWidgets.QHBoxLayout]
-        (tab_widget, root_layout)
-
-    Notes
-    -----
-    该方法用于与旧版 MainWindow 行为兼容，便于以一致方式注册标签页。
-    """
-    tab = VideoConcatTab(parent)
-    return tab, tab.root_layout
-
-
-__all__ = ["VideoConcatTab", "create_concat_tab"]
+__all__ = ["VideoConcatTab"]
