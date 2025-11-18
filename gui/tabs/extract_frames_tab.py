@@ -1248,10 +1248,7 @@ class ExtractFramesTab(QtWidgets.QWidget):
             pass
 
         try:
-            style = (
-                f"QProgressBar{{min-height:{height}px;max-height:{height}px;border:1px solid #bbb;border-radius:4px;text-align:center;}}"
-                f"QProgressBar::chunk{{background-color:{chunk_color};margin:0px;}}"
-            )
+            style = theme.build_progressbar_stylesheet(height=height, chunk_color=chunk_color)
             self.progress_bar.setStyleSheet(style)
         except Exception:
             pass

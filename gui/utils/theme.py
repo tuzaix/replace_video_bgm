@@ -89,3 +89,42 @@ def format_missing_paths_warning(paths) -> str:
         return "以下文件不存在或不可访问:\n" + "\n".join(lines)
     except Exception:
         return "以下文件不存在或不可访问:\n"
+
+
+def build_progressbar_stylesheet(height: int, chunk_color: str = PRIMARY_BLUE) -> str:
+    """构造统一的 QProgressBar 样式字符串（QSS）。
+
+    此函数集中管理进度条的样式，使各标签页的视觉一致：
+    - 固定高度（min/max-height）
+    - 1px 边框与 4px 圆角
+    - 文本居中显示
+    - 进度块（chunk）颜色可配置
+
+    Parameters
+    ----------
+    height : int
+        进度条的像素高度，用于设定 min/max-height。
+    chunk_color : str, optional
+        进度块颜色（CSS 颜色字符串），默认使用主题主色。
+
+    Returns
+    -------
+    str
+        可直接用于 `QProgressBar.setStyleSheet` 的 QSS 字符串。
+
+    Notes
+    -----
+    - 函数不依赖 Qt 类型，纯字符串构造，便于在非 GUI 环境下复用或测试。
+    """
+    try:
+        h = int(height)
+    except Exception:
+        h = BUTTON_HEIGHT
+    try:
+        color = str(chunk_color)
+    except Exception:
+        color = PRIMARY_BLUE
+    return (
+        f"QProgressBar{{min-height:{h}px;max-height:{h}px;border:1px solid #bbb;border-radius:4px;text-align:center;}}"
+        f"QProgressBar::chunk{{background-color:{color};margin:0px;}}"
+    )

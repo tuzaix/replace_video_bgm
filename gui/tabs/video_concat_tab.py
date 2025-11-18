@@ -39,20 +39,20 @@ from typing import List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-try:
-    from gui.utils import theme  # 仅用于配色（可选）
-except Exception:
-    class theme:  # 回退，避免导入失败阻塞
-        PRIMARY_BLUE = "#409eff"
-        SUCCESS_GREEN = "#67C23A"
-        DANGER_RED = "#F56C6C"
+# try:
+#     from gui.utils import theme  # 仅用于配色（可选）
+# except Exception:
+#     class theme:  # 回退，避免导入失败阻塞
+#         PRIMARY_BLUE = "#409eff"
+#         SUCCESS_GREEN = "#67C23A"
+#         DANGER_RED = "#F56C6C"
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env  # type: ignore
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
 
 from concat_tool.normalize_video import VideoNormalizer  # type: ignore
 from concat_tool.concat import VideoConcat  # type: ignore
-
+from gui.utils import theme
 
 class ConcatWorker(QtCore.QObject):
     """后台混剪工作者：先归一化素材，再按分辨率分组进行拼接。
@@ -431,7 +431,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         out_row = QtWidgets.QHBoxLayout()
         self.output_edit = QtWidgets.QLineEdit()
         self.output_edit.setPlaceholderText("选择输出目录…")
-        self.output_edit.setText(os.path.join(self.video_list.item(0).text(), "临时"))
+        self.output_edit.setText(os.path.join(self.video_list.item(0).text(), "混剪"))
         btn_out = QtWidgets.QPushButton("浏览…")
         btn_out.clicked.connect(self._on_browse_output_dir)
         out_row.addWidget(QtWidgets.QLabel("合成输出"), 0)
@@ -510,27 +510,189 @@ class VideoConcatTab(QtWidgets.QWidget):
         vbox.setContentsMargins(6, 6, 6, 6)
         vbox.setSpacing(10)
 
-        # 顶部控制区
+        # 顶部控制区（分组：执行状态）
+        status_group = QtWidgets.QGroupBox("执行状态")
+        status_vbox = QtWidgets.QVBoxLayout(status_group)
+        status_vbox.setContentsMargins(8, 8, 8, 8)
+        status_vbox.setSpacing(8)
+
         ctl_row = QtWidgets.QHBoxLayout()
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        # 进度条文本与样式（与 generate_cover_tab 保持一致）
+        try:
+            self.progress_bar.setTextVisible(True)
+        except Exception:
+            pass
         self.start_stop_btn = QtWidgets.QPushButton("开始")
         self.start_stop_btn.clicked.connect(self._on_start_stop_clicked)
         ctl_row.addWidget(self.progress_bar, 1)
         ctl_row.addWidget(self.start_stop_btn)
-        vbox.addLayout(ctl_row)
+        status_vbox.addLayout(ctl_row)
+        vbox.addWidget(status_group)
 
+        self._apply_progressbar_style(theme.PRIMARY_BLUE)
+        self._apply_action_button_style(running=False)
+       
         # 结果表
+         # 顶部控制区（分组：执行状态）
+        result_group = QtWidgets.QGroupBox("执行结果")
+        result_vbox = QtWidgets.QVBoxLayout(result_group)
+        result_vbox.setContentsMargins(8, 8, 8, 8)
+        result_vbox.setSpacing(8)
+
         self.results_table = QtWidgets.QTableWidget(0, 3)
         self.results_table.setHorizontalHeaderLabels(["文件输出路径", "文件分辨率", "文件大小"])
-        self.results_table.horizontalHeader().setStretchLastSection(True)
+        # 列宽比例：输出路径 80%，分辨率 10%，大小 10%
+        header = self.results_table.horizontalHeader()
+        try:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
+        except Exception:
+            pass
         self.results_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.results_table.doubleClicked.connect(self._on_open_selected_file)
-        vbox.addWidget(self.results_table, 1)
+        # 初始应用列宽，并在尺寸变化时自适应
+        try:
+            self._apply_results_table_column_widths()
+            self.results_table.installEventFilter(self)
+        except Exception:
+            pass
+        result_vbox.addWidget(self.results_table, 1)
+        vbox.addWidget(result_group)
 
         return panel
+
+    # --- 样式与尺寸（与截图/封面页保持一致） ---
+    def _apply_progressbar_style(self, chunk_color: str = theme.PRIMARY_BLUE) -> None:
+        """统一设置进度条的尺寸与样式，使其与 generate_cover_tab 一致。
+
+        - 横向扩展、纵向固定高度；高度依据屏幕 DPI 自适应
+        - 文本居中显示；进度块颜色可配置
+        """
+        try:
+            if self.progress_bar is None:
+                return
+            # 尺寸策略：横向扩展、纵向固定
+            self.progress_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            # 计算 DPI 缩放
+            screen = QtWidgets.QApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInch() if screen else 96.0
+            scale = max(1.0, dpi / 96.0)
+        except Exception:
+            scale = 1.0
+
+        # 高度与字号
+        base_h = 32
+        height = int(max(28, min(52, base_h * scale)))
+        try:
+            self.progress_bar.setFixedHeight(height)
+            # 缓存统一控件高度，供按钮样式使用（若后续需要）
+            self._control_height = height
+        except Exception:
+            # 回退：无缓存则使用主题默认高度（若存在）
+            try:
+                
+                self._control_height = getattr(self, "_control_height", getattr(theme, "BUTTON_HEIGHT", height))
+            except Exception:
+                self._control_height = height
+
+        try:
+            font = self.progress_bar.font()
+            base_pt = 11
+            pt_size = int(max(base_pt, min(16, base_pt * scale)))
+            font.setPointSize(pt_size)
+            self.progress_bar.setFont(font)
+        except Exception:
+            pass
+
+        # 样式表：统一从主题构造样式字符串
+        try:
+            style = theme.build_progressbar_stylesheet(height=height, chunk_color=chunk_color)
+            self.progress_bar.setStyleSheet(style)
+        except Exception:
+            pass
+
+    def _apply_action_button_style(self, running: bool) -> None:
+        """统一设置开始/停止按钮的高度与样式，使其与 generate_cover_tab 一致。
+
+        - 空闲态使用主题主色（蓝色），运行态使用危险色（红色）
+        - 按钮高度与进度条一致（使用缓存的 `_control_height`）
+        """
+        try:
+            if self.start_stop_btn is None:
+                return
+            height = int(getattr(self, "_control_height", theme.BUTTON_HEIGHT))
+            primary_bg = theme.PRIMARY_BLUE
+            primary_bg_hover = theme.PRIMARY_BLUE_HOVER
+            danger_bg = theme.DANGER_RED
+            danger_bg_hover = theme.DANGER_RED_HOVER
+            pad_v = int(theme.BUTTON_PADDING_VERTICAL)
+            pad_h = int(theme.BUTTON_PADDING_HORIZONTAL)
+            radius = int(theme.BUTTON_RADIUS)
+
+            idle_style = (
+                f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{pad_v}px {pad_h}px;"
+                f"border:none;border-radius:{radius}px;color:#ffffff;background-color:{primary_bg};}}"
+                f"QPushButton:hover{{background-color:{primary_bg_hover};}}"
+                f"QPushButton:pressed{{background-color:{primary_bg_hover};}}"
+                f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#93c5fd;}}"
+            )
+            running_style = (
+                f"QPushButton{{min-height:{height}px;max-height:{height}px;padding:{pad_v}px {pad_h}px;"
+                f"border:none;border-radius:{radius}px;color:#ffffff;background-color:{danger_bg};}}"
+                f"QPushButton:hover{{background-color:{danger_bg_hover};}}"
+                f"QPushButton:pressed{{background-color:{danger_bg_hover};}}"
+                f"QPushButton:disabled{{color: rgba(255,255,255,0.8);background-color:#fca5a5;}}"
+            )
+
+            # 采用与进度条一致的字体大小
+            try:
+                if self.progress_bar is not None:
+                    self.start_stop_btn.setFont(self.progress_bar.font())
+            except Exception:
+                pass
+            self.start_stop_btn.setStyleSheet(running_style if running else idle_style)
+            self.start_stop_btn.setFixedHeight(height)
+        except Exception:
+            pass
+
+    def _apply_results_table_column_widths(self) -> None:
+        """按照 80%/10%/10% 比例设置结果表的三列宽度，并在不同 DPI 下保持可读性。"""
+        if not getattr(self, "results_table", None):
+            return
+        try:
+            total = self.results_table.viewport().width()
+            if not total or total <= 0:
+                total = self.results_table.width()
+            # 计算宽度，设置最小像素宽度以保证可读性
+            # w0 = max(200, int(total * 0.80))  # 输出路径
+            # w1 = max(80, int(total * 0.10))   # 分辨率
+            # w2 = max(80, int(total * 0.10))   # 文件大小
+            w0 = int(total * 0.80)  # 输出路径
+            w1 = int(total * 0.10)   # 分辨率
+            w2 = int(total * 0.10)   # 文件大小
+            self.results_table.setColumnWidth(0, w0)
+            self.results_table.setColumnWidth(1, w1)
+            self.results_table.setColumnWidth(2, w2)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        """监听结果表尺寸变化，实时按比例调整列宽。"""
+        try:
+            if obj is getattr(self, "results_table", None) and event.type() == QtCore.QEvent.Resize:
+                # 使用单次定时器，避免频繁重算引发抖动
+                QtCore.QTimer.singleShot(0, self._apply_results_table_column_widths)
+        except Exception:
+            pass
+        try:
+            return super().eventFilter(obj, event)
+        except Exception:
+            return False
+
 
     # ----------------------------- 交互逻辑 ----------------------------- #
     def _on_add_video_dir(self) -> None:
@@ -666,6 +828,10 @@ class VideoConcatTab(QtWidgets.QWidget):
             # 更新 UI 状态
             self._is_running = True
             self.start_stop_btn.setText("停止")
+            try:
+                self._apply_action_button_style(running=True)
+            except Exception:
+                pass
             self.progress_bar.setValue(0)
             # 清空旧结果
             self.results_table.setRowCount(0)
@@ -748,6 +914,10 @@ class VideoConcatTab(QtWidgets.QWidget):
         try:
             self.start_stop_btn.setText("开始")
             self.start_stop_btn.setEnabled(True)
+            try:
+                self._apply_action_button_style(running=False)
+            except Exception:
+                pass
         except Exception:
             pass
         try:
