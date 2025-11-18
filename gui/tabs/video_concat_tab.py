@@ -38,14 +38,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
-
-# try:
-#     from gui.utils import theme  # 仅用于配色（可选）
-# except Exception:
-#     class theme:  # 回退，避免导入失败阻塞
-#         PRIMARY_BLUE = "#409eff"
-#         SUCCESS_GREEN = "#67C23A"
-#         DANGER_RED = "#F56C6C"
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env  # type: ignore
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
@@ -130,10 +123,11 @@ class ConcatWorker(QtCore.QObject):
     # ----------------------------- 内部辅助方法 ----------------------------- #
     def _emit(self, text: str) -> None:
         """安全发射日志文本。"""
-        try:
-            self.log.emit(str(text))
-        except Exception:
-            pass
+        # try:
+        #     self.log.emit(str(text))
+        # except Exception:
+        #     pass
+        pass
 
     @staticmethod
     def _probe_resolution(path: Path) -> Optional[Tuple[int, int]]:
@@ -224,18 +218,30 @@ class ConcatWorker(QtCore.QObject):
         except Exception:
             pass
 
-        # 归一化阶段
+        # 归一化阶段（占整体进度的 30%）
         try:
             self.phase.emit("normalize")
         except Exception:
             pass
         self._emit("🔧 正在归一化素材…（裁剪仅在该阶段应用）")
 
-       
-
         normalized_dirs: List[Path] = []
         total_dirs = len(self.video_dirs)
         done_dirs = 0
+
+        # 计算需要归一化的视频总数，用于汇总进度映射到 0..30 区间
+        try:
+            normalize_total = 0
+            for src in self.video_dirs:
+                src_p = Path(src)
+                if src_p.exists() and src_p.is_dir():
+                    try:
+                        normalize_total += len(VideoNormalizer.find_videos(src_p))
+                    except Exception:
+                        pass
+        except Exception:
+            normalize_total = 0
+        normalize_state = {"done": 0}
         for src in self.video_dirs:
             if self._stopping:
                 self.error.emit("任务已取消")
@@ -250,21 +256,43 @@ class ConcatWorker(QtCore.QObject):
             except Exception:
                 pass
             normalizer = VideoNormalizer(fps=25, use_gpu=True, threads=self.concurrency)
+            # 针对每个目录的进度回调，累加到全局归一化进度并映射到 0..30
+            last_local = {"d": 0}
+            def _on_norm_progress(d: int, t: int) -> None:
+                try:
+                    inc = max(0, int(d) - int(last_local["d"]))
+                    last_local["d"] = int(d)
+                    normalize_state["done"] += inc
+                    # 发射真实完成数与总数，UI 侧负责映射到分段进度
+                    self.progress.emit(int(normalize_state["done"]), int(normalize_total))
+                except Exception:
+                    try:
+                        self.progress.emit(int(normalize_state["done"]), int(normalize_total))
+                    except Exception:
+                        pass
+
             ok_count = normalizer.normalize(
                 str(src_p),
                 str(tmp_out),
-                on_progress=lambda d, t: self.progress.emit(d, t),
+                on_progress=_on_norm_progress,
                 trim_head_s=self.trim_head_s,
                 trim_tail_s=self.trim_tail_s,
             )
             if ok_count > 0:
                 normalized_dirs.append(tmp_out)
             done_dirs += 1
+            # 目录级别的推进：同步一次真实完成/总数
             try:
-                self.progress.emit(done_dirs, total_dirs)
+                self.progress.emit(int(normalize_state["done"]), int(normalize_total))
             except Exception:
                 pass
         self._emit(f"✅ 归一化完成，处理目录 {done_dirs}/{total_dirs}")
+        # 归一化结束，若存在素材则将进度锁定到至少 30%
+        # 归一化阶段结束：发射最终完成/总数
+        try:
+            self.progress.emit(int(normalize_total), int(normalize_total))
+        except Exception:
+            pass
 
         # 收集归一化素材并按分辨率分组
         all_videos: List[Path] = []
@@ -296,7 +324,7 @@ class ConcatWorker(QtCore.QObject):
             self.phase.emit("concat")
         except Exception:
             pass
-        self._emit("🎬 开始生成混剪视频…（不再额外裁剪）")
+        self._emit("🎬 开始生成混剪视频…")
 
      
 
@@ -304,7 +332,7 @@ class ConcatWorker(QtCore.QObject):
         fail = 0
         total_outputs = self.outputs
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
         done = 0
 
         def build_one(idx: int) -> bool:
@@ -345,7 +373,8 @@ class ConcatWorker(QtCore.QObject):
                     fail += 1
                 done += 1
                 try:
-                    self.progress.emit(done, total_outputs)
+                    # 发射真实完成数与总数，UI 侧负责映射到分段进度
+                    self.progress.emit(int(done), int(total_outputs))
                 except Exception:
                     pass
 
@@ -600,6 +629,65 @@ class VideoConcatTab(QtWidgets.QWidget):
 
         return panel
 
+    def _confirm_cleanup_output_dir(self, out_dir: str) -> Optional[bool]:
+        """在开始执行前确认是否清理（删除）合成输出目录。
+
+        逻辑
+        ----
+        - 若 `out_dir` 为空或不是有效目录，直接返回 False（不清理）。
+        - 若目录存在且包含文件/子目录，则弹窗确认：
+          - 按钮选项：
+            1) 删除后开始
+            2) 保留并开始
+            3) 取消
+        - 返回值：
+          - True  → 用户选择“删除后开始”，调用方应清理该目录
+          - False → 用户选择“保留并开始”，继续执行但不清理
+          - None  → 用户选择“取消”，应中止开始流程
+
+        Parameters
+        ----------
+        out_dir : str
+            合成输出目录路径。
+
+        Returns
+        -------
+        Optional[bool]
+            用户选择的操作，如上所述。
+        """
+        try:
+            if not out_dir or not os.path.isdir(out_dir):
+                return False
+            # 统计目录条目数，用于提示
+            try:
+                entries = list(Path(out_dir).iterdir())
+                entry_count = len(entries)
+            except Exception:
+                entry_count = 0
+            if entry_count <= 0:
+                return False
+
+            msg = QtWidgets.QMessageBox(self)
+            msg.setIcon(QtWidgets.QMessageBox.Question)
+            msg.setWindowTitle("确认清理输出目录")
+            msg.setText(
+                f"检测到合成输出目录已存在且包含 {entry_count} 个条目:\n\n{out_dir}\n\n是否删除该目录内的所有文件后再开始？"
+            )
+            btn_delete = msg.addButton("删除后开始", QtWidgets.QMessageBox.AcceptRole)
+            btn_keep = msg.addButton("保留并开始", QtWidgets.QMessageBox.ActionRole)
+            btn_cancel = msg.addButton("取消", QtWidgets.QMessageBox.RejectRole)
+            msg.exec()
+
+            clicked = msg.clickedButton()
+            if clicked == btn_delete:
+                return True
+            if clicked == btn_keep:
+                return False
+            return None
+        except Exception:
+            # 若弹窗失败，保守策略：不清理，继续执行
+            return False
+
     # --- 样式与尺寸（与截图/封面页保持一致） ---
     def _apply_progressbar_style(self, chunk_color: str = theme.PRIMARY_BLUE) -> None:
         """统一设置进度条的尺寸与样式，使其与 generate_cover_tab 一致。
@@ -838,6 +926,24 @@ class VideoConcatTab(QtWidgets.QWidget):
             settings = self._collect_settings()
             if not settings:
                 return
+            # 在启动前确认是否清理合成输出目录
+            try:
+                decision = self._confirm_cleanup_output_dir(settings.get("output_dir", ""))
+            except Exception:
+                decision = False
+            if decision is None:
+                # 用户取消开始
+                return
+            if decision is True:
+                # 用户选择删除后开始：清空目录
+                out_dir = settings.get("output_dir", "")
+                if out_dir:
+                    try:
+                        shutil.rmtree(out_dir, ignore_errors=False)
+                        os.makedirs(out_dir, exist_ok=True)
+                    except Exception as e:
+                        QtWidgets.QMessageBox.critical(self, "错误", f"清理输出目录失败：{e}")
+                        return
             # 启动线程与工作者
             self._thread = QtCore.QThread(self)
             self._worker = ConcatWorker(
@@ -880,21 +986,64 @@ class VideoConcatTab(QtWidgets.QWidget):
             self.start_stop_btn.setEnabled(False)
 
     def _on_phase(self, name: str) -> None:
-        """阶段变更时的简单提示。"""
-        if name == "normalize":
-            self.progress_bar.setFormat("归一化：%p%")
-        elif name == "concat":
-            self.progress_bar.setFormat("混剪：%p%")
-        else:
-            self.progress_bar.setFormat("%p%")
+        """阶段变更时的提示，并设置分段权重与初始文本。
+
+        - 归一化阶段占 30%，文本显示为“归一化：完成数 | 待转换总数”。
+        - 合成阶段占 70%，文本显示为“混合视频：完成数 | 待合成总数”。
+        """
+        try:
+            self._phase_name = str(name)
+            if name == "normalize":
+                self._phase_start = 0
+                self._phase_span = 30
+                self.progress_bar.setFormat("归一化：0 | 0")
+            elif name == "concat":
+                self._phase_start = 30
+                self._phase_span = 70
+                self.progress_bar.setFormat("混合视频：0 | 0")
+            else:
+                self._phase_start = 0
+                self._phase_span = 100
+                self.progress_bar.setFormat("进度：0 | 0")
+        except Exception:
+            pass
 
     def _on_progress(self, done: int, total: int) -> None:
-        """更新进度条（0..100）。"""
-        if total <= 0:
-            self.progress_bar.setValue(0)
-            return
-        pct = int(done * 100 / total)
-        self.progress_bar.setValue(max(0, min(100, pct)))
+        """更新进度条的分段进度与文本，显示“完成数 | 总数”。
+
+        逻辑
+        ----
+        - 使用当前阶段的起始与跨度，将实际完成比例映射到 0..100 分段。
+        - 文本根据阶段显示：
+          归一化 → “归一化：完成数 | 待转换总数”；
+          合成 → “混合视频：完成数 | 待合成总数”；
+          其他 → “进度：完成数 | 总数”。
+        """
+        try:
+            start = int(getattr(self, "_phase_start", 0))
+            span = int(getattr(self, "_phase_span", 100))
+            label = "进度"
+            phase = str(getattr(self, "_phase_name", ""))
+            if phase == "normalize":
+                label = "归一化"
+            elif phase == "concat":
+                label = "混合视频"
+
+            if total <= 0:
+                self.progress_bar.setValue(start)
+                self.progress_bar.setFormat(f"{label}：0 | 0")
+                return
+
+            ratio = max(0.0, min(1.0, float(done) / float(total)))
+            weighted = int(start + span * ratio)
+            self.progress_bar.setValue(max(0, min(100, weighted)))
+            self.progress_bar.setFormat(f"{label}：{int(done)} | {int(total)}")
+        except Exception:
+            try:
+                self.progress_bar.setValue(0)
+                self.progress_bar.setFormat("进度：0 | 0")
+            except Exception:
+                pass
 
     def _on_error(self, msg: str) -> None:
         """显示错误并复位按钮状态。"""

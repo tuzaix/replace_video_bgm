@@ -497,7 +497,7 @@ class VideoNormalizer:
                             sign = "-" if pct >= 0 else "+"
                             print(f"✅ {name} 大小: 原始 {fmt_orig} → 新 {fmt_new} 变化 {sign}{abs(pct):.2f}%")
                         # Print attribute mapping for debug
-                        VideoNormalizer._print_attr_diff(name, src_attrs, out_attrs)
+                        # VideoNormalizer._print_attr_diff(name, src_attrs, out_attrs)
                 except Exception:
                     pass
                 done += 1
