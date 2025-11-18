@@ -190,35 +190,22 @@ class ConcatWorker(QtCore.QObject):
             return None
         return None
 
-    # ----------------------------- 运行主流程 ----------------------------- #
-    @QtCore.Slot()
-    def run(self) -> None:
-        """执行完整流程：归一化 → 选择分辨率组 → 随机拼接输出。
+    # ----------------------------- 阶段方法 ----------------------------- #
+    def _normalize_sources(self) -> Optional[List[Path]]:
+        """执行归一化阶段，返回归一化输出所在的临时目录列表。
 
-        流程
+        逻辑
         ----
-        1) 校验参数与输出目录
-        2) 对每个源目录执行归一化，输出到该目录下 `临时` 子目录
-        3) 汇总全部归一化视频，按分辨率分组，选视频数量最多的组
-        4) 并发生成 `outputs` 个混剪视频，每个随机选取 `slices_per_output` 个素材
-        5) 裁剪仅在归一化阶段应用；随后调用 `concat_tool.concat.VideoConcat` 拼接
-        6) 发射进度与结果
+        - 发射阶段 `normalize`，并输出日志。
+        - 预统计待转换总数（通过 `VideoNormalizer.find_videos()`）。
+        - 逐目录执行归一化，累加全局完成数，并发射 `progress(done, total)`。
+        - 返回含有归一化输出的临时目录列表；若失败则发射错误并返回 None。
+
+        Returns
+        -------
+        Optional[List[Path]]
+            成功时为包含各源目录下“临时”子目录的列表；失败为 None。
         """
-        if self._stopping:
-            self.error.emit("任务已取消")
-            return
-
-        # 参数校验与输出目录准备
-        if not self.video_dirs:
-            self.error.emit("请选择至少一个视频目录")
-            return
-        out_dir = Path(self.output_dir) if self.output_dir else Path(self.video_dirs[0]).parent / "合成混剪"
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-
-        # 归一化阶段（占整体进度的 30%）
         try:
             self.phase.emit("normalize")
         except Exception:
@@ -229,7 +216,7 @@ class ConcatWorker(QtCore.QObject):
         total_dirs = len(self.video_dirs)
         done_dirs = 0
 
-        # 计算需要归一化的视频总数，用于汇总进度映射到 0..30 区间
+        # 计算需要归一化的视频总数
         try:
             normalize_total = 0
             for src in self.video_dirs:
@@ -241,29 +228,32 @@ class ConcatWorker(QtCore.QObject):
                         pass
         except Exception:
             normalize_total = 0
+
         normalize_state = {"done": 0}
         for src in self.video_dirs:
             if self._stopping:
                 self.error.emit("任务已取消")
-                return
+                return None
             src_p = Path(src)
             if not src_p.exists() or not src_p.is_dir():
                 self.error.emit(f"目录不存在或不可用: {src}")
-                return
+                return None
             tmp_out = src_p / "临时"
             try:
                 tmp_out.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
+
             normalizer = VideoNormalizer(fps=25, use_gpu=True, threads=self.concurrency)
-            # 针对每个目录的进度回调，累加到全局归一化进度并映射到 0..30
+
+            # 针对每个目录的进度回调，累加到全局归一化进度
             last_local = {"d": 0}
+
             def _on_norm_progress(d: int, t: int) -> None:
                 try:
                     inc = max(0, int(d) - int(last_local["d"]))
                     last_local["d"] = int(d)
                     normalize_state["done"] += inc
-                    # 发射真实完成数与总数，UI 侧负责映射到分段进度
                     self.progress.emit(int(normalize_state["done"]), int(normalize_total))
                 except Exception:
                     try:
@@ -286,14 +276,36 @@ class ConcatWorker(QtCore.QObject):
                 self.progress.emit(int(normalize_state["done"]), int(normalize_total))
             except Exception:
                 pass
+
         self._emit(f"✅ 归一化完成，处理目录 {done_dirs}/{total_dirs}")
-        # 归一化结束，若存在素材则将进度锁定到至少 30%
-        # 归一化阶段结束：发射最终完成/总数
         try:
             self.progress.emit(int(normalize_total), int(normalize_total))
         except Exception:
             pass
 
+        return normalized_dirs
+
+    def _concat_videos(self, normalized_dirs: List[Path], out_dir: Path) -> Optional[Tuple[List[str], int]]:
+        """执行混剪阶段，基于归一化素材生成目标输出。
+
+        逻辑
+        ----
+        - 收集归一化素材并按分辨率分组，选择数量最多的分辨率组。
+        - 发射阶段 `concat` 与日志。
+        - 并发生成输出，每完成一个就发射 `progress(done, total_outputs)`。
+
+        Parameters
+        ----------
+        normalized_dirs : List[Path]
+            归一化素材所在的临时目录列表。
+        out_dir : Path
+            混剪输出目录。
+
+        Returns
+        -------
+        Optional[Tuple[List[str], int]]
+            成功时返回 (success_paths, fail_count)；若候选为空或被取消则返回 None。
+        """
         # 收集归一化素材并按分辨率分组
         all_videos: List[Path] = []
         for nd in normalized_dirs:
@@ -305,7 +317,7 @@ class ConcatWorker(QtCore.QObject):
                 pass
         if not all_videos:
             self.error.emit("归一化后未发现可用素材")
-            return
+            return None
 
         groups: dict[Tuple[int, int], List[Path]] = {}
         for v in all_videos:
@@ -317,22 +329,17 @@ class ConcatWorker(QtCore.QObject):
         self._emit(f"📹 选择分辨率组 {best_res[0]}x{best_res[1]}，素材数 {len(candidates)}")
         if not candidates:
             self.error.emit("分辨率分组失败：候选为空")
-            return
+            return None
 
-        # 混剪阶段
         try:
             self.phase.emit("concat")
         except Exception:
             pass
-        self._emit("🎬 开始生成混剪视频…")
-
-     
+        self._emit("🎬 开始生成混剪视频…（不再额外裁剪）")
 
         success: List[str] = []
         fail = 0
         total_outputs = self.outputs
-
-        
         done = 0
 
         def build_one(idx: int) -> bool:
@@ -348,7 +355,7 @@ class ConcatWorker(QtCore.QObject):
 
             # 根据设置选择合适的 BGM 文件（文件或目录随机）
             bgm_path = self._choose_bgm_path()
-                    
+
             vc = VideoConcat(
                 slices=slices,
                 out_path=out_path,
@@ -373,14 +380,50 @@ class ConcatWorker(QtCore.QObject):
                     fail += 1
                 done += 1
                 try:
-                    # 发射真实完成数与总数，UI 侧负责映射到分段进度
                     self.progress.emit(int(done), int(total_outputs))
                 except Exception:
                     pass
 
-        # 无需清理临时切片目录（未创建临时切片）
+        return success, fail
 
-        # 完成信号
+    # ----------------------------- 运行主流程 ----------------------------- #
+    @QtCore.Slot()
+    def run(self) -> None:
+        """执行完整流程：先归一化，再合成混剪输出。
+
+        流程
+        ----
+        1) 校验参数与输出目录
+        2) 调用 `_normalize_sources()` 执行归一化并发射进度
+        3) 调用 `_concat_videos()` 执行混剪并发射进度
+        4) 汇总结果并发射完成信号
+        """
+        if self._stopping:
+            self.error.emit("任务已取消")
+            return
+
+        # 参数校验与输出目录准备
+        if not self.video_dirs:
+            self.error.emit("请选择至少一个视频目录")
+            return
+        out_dir = Path(self.output_dir) if self.output_dir else Path(self.video_dirs[0]).parent / "合成混剪"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        # 阶段一：归一化
+        normalized_dirs = self._normalize_sources()
+        if normalized_dirs is None:
+            return
+
+        # 阶段二：混剪
+        result = self._concat_videos(normalized_dirs, out_dir)
+        if result is None:
+            return
+        success, fail = result
+
+        # 完成信号与日志
         try:
             self.finished.emit(len(success), fail)
         except Exception:
@@ -606,8 +649,8 @@ class VideoConcatTab(QtWidgets.QWidget):
         result_vbox.setContentsMargins(8, 8, 8, 8)
         result_vbox.setSpacing(8)
 
-        self.results_table = QtWidgets.QTableWidget(0, 3)
-        self.results_table.setHorizontalHeaderLabels(["文件输出路径", "文件分辨率", "文件大小"])
+        self.results_table = QtWidgets.QTableWidget(0, 2)
+        self.results_table.setHorizontalHeaderLabels(["文件输出路径", "文件大小"])
         # 列宽比例：输出路径 80%，分辨率 10%，大小 10%
         header = self.results_table.horizontalHeader()
         try:
@@ -796,10 +839,10 @@ class VideoConcatTab(QtWidgets.QWidget):
             # w1 = max(80, int(total * 0.10))   # 分辨率
             # w2 = max(80, int(total * 0.10))   # 文件大小
             w0 = int(total * 0.80)  # 输出路径
-            w1 = int(total * 0.10)   # 分辨率
-            w2 = int(total * 0.10)   # 文件大小
+            # w1 = int(total * 0.10)   # 分辨率
+            w2 = int(total * 0.20)   # 文件大小
             self.results_table.setColumnWidth(0, w0)
-            self.results_table.setColumnWidth(1, w1)
+            # self.results_table.setColumnWidth(1, w1)
             self.results_table.setColumnWidth(2, w2)
         except Exception:
             pass
@@ -1071,8 +1114,7 @@ class VideoConcatTab(QtWidgets.QWidget):
             row = self.results_table.rowCount()
             self.results_table.insertRow(row)
             self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(p))
-            self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(
-                f"{res[0]}x{res[1]}" if res else "?"))
+            # self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{res[0]}x{res[1]}" if res else "?"))
             self.results_table.setItem(row, 2, QtWidgets.QTableWidgetItem(size_text))
 
     def _on_open_selected_file(self) -> None:
