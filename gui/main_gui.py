@@ -78,7 +78,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tab_widget": VideoConcatTab(self),
             },
             {
-                "tab_name": "生成截图",
+                "tab_name": "视频截图",
                 "tab_widget": ExtractFramesTab(self),
             },
             {
