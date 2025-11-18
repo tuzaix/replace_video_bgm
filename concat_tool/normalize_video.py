@@ -282,7 +282,13 @@ class VideoNormalizer:
                 return candidate
             idx += 1
 
-    def _build_ffmpeg_cmd(self, in_path: Path, out_path: Path) -> List[str]:
+    def _build_ffmpeg_cmd(
+        self,
+        in_path: Path,
+        out_path: Path,
+        start_s: float = 0.0,
+        end_s: Optional[float] = None,
+    ) -> List[str]:
         """Construct ffmpeg command to normalize one video while keeping original resolution.
 
         Encoding parameter mapping for better compression without visible quality loss:
@@ -304,11 +310,22 @@ class VideoNormalizer:
 
         vf = f"fps={self.fps},format={self.pix_fmt}"
 
-        cmd: List[str] = [
-            ffmpeg_bin,
-            "-y",
-            "-i",
-            str(in_path),
+        cmd: List[str] = [ffmpeg_bin, "-y"]
+
+        # Apply head trim with `-ss` before input for faster seeking when re-encoding
+        if start_s and start_s > 0:
+            cmd += ["-ss", f"{float(start_s):.3f}"]
+
+        # Input specification
+        cmd += ["-i", str(in_path)]
+
+        # If end trim is specified, compute duration and use `-t` to avoid ambiguity of `-to`
+        if end_s is not None and end_s > (start_s or 0.0):
+            duration = float(end_s) - float(start_s or 0.0)
+            cmd += ["-t", f"{duration:.3f}"]
+
+        # Video normalization filters and common flags
+        cmd += [
             "-filter:v", vf,
             "-pix_fmt", self.pix_fmt,
             "-fps_mode", "cfr",
@@ -352,7 +369,14 @@ class VideoNormalizer:
         print(f"ffmpeg 命令: {' '.join(cmd)}")
         return cmd
 
-    def normalize(self, src_dir: str, dst_dir: str, on_progress: Optional[Callable[[int, int], None]] = None) -> int:
+    def normalize(
+        self,
+        src_dir: str,
+        dst_dir: str,
+        trim_head_s: float = 0.0,
+        trim_tail_s: float = 0.0,
+        on_progress: Optional[Callable[[int, int], None]] = None,
+    ) -> int:
         """Normalize all videos under `src_dir` and write outputs to `dst_dir`.
 
         Parameters
@@ -363,6 +387,10 @@ class VideoNormalizer:
             Destination directory to store normalized videos (.mp4).
         on_progress : Optional[Callable[[int, int], None]]
             Optional callback receiving (done, total) during processing.
+        trim_head_s : float, default 0.0
+            可选的开头裁剪秒数。如果为 0，则不应用。
+        trim_tail_s : float, default 0.0
+            可选的结尾裁剪秒数。如果为 0，则不应用。
 
         Returns
         -------
@@ -390,7 +418,19 @@ class VideoNormalizer:
         def _process_one(v: Path) -> tuple[bool, int, int, str, Optional[dict], Optional[dict]]:
             try:
                 out_path = VideoNormalizer._normalized_output_path(v, out)
-                cmd = self._build_ffmpeg_cmd(v, out_path)
+                # Probe duration if tail trimming requested, to compute end time
+                start_s = float(trim_head_s or 0.0)
+                end_s: Optional[float] = None
+                if trim_tail_s and float(trim_tail_s) > 0:
+                    attrs = VideoNormalizer._probe_media(v)
+                    dur = None
+                    try:
+                        dur = float(attrs.get("duration")) if attrs and attrs.get("duration") is not None else None
+                    except Exception:
+                        dur = None
+                    if dur is not None:
+                        end_s = max(0.0, dur - float(trim_tail_s))
+                cmd = self._build_ffmpeg_cmd(v, out_path, start_s=start_s, end_s=end_s)
                 res = subprocess.run(cmd, capture_output=True, **VideoNormalizer._popen_silent_kwargs())
                 if res.returncode == 0 and out_path.exists():
                     try:

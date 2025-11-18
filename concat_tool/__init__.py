@@ -7,10 +7,12 @@ like `ModuleNotFoundError: No module named 'concat_tool'`.
 
 Exports
 -------
-- video_concat: main worker utilities for FFmpeg concat operations.
+- video_concat: main worker utilities for advanced workflows.
+- concat.VideoConcat: lightweight class for direct FFmpeg concat.
 """
 
-# Re-export commonly used module for convenience
+# Re-export commonly used modules/classes for convenience
 from . import video_concat  # noqa: F401
+from .concat import VideoConcat  # noqa: F401
 
-__all__ = ["video_concat"]
+__all__ = ["video_concat", "VideoConcat"]
