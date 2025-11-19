@@ -382,7 +382,9 @@ class ConcatWorker(QtCore.QObject):
                 pick = candidates[:min(self.slices_per_output, len(candidates))]
             # 仅使用归一化后的素材作为拼接切片，不再做头尾裁剪
             slices: List[Path] = list(pick)
-            out_path = out_dir / f"concat_{idx}_{best_res[0]}x{best_res[1]}.mp4"
+            # 增加随机字符串
+            random_str = random.randint(100000, 999999)
+            out_path = out_dir / f"concat_{idx}_{random_str}_{best_res[0]}x{best_res[1]}.mp4"
 
             # 根据设置选择合适的 BGM 文件（文件或目录随机）
             bgm_path = self._choose_bgm_path()
@@ -546,7 +548,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.video_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.video_list.setMinimumHeight(120)
         # self.video_list 增加默认值
-        self.video_list.addItems([r"E:\Download\社媒助手\抖音\潮汕菲宝"])
+        # self.video_list.addItems([r"E:\Download\社媒助手\抖音\潮汕菲宝"])
         btns_row = QtWidgets.QHBoxLayout()
         btn_add = QtWidgets.QPushButton("添加目录…")
         btn_del = QtWidgets.QPushButton("移除选中")
@@ -573,7 +575,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         out_row = QtWidgets.QHBoxLayout()
         self.output_edit = QtWidgets.QLineEdit()
         self.output_edit.setPlaceholderText("选择输出目录…")
-        self.output_edit.setText(os.path.join(self.video_list.item(0).text(), "混剪"))
+        self.output_edit.setText("默认是：视频最后一个目录/混剪")
 
         btn_out = QtWidgets.QPushButton("浏览…")
         btn_out.clicked.connect(self._on_browse_output_dir)
@@ -592,11 +594,17 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.outputs_spin = QtWidgets.QSpinBox()
         self.outputs_spin.setRange(1, 100)
         self.outputs_spin.setValue(3)
-        self.outputs_spin.setKeyboardTracking(False)
+        # 支持手动输入并即时解析
+        self.outputs_spin.setKeyboardTracking(True)
+        self.outputs_spin.setAccelerated(True)
+        self.outputs_spin.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.slices_spin = QtWidgets.QSpinBox()
         self.slices_spin.setRange(1, 50)
         self.slices_spin.setValue(8)
-        self.slices_spin.setKeyboardTracking(False)
+        # 支持手动输入并即时解析
+        self.slices_spin.setKeyboardTracking(True)
+        self.slices_spin.setAccelerated(True)
+        self.slices_spin.setFocusPolicy(QtCore.Qt.StrongFocus)
         g2.addRow("混剪视频数量", self.outputs_spin)
         g2.addRow("每个混剪切片数", self.slices_spin)
 
@@ -613,7 +621,10 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.concurrency_spin = QtWidgets.QSpinBox()
         self.concurrency_spin.setRange(1, 32)
         self.concurrency_spin.setValue(4)
-        self.concurrency_spin.setKeyboardTracking(False)
+        # 支持手动输入并即时解析
+        self.concurrency_spin.setKeyboardTracking(True)
+        self.concurrency_spin.setAccelerated(True)
+        self.concurrency_spin.setFocusPolicy(QtCore.Qt.StrongFocus)
         g2.addRow("合成质量档位", self.quality_combo)
         g2.addRow("并发数量", self.concurrency_spin)
 
@@ -623,11 +634,17 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.trim_head_dbl.setDecimals(1)
         self.trim_head_dbl.setSingleStep(0.5)
         self.trim_head_dbl.setValue(0.0)
+        # 支持手动输入并即时解析
+        self.trim_head_dbl.setKeyboardTracking(True)
+        self.trim_head_dbl.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.trim_tail_dbl = QtWidgets.QDoubleSpinBox()
         self.trim_tail_dbl.setRange(0.0, 600.0)
         self.trim_tail_dbl.setDecimals(1)
         self.trim_tail_dbl.setSingleStep(0.5)
         self.trim_tail_dbl.setValue(0.0)
+        # 支持手动输入并即时解析
+        self.trim_tail_dbl.setKeyboardTracking(True)
+        self.trim_tail_dbl.setFocusPolicy(QtCore.Qt.StrongFocus)
         g2.addRow("剪裁头部(秒)", self.trim_head_dbl)
         g2.addRow("剪裁尾部(秒)", self.trim_tail_dbl)
 
