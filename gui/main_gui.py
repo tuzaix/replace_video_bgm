@@ -32,6 +32,7 @@ if not getattr(sys, "frozen", False):
 from gui.tabs.extract_frames_tab import ExtractFramesTab
 from gui.tabs.video_concat_tab import VideoConcatTab
 from gui.tabs.generate_cover_tab import GenerateCoverTab
+from gui.tabs.video_bgm_replace_tab import VideoBgmReplaceTab
 
 class MainWindow(QtWidgets.QMainWindow):
     """Main application window for Video Concat GUI.
@@ -84,6 +85,10 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "tab_name": "合成封面",
                 "tab_widget": GenerateCoverTab(self),
+            },
+            {
+                "tab_name": "BGM替换",
+                "tab_widget": VideoBgmReplaceTab(self),
             },
         ]
         # 注册到
