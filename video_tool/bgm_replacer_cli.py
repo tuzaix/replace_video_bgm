@@ -50,15 +50,15 @@ def main():
     parser.add_argument(
         "--original_volume",
         type=float,
-        default=1.0,
-        help="原声音量系数（默认 1.0）",
+        default=1,
+        help="原声音量系数（默认 1）",
     )
 
     parser.add_argument(
         "--bgm_volume",
         type=float,
-        default=1.0,
-        help="BGM 音量系数（默认 1.0）",
+        default=0.1,
+        help="BGM 音量系数（默认 0.7）",
     )
 
     parser.add_argument(

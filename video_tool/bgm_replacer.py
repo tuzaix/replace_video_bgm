@@ -94,27 +94,14 @@ class BGMReplacer:
                     voice_clip = None
 
             if voice_clip is not None:
-                voice_rms = self._estimate_rms(voice_clip, video_clip.duration)
-                bgm_rms = self._estimate_rms(bgm_clip, video_clip.duration)
-                eps = 1e-9
-                target_rel = 0.32
-                auto_bgm_scale = (voice_rms * target_rel) / (bgm_rms + eps) if bgm_rms > 0 else self.bgm_volume
-                voice_scale = max(0.0, float(self.original_volume))
-                bgm_scale = max(0.0, min(float(self.bgm_volume), auto_bgm_scale))
-                headroom = 0.95
-                total = voice_scale + bgm_scale
-                if total > headroom and total > 0:
-                    s = headroom / total
-                    voice_scale *= s
-                    bgm_scale *= s
-                voice_clip = voice_clip.volumex(voice_scale)
-                bgm_clip = bgm_clip.volumex(bgm_scale)
+                voice_clip = voice_clip.volumex(max(0.0, float(self.original_volume)))
+                bgm_clip = bgm_clip.volumex(max(0.0, float(self.bgm_volume)))
                 mixed_audio = CompositeAudioClip([voice_clip, bgm_clip]).set_duration(video_clip.duration)
             else:
-                bgm_clip = bgm_clip.volumex(min(self.bgm_volume, 0.95))
+                bgm_clip = bgm_clip.volumex(max(0.0, float(self.bgm_volume)))
                 mixed_audio = bgm_clip.set_duration(video_clip.duration)
         else:
-            bgm_clip = bgm_clip.volumex(min(self.bgm_volume, 0.95))
+            bgm_clip = bgm_clip.volumex(max(0.0, float(self.bgm_volume)))
             mixed_audio = bgm_clip.set_duration(video_clip.duration)
 
         video_clip = video_clip.set_audio(mixed_audio)
@@ -122,7 +109,7 @@ class BGMReplacer:
         ffmpeg_bin = shutil.which("ffmpeg")
         mux_success = False
         try:
-            mixed_audio.write_audiofile(str(temp_audio_out), fps=44100, codec="aac", logger=None)
+            mixed_audio.write_audiofile(str(temp_audio_out), fps=44100, codec="aac")
             if ffmpeg_bin:
                 cmd = [
                     ffmpeg_bin,
