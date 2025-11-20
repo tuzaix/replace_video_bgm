@@ -109,7 +109,7 @@ class BGMReplacer:
         ffmpeg_bin = shutil.which("ffmpeg")
         mux_success = False
         try:
-            mixed_audio.write_audiofile(str(temp_audio_out), fps=44100, codec="aac")
+            mixed_audio.write_audiofile(str(temp_audio_out), fps=44100, codec="aac", logger=None)
             if ffmpeg_bin:
                 cmd = [
                     ffmpeg_bin,
