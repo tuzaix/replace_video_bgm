@@ -50,7 +50,7 @@ class SeparateBgmDemucs:
 
         if output_dir is None:
             # 默认输出目录为 "视频文件名"
-            output_dir_path = video_p.parent / video_p.stem
+            output_dir_path = video_p.parent / "替换bgm临时" / video_p.stem
         else:
             output_dir_path = pathlib.Path(output_dir)
 

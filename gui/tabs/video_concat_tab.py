@@ -47,6 +47,7 @@ bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True
 from concat_tool.normalize_video import VideoNormalizer  # type: ignore
 from concat_tool.concat import VideoConcat  # type: ignore
 from gui.utils import theme
+from gui.precheck import run_preflight_checks
 
 class ConcatWorker(QtCore.QObject):
     """后台混剪工作者：先归一化素材，再按分辨率分组进行拼接。
@@ -696,7 +697,6 @@ class VideoConcatTab(QtWidgets.QWidget):
         self._apply_action_button_style(running=False)
        
         # 结果表
-         # 顶部控制区（分组：执行状态）
         result_group = QtWidgets.QGroupBox("执行结果")
         result_vbox = QtWidgets.QVBoxLayout(result_group)
         result_vbox.setContentsMargins(8, 8, 8, 8)
@@ -1030,6 +1030,12 @@ class VideoConcatTab(QtWidgets.QWidget):
     def _on_start_stop_clicked(self) -> None:
         """开始或停止任务：按钮在“开始/停止”两种状态互斥切换。"""
         if not self._is_running:
+            try:
+                app = QtWidgets.QApplication.instance()
+                if not (bool(run_preflight_checks(app)) if app is not None else False):
+                    return
+            except Exception:
+                return
             settings = self._collect_settings()
             if not settings:
                 return

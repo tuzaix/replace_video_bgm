@@ -13,11 +13,12 @@ from __future__ import annotations
 from typing import Optional, List, Tuple
 import os
 import threading
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6 import QtWidgets, QtCore, QtGui
 from gui.utils import theme
-
+from gui.precheck import run_preflight_checks
 
 def _is_video_file(path: str) -> bool:
     """判断是否为常见视频文件。"""
@@ -50,7 +51,7 @@ class BgmReplaceWorker(QtCore.QObject):
     finished = QtCore.Signal()
     error = QtCore.Signal(str)
     row_added = QtCore.Signal(str, float, int)
-    start = QtCore.Signal(list, str, bool, float, float, int)
+    start = QtCore.Signal(list, str, str, bool, float, float, int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -60,8 +61,8 @@ class BgmReplaceWorker(QtCore.QObject):
         """请求停止，已在执行的任务自然结束。"""
         self._stopping = True
 
-    @QtCore.Slot(list, str, bool, float, float, int)
-    def run(self, videos: List[str], bgm_path_or_dir: str, keep_voice: bool, voice_gain: float, bgm_gain: float, threads: int) -> None:
+    @QtCore.Slot(list, str, str, bool, float, float, int)
+    def run(self, videos: List[str], bgm_path_or_dir: str, output_dir: str, keep_voice: bool, voice_gain: float, bgm_gain: float, threads: int) -> None:
         """执行替换任务。"""
         try:
             from video_tool.bgm_replacer import bgm_replacer
@@ -105,10 +106,16 @@ class BgmReplaceWorker(QtCore.QObject):
             try:
                 parent = os.path.dirname(vpath)
                 default_out = os.path.join(parent, "BGM替换")
+                user_out = str(output_dir or "").strip()
+                use_out = user_out if user_out else default_out
+                try:
+                    os.makedirs(use_out, exist_ok=True)
+                except Exception:
+                    pass
                 out_path = bgm_replacer(
                     video_path=vpath,
                     bgm_path=bgm_resolved,
-                    output_dir=default_out,
+                    output_dir=use_out,
                     keep_original_voice=keep_voice,
                     original_volume=voice_gain,
                     bgm_volume=bgm_gain,
@@ -235,15 +242,28 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
         self.keep_voice_cb.setChecked(True)
         g2.addWidget(self.keep_voice_cb)
 
+        row_style = QtWidgets.QHBoxLayout()
+        row_style.addWidget(QtWidgets.QLabel("风格"), 0)
+        self.style_combo = QtWidgets.QComboBox()
+        self.style_combo.addItems(["视频解说/纪录片", "音乐陪音(歌曲)", "KTV/直播演唱", "广播稿合播音", "自定义"])
+        self.style_hint = QtWidgets.QLabel("")
+        try:
+            self.style_combo.currentIndexChanged.connect(self._on_style_changed)
+        except Exception:
+            pass
+        row_style.addWidget(self.style_combo, 1)
+        row_style.addWidget(self.style_hint)
+        g2.addLayout(row_style)
+
         row_voice = QtWidgets.QHBoxLayout()
         row_voice.addWidget(QtWidgets.QLabel("原声音量(dB)"), 0)
-        self.voice_min_label = QtWidgets.QLabel("-5")
+        self.voice_min_label = QtWidgets.QLabel("-12")
         self.voice_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.voice_slider.setRange(-5, 5)
+        self.voice_slider.setRange(-12, 6)
         self.voice_slider.setValue(0)
         self.voice_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
         self.voice_slider.setTickInterval(1)
-        self.voice_max_label = QtWidgets.QLabel("+5")
+        self.voice_max_label = QtWidgets.QLabel("+6")
         self.voice_val_label = QtWidgets.QLabel("0 dB")
         try:
             self.voice_slider.valueChanged.connect(self._on_voice_slider_changed)
@@ -257,14 +277,14 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
 
         row_bgmv = QtWidgets.QHBoxLayout()
         row_bgmv.addWidget(QtWidgets.QLabel("BGM音量(dB)"), 0)
-        self.bgm_min_label = QtWidgets.QLabel("0")
+        self.bgm_min_label = QtWidgets.QLabel("10%")
         self.bgm_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.bgm_slider.setRange(0, 100)
-        self.bgm_slider.setValue(50)
+        self.bgm_slider.setRange(10, 60)
+        self.bgm_slider.setValue(25)
         self.bgm_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
         self.bgm_slider.setTickInterval(5)
-        self.bgm_max_label = QtWidgets.QLabel("100")
-        self.bgm_val_label = QtWidgets.QLabel("0.50")
+        self.bgm_max_label = QtWidgets.QLabel("60%")
+        self.bgm_val_label = QtWidgets.QLabel("0.25")
         try:
             self.bgm_slider.valueChanged.connect(self._on_bgm_slider_changed)
         except Exception:
@@ -284,6 +304,10 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
         g2.addLayout(row_threads)
 
         layout.addWidget(group2)
+        try:
+            self._on_style_changed()
+        except Exception:
+            pass
         layout.addStretch(1)
         return container
 
@@ -301,6 +325,11 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
         row_ctl = QtWidgets.QHBoxLayout()
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
+        try:
+            self.progress.setTextVisible(True)
+            self.progress.setFormat("0 | 0")
+        except Exception:
+            pass
         self.btn_start = QtWidgets.QPushButton("开始")
         self.btn_start.clicked.connect(self._on_toggle_start)
         try:
@@ -389,6 +418,12 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
 
     def _start_tasks(self) -> None:
         """启动后台任务。"""
+        try:
+            app = QtWidgets.QApplication.instance()
+            if not (bool(run_preflight_checks(app)) if app is not None else False):
+                return
+        except Exception:
+            return
         dirs = [self.video_list.item(i).text() for i in range(self.video_list.count())]
         if not dirs:
             QtWidgets.QMessageBox.warning(self, "提示", "请先添加至少一个视频目录")
@@ -407,6 +442,13 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
         if not videos:
             QtWidgets.QMessageBox.warning(self, "提示", "所选目录中未找到视频文件")
             return
+        try:
+            self.table.setRowCount(0)
+            self.progress.setMaximum(100)
+            self.progress.setValue(0)
+            self.progress.setFormat("0 | 0")
+        except Exception:
+            pass
         bgm = self.bgm_edit.text().strip()
         if not bgm:
             QtWidgets.QMessageBox.warning(self, "提示", "请先选择背景音乐（文件或目录）")
@@ -421,7 +463,8 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
         self._thread = QtCore.QThread(self)
         self._worker.moveToThread(self._thread)
         self._worker.start.connect(self._worker.run)
-        self._thread.started.connect(lambda: self._worker.start.emit(videos, bgm, keep_voice, voice_gain, bgm_gain, threads))
+        out_dir = self.output_edit.text().strip()
+        self._thread.started.connect(lambda: self._worker.start.emit(videos, bgm, out_dir, keep_voice, voice_gain, bgm_gain, threads))
         self._worker.progress.connect(self._on_progress)
         self._worker.row_added.connect(self._on_row_added)
         self._worker.finished.connect(self._on_finished)
@@ -456,13 +499,14 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
 
     def _on_progress(self, done: int, total: int) -> None:
         """更新进度条。"""
-        val = 0
         try:
-            if total > 0:
-                val = int(100 * done / total)
+            t = max(0, int(total))
+            d = max(0, int(done))
+            self.progress.setMaximum(t)
+            self.progress.setValue(min(d, t))
+            self.progress.setFormat(f"{d} | {t}")
         except Exception:
-            val = 0
-        self.progress.setValue(max(0, min(100, val)))
+            pass
 
     def _on_row_added(self, path: str, dur: float, size: int) -> None:
         """加入一行结果。"""
@@ -476,7 +520,33 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
     def _on_finished(self) -> None:
         """任务完成。"""
         self._stop_tasks()
-        QtWidgets.QMessageBox.information(self, "完成", "BGM替换已完成")
+        try:
+            out_dir = self.output_edit.text().strip()
+        except Exception:
+            out_dir = ""
+        if not out_dir:
+            try:
+                if self.table.rowCount() > 0:
+                    pitem = self.table.item(0, 0)
+                    if pitem:
+                        out_dir = os.path.dirname(pitem.text())
+            except Exception:
+                pass
+        try:
+            if out_dir and os.path.isdir(out_dir):
+                ret = QtWidgets.QMessageBox.question(
+                    self,
+                    "完成",
+                    f"BGM替换已完成。是否打开输出目录？\n{out_dir}",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.Yes,
+                )
+                if ret == QtWidgets.QMessageBox.Yes:
+                    _open_file_in_os(out_dir)
+            else:
+                QtWidgets.QMessageBox.information(self, "完成", "BGM替换已完成")
+        except Exception:
+            QtWidgets.QMessageBox.information(self, "完成", "BGM替换已完成")
 
     def _on_error(self, msg: str) -> None:
         """错误提示。"""
@@ -494,6 +564,7 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
         """更新原声音量显示。"""
         try:
             self.voice_val_label.setText(f"{int(v)} dB")
+            self._maybe_set_style_custom_due_to_slider()
         except Exception:
             pass
 
@@ -502,6 +573,67 @@ class VideoBgmReplaceTab(QtWidgets.QWidget):
         try:
             vv = max(0, min(100, int(v)))
             self.bgm_val_label.setText(f"{vv/100:.2f}")
+            self._maybe_set_style_custom_due_to_slider()
+        except Exception:
+            pass
+
+    def _on_style_changed(self) -> None:
+        try:
+            name = self.style_combo.currentText().strip()
+        except Exception:
+            name = ""
+        presets = {
+            "视频解说/纪录片": (0.90, 0.25),
+            "音乐陪音(歌曲)": (0.60, 0.40),
+            "KTV/直播演唱": (0.60, 0.40),
+            "广播稿合播音": (0.80, 0.20),
+        }
+        try:
+            if name in presets:
+                vr, br = presets[name]
+                db = int(round(20.0 * math.log10(max(0.0001, float(vr)))))
+                db = max(-5, min(5, db))
+                bv = int(round(float(br) * 100.0))
+                bv = max(0, min(100, bv))
+                self._syncing_style = True
+                try:
+                    self.voice_slider.setValue(db)
+                    self.bgm_slider.setValue(bv)
+                    self.voice_val_label.setText(f"{db} dB")
+                    self.bgm_val_label.setText(f"{br:.2f}")
+                finally:
+                    self._syncing_style = False
+                try:
+                    self.style_hint.setText(f"人声≈{int(vr*100)}%  BGM≈{int(br*100)}%")
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.style_hint.setText("自定义")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _maybe_set_style_custom_due_to_slider(self) -> None:
+        try:
+            if getattr(self, "_syncing_style", False):
+                return
+            name = self.style_combo.currentText().strip()
+            presets = {
+                "视频解说/纪录片": (0.90, 0.25),
+                "音乐陪音(歌曲)": (0.60, 0.40),
+                "KTV/直播演唱": (0.60, 0.40),
+                "广播稿合播音": (0.80, 0.20),
+            }
+            if name in presets:
+                vr, br = presets[name]
+                db_expect = int(round(20.0 * math.log10(max(0.0001, float(vr)))))
+                bv_expect = int(round(float(br) * 100.0))
+                if int(self.voice_slider.value()) != db_expect or int(self.bgm_slider.value()) != bv_expect:
+                    idx = self.style_combo.findText("自定义")
+                    if idx >= 0:
+                        self.style_combo.setCurrentIndex(idx)
         except Exception:
             pass
 
