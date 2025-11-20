@@ -6,6 +6,7 @@ from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
 
 from utils.gpu_detect import is_nvenc_available
+from utils.xprint import xprint
 from video_tool.separate_bgm_demucs import separate_bgm_demucs
 
 class BGMReplacer:
@@ -47,27 +48,27 @@ class BGMReplacer:
         """
 
         if not self.video_path.is_file():
-            print(f"错误：视频文件不存在 -> {self.video_path}")
+            xprint(f"错误：视频文件不存在 -> {self.video_path}")
             return None
         if not self.bgm_path.is_file():
-            print(f"错误：BGM 文件不存在 -> {self.bgm_path}")
+            xprint(f"错误：BGM 文件不存在 -> {self.bgm_path}")
             return None
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         final_out = self.output_dir / f"{self.video_path.stem}_with_bgm.mp4"
         if final_out.exists():
-            print(f"已存在合成视频，跳过处理: {final_out}")
+            xprint(f"已存在合成视频，跳过处理: {final_out}")
             return final_out
 
         ret_output_dir_path = separate_bgm_demucs(str(self.video_path), model="htdemucs", use_device=self.device)
         if ret_output_dir_path is None:
-            print("错误：BGM 分离失败")
+            xprint("错误：BGM 分离失败")
             return None
 
         silent_video_path = ret_output_dir_path / f"{self.video_path.stem}_no_audio.mp4"
         if not silent_video_path.exists():
-            print("错误：未找到无声视频文件，分离步骤可能失败。")
+            xprint("错误：未找到无声视频文件，分离步骤可能失败。")
             return None
 
         video_clip = VideoFileClip(str(silent_video_path))
@@ -127,13 +128,13 @@ class BGMReplacer:
                 logger=None,
             )
         except Exception as e:
-            print(f"错误：写出合成视频失败: {e}")
+            xprint(f"错误：写出合成视频失败: {e}")
             video_clip.close()
             return None
         finally:
             video_clip.close()
 
-        print(f"已输出合成视频: {final_out}")
+        xprint(f"已输出合成视频: {final_out}")
         return final_out
 
     def _estimate_rms(self, clip: AudioFileClip, duration: float, segments: int = 5, seg_len: float = 2.0) -> float:

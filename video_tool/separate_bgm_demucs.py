@@ -9,6 +9,7 @@ import soundfile as sf
 import numpy as np
 import torch
 
+from utils.xprint import xprint
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
 
@@ -31,7 +32,7 @@ class SeparateBgmDemucs:
         self.model = model
         self.use_device = use_device
 
-        print(f"正在使用设备: {self.use_device}")
+        xprint(f"正在使用设备: {self.use_device}")
 
     def separate(self, video_path: str, output_dir: str = None):
         """
@@ -44,7 +45,7 @@ class SeparateBgmDemucs:
         """
         video_p = pathlib.Path(video_path)
         if not video_p.is_file():
-            print(f"错误：视频文件不存在 -> {video_path}")
+            xprint(f"错误：视频文件不存在 -> {video_path}")
             return
 
         if output_dir is None:
@@ -54,49 +55,49 @@ class SeparateBgmDemucs:
             output_dir_path = pathlib.Path(output_dir)
 
         output_dir_path.mkdir(parents=True, exist_ok=True)
-        print(f"输出目录: {output_dir_path}")
+        xprint(f"输出目录: {output_dir_path}")
 
         # --- 预检查：如果已有生成文件则直接返回 ---
         try:
             silent_video_candidate = output_dir_path / f"{video_p.stem}_no_audio.mp4"
             existing_wavs = [p for p in output_dir_path.glob("*.wav") if p.name != "temp_audio_for_demucs.wav"]
             if silent_video_candidate.exists() and len(existing_wavs) > 0:
-                print("检测到已生成的无声视频及至少一个音轨文件，跳过分离。")
+                xprint("检测到已生成的无声视频及至少一个音轨文件，跳过分离。")
                 return output_dir_path
         except Exception:
             pass
 
         # --- 1. 加载视频 ---
-        print("正在加载视频...")
+        xprint("正在加载视频...")
         try:
             video = VideoFileClip(str(video_path))
         except Exception as e:
-            print(f"错误：无法加载视频文件 '{video_path}': {e}")
+            xprint(f"错误：无法加载视频文件 '{video_path}': {e}")
             return
 
         # --- 2. 创建无声视频 ---
         silent_video_path = output_dir_path / f"{video_p.stem}_no_audio.mp4"
-        print("正在创建无声视频...")
+        xprint("正在创建无声视频...")
         try:
             video.write_videofile(str(silent_video_path), audio=False, logger=None)
-            print(f"已生成无声视频: {silent_video_path}")
+            xprint(f"已生成无声视频: {silent_video_path}")
         except Exception as e:
-            print(f"错误：创建无声视频失败: {e}")
+            xprint(f"错误：创建无声视频失败: {e}")
             video.close()
             return 
 
         # --- 3. 提取音频 ---
         if not video.audio:
-            print(f"警告: 视频 '{video_path}' 不包含音轨，仅生成无声视频。")
+            xprint(f"警告: 视频 '{video_path}' 不包含音轨，仅生成无声视频。")
             video.close()
             return
             
         temp_audio_path = output_dir_path / f"temp_audio_for_demucs.wav"
-        print("正在从视频提取音频...")
+        xprint("正在从视频提取音频...")
         try:
             video.audio.write_audiofile(str(temp_audio_path))
         except Exception as e:
-            print(f"错误：提取音频失败: {e}")
+            xprint(f"错误：提取音频失败: {e}")
             video.close()
             return
         finally:
@@ -104,16 +105,16 @@ class SeparateBgmDemucs:
 
         # --- 4. 使用 Demucs Python API 进行分离并以 WAV 保存 ---
         # 通过 Python API 直接获得分离的音轨，避免 torchcodec 依赖导致的保存失败。
-        print(f"正在使用 Demucs ({self.model}) 分离音轨 (这可能需要很长时间)...")
+        xprint(f"正在使用 Demucs ({self.model}) 分离音轨 (这可能需要很长时间)...")
 
         try:
             # 加载模型
             model = get_model(self.model)
             use_cuda = torch.cuda.is_available() and self.use_device == "gpu"
             device = torch.device("cuda" if use_cuda else "cpu")
-            print(f"正在使用设备: {device}, {use_cuda}")
+            xprint(f"正在使用设备: {device}, {use_cuda}")
             if use_cuda:
-                print("支持 CUDA，将使用 GPU 加速。")
+                xprint("支持 CUDA，将使用 GPU 加速。")
                 try:
                     torch.backends.cudnn.benchmark = True
                 except Exception:
@@ -141,7 +142,7 @@ class SeparateBgmDemucs:
                     stems = apply_model(model, inp, device=device)[0]
             except RuntimeError as re:
                 if use_cuda and "out of memory" in str(re).lower():
-                    print("GPU 显存不足，正在回退到 CPU 处理...")
+                    xprint("GPU 显存不足，正在回退到 CPU 处理...")
                     device = torch.device("cpu")
                     model.to(device)
                     inp = inp.to(device)
@@ -156,28 +157,28 @@ class SeparateBgmDemucs:
             # 获取音轨名称（例如 ['vocals', 'drums', 'bass', 'other'] 或 6 stems）
             stem_names = getattr(model, 'sources', [f'stem_{i}' for i in range(stems.shape[0])])
 
-            print("正在保存分离后的音轨为 WAV...")
+            xprint("正在保存分离后的音轨为 WAV...")
             for i, name in enumerate(stem_names):
                 out_path = output_dir_path / f"{name}.wav"
                 # soundfile 期望 [samples, channels]
                 audio = stems[i].detach().cpu().numpy().T
                 # 保存为 16-bit PCM，便于通用播放器兼容
                 sf.write(str(out_path), audio, sample_rate, subtype='PCM_16')
-                print(f"已保存: {out_path}")
+                xprint(f"已保存: {out_path}")
 
-            print(f"分离完成！音轨文件已保存到: {output_dir_path}")
+            xprint(f"分离完成！音轨文件已保存到: {output_dir_path}")
 
         except Exception as e:
             import traceback
-            print(f"Demucs 分离失败: {e}")
+            xprint(f"Demucs 分离失败: {e}")
             traceback.print_exc()
         finally:
             # --- 5. 清理临时文件 ---
             if temp_audio_path.exists():
                 os.remove(temp_audio_path)
-                print(f"已删除临时音频文件: {temp_audio_path}")
+                xprint(f"已删除临时音频文件: {temp_audio_path}")
 
-        print("所有操作完成。")
+        xprint("所有操作完成。")
         return output_dir_path
 
 
