@@ -37,7 +37,6 @@ def _prepend_path(dir_path: str) -> None:
     if dir_path not in parts:
         os.environ["PATH"] = dir_path + (os.pathsep + current if current else "")
 
-
 def bootstrap_ffmpeg_env(
     prefer_bundled: bool = True,
     dev_fallback_env: bool = True,

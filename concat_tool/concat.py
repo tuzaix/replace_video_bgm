@@ -106,27 +106,6 @@ class VideoConcat:
                 f.write(f"file '{abspath}'\n")
         return list_path
 
-    # def _nvenc_available(self) -> bool:
-    #     """Return True if local FFmpeg supports `h264_nvenc` encoder."""
-    #     ffmpeg_bin = shutil.which("ffmpeg")
-    #     if not ffmpeg_bin:
-    #         return False
-    #     try:
-    #         res = subprocess.run([ffmpeg_bin, "-hide_banner", "-encoders"], capture_output=True)
-    #         if res.returncode != 0:
-    #             return False
-    #         stdout = ""
-    #         try:
-    #             stdout = (res.stdout or b"").decode("utf-8", errors="ignore")
-    #         except Exception:
-    #             try:
-    #                 stdout = (res.stdout or b"").decode("mbcs", errors="ignore")
-    #             except Exception:
-    #                 stdout = ""
-    #         return "h264_nvenc" in stdout
-    #     except Exception:
-    #         return False
-
     def _build_ffmpeg_cmd(self, list_path: Path) -> List[str]:
         """Build the FFmpeg command for concat and optional BGM replacement.
 
