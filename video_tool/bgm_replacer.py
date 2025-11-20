@@ -1,5 +1,7 @@
 import pathlib
 import numpy as np
+import shutil
+import subprocess
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
 from moviepy.audio.fx import all as afx
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
@@ -116,23 +118,59 @@ class BGMReplacer:
             mixed_audio = bgm_clip.set_duration(video_clip.duration)
 
         video_clip = video_clip.set_audio(mixed_audio)
+        temp_audio_out = self.output_dir / f"{self.video_path.stem}_temp_mixed.m4a"
+        ffmpeg_bin = shutil.which("ffmpeg")
+        mux_success = False
         try:
-            use_nvenc = is_nvenc_available()
-            codec = "h264_nvenc" if use_nvenc else "libx264"
-            ffmpeg_params = ["-preset", "p7", "-cq", "33"] if use_nvenc else ["-preset", "slow", "-crf", "28"]
-            video_clip.write_videofile(
-                str(final_out),
-                audio_codec="aac",
-                codec=codec,
-                ffmpeg_params=ffmpeg_params,
-                logger=None,
-            )
+            mixed_audio.write_audiofile(str(temp_audio_out), fps=44100, codec="aac", logger=None)
+            if ffmpeg_bin:
+                cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-i",
+                    str(self.video_path),
+                    "-i",
+                    str(temp_audio_out),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "1:a:0",
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                    str(final_out),
+                ]
+                subprocess.run(cmd, check=True, capture_output=True, encoding="utf-8")
+                mux_success = final_out.exists()
         except Exception as e:
-            xprint(f"错误：写出合成视频失败: {e}")
+            xprint(f"警告：FFmpeg 复用失败，将回退到重编码: {e}")
+    
+        if not mux_success:
+            try:
+                use_nvenc = is_nvenc_available()
+                codec = "h264_nvenc" if use_nvenc else "libx264"
+                ffmpeg_params = ["-preset", "p7", "-cq", "33"] if use_nvenc else ["-preset", "slow", "-crf", "28"]
+                video_clip.write_videofile(
+                    str(final_out),
+                    audio_codec="aac",
+                    codec=codec,
+                    ffmpeg_params=ffmpeg_params,
+                    logger=None,
+                )
+            except Exception as e:
+                xprint(f"错误：写出合成视频失败: {e}")
+        try:
             video_clip.close()
-            return None
-        finally:
-            video_clip.close()
+        except Exception:
+            pass
+
+        try:
+            if temp_audio_out.exists():
+                temp_audio_out.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         xprint(f"已输出合成视频: {final_out}")
         return final_out
