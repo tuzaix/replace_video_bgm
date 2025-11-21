@@ -22,13 +22,12 @@ from typing import List, Tuple, Optional
 import os
 import json
 import pathlib
-from demucs.pretrained import get_model
-from demucs.apply import apply_model
-import soundfile as sf
 import numpy as np
 import torch
 import librosa
-import numpy as np
+import soundfile as sf
+from demucs.pretrained import get_model
+from demucs.apply import apply_model
 
      
 
@@ -72,7 +71,6 @@ class BeatsCheckpoint:
 
         use_cuda = False
         try:
-            import torch  # noqa: F401
             use_cuda = torch.cuda.is_available() and self.device == "gpu"
         except Exception:
             use_cuda = False
@@ -90,29 +88,25 @@ class BeatsCheckpoint:
             model.to(torch_device)
             model.eval()
 
-            import soundfile as sf
-            import numpy as np
-
             wav_np, sample_rate = sf.read(str(self.audio_path), always_2d=True)
             wav_np = np.transpose(wav_np)  # [channels, samples]
-            import torch as _torch
-            wav = _torch.from_numpy(wav_np).float().to(torch_device)
+            wav = torch.from_numpy(wav_np).float().to(torch_device)
             inp = wav.unsqueeze(0)  # [1, channels, samples]
 
             try:
                 if use_cuda:
-                    with _torch.cuda.amp.autocast():
+                    with torch.cuda.amp.autocast():
                         stems = apply_model(model, inp, device=torch_device)[0]
                 else:
                     stems = apply_model(model, inp, device=torch_device)[0]
             except RuntimeError as re:
                 if use_cuda and "out of memory" in str(re).lower():
                     device = "cpu"
-                    torch_device = _torch.device("cpu")
+                    torch_device = torch.device("cpu")
                     model.to(torch_device)
                     inp = inp.to(torch_device)
                     try:
-                        _torch.cuda.empty_cache()
+                        torch.cuda.empty_cache()
                     except Exception:
                         pass
                     stems = apply_model(model, inp, device=torch_device)[0]
@@ -125,7 +119,6 @@ class BeatsCheckpoint:
                 drums_idx = stem_names.index("drums")
             except Exception:
                 # 若模型无 drums 名称，则选择能量最大的一轨作为替代
-                import numpy as np
                 energies = [float(np.mean(np.abs(stems[i].detach().cpu().numpy()))) for i in range(stems.shape[0])]
                 drums_idx = int(max(range(len(energies)), key=lambda i: energies[i]))
 
@@ -214,12 +207,6 @@ class BeatsCheckpoint:
         (waveform_values, duration, sample_rate)
         """
         try:
-            import librosa
-            import numpy as np
-        except Exception:
-            return [], 0.0, 0
-
-        try:
             y, sr = librosa.load(str(self.audio_path), sr=22050)
             duration = float(librosa.get_duration(y=y, sr=sr))
             total = max(1, int(duration * points_per_second))
@@ -231,7 +218,6 @@ class BeatsCheckpoint:
                 rmax = float(rms.max())
                 if rmax > rmin:
                     norm = (rms - rmin) / (rmax - rmin)
-                    import numpy as np
                     values = np.round(norm, 3).tolist()
             return values, duration, sr
         except Exception:
@@ -239,11 +225,6 @@ class BeatsCheckpoint:
 
     def _find_highlight_segment(self, beats: List[float], duration: float, clip_duration: float = 30.0) -> dict:
         """在整段音频中寻找 30 秒“卡点最密集”片段。"""
-        try:
-            import numpy as np
-        except Exception:
-            return {"start_time": 0.0, "end_time": float(min(clip_duration, duration)), "beat_count": int(len(beats))}
-
         if float(duration) <= float(clip_duration):
             return {"start_time": 0.0, "end_time": float(duration), "beat_count": int(len(beats))}
 
@@ -251,7 +232,6 @@ class BeatsCheckpoint:
         step = 0.5
         best_start = 0.0
         best_cnt = 0
-        import numpy as np
         for start in np.arange(0.0, float(duration) - float(clip_duration), step):
             end = start + float(clip_duration)
             i0 = int(np.searchsorted(arr, start, side="left"))
