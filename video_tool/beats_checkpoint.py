@@ -183,7 +183,16 @@ class BeatsCheckpoint:
             mi = max(0.2, float(mi))
             ts = self._filter_fixed(ts, mi)
 
-        payload = {"audio": str(ap), "timestamps": ts, "mode": mode}
+        # 把时间戳转换成对应的鼓点时间，格式是：{"idx": 0, "start_time": 秒, "end_time": 秒, "duration": 秒}
+        beats_point = []
+        for i in range(len(ts) - 1):
+            beats_point.append({
+                "idx": i,
+                "start_time": ts[i],
+                "end_time": ts[i + 1],
+                "duration": ts[i + 1] - ts[i],
+            })
+        payload = {"audio": str(ap), "timestamps": ts, "mode": mode, "beats_point": beats_point}
         try:
             with open(out_json, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
