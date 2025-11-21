@@ -242,10 +242,10 @@ class BeatsCheckpoint:
         try:
             import numpy as np
         except Exception:
-            return {"start": 0.0, "end": float(min(clip_duration, duration)), "beat_count": int(len(beats))}
+            return {"start_time": 0.0, "end_time": float(min(clip_duration, duration)), "beat_count": int(len(beats))}
 
         if float(duration) <= float(clip_duration):
-            return {"start": 0.0, "end": round(float(duration), 2), "beat_count": int(len(beats))}
+            return {"start_time": 0.0, "end_time": float(duration), "beat_count": int(len(beats))}
 
         arr = np.array(sorted(beats), dtype=float)
         step = 0.5
@@ -268,16 +268,7 @@ class BeatsCheckpoint:
         if drums_path is None or not drums_path.exists():
             return None
         beats = self._detect_beats(drums_path, mode=mode, min_interval=min_interval)
-        # beats_checkpoint_meta每个鼓点的元信息，方便后面用来做视频切片，数据格式是{idx: x, start_time: x, end_time: x, duration: x}
-        beats_checkpoint_meta = []
-        for idx, beat in enumerate(beats):
-            beats_checkpoint_meta.append({
-                "idx": idx,
-                "start_time": float(beat),
-                "end_time": float(beat + 0.5),
-                "duration": float(0.5),
-            })
-
+       
         wf_vals, duration, sr = self._compute_waveform(points_per_second=15)
         highlight = self._find_highlight_segment(beats, duration, clip_duration=30.0)
 
@@ -286,7 +277,6 @@ class BeatsCheckpoint:
             "mode": str(mode),
             "min_interval": None if min_interval is None else float(min_interval),
             "beats": beats,
-            "beats_checkpoint_meta": beats_checkpoint_meta,
             "waveform": {
                 "points_per_second": 15,
                 "values": wf_vals,
