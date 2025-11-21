@@ -22,6 +22,14 @@ def main() -> None:
         default=None,
         help="卡点窗口，格式 'start,end'（秒）。为空则使用元数据建议窗口",
     )
+    # 增加对视频素材的支持
+    parser.add_argument(
+        "--media_type",
+        dest="media_type",
+        type=str,
+        default="video",
+        help="素材类型：'video' 或 'image'（默认 'video'）",
+    )
 
     args = parser.parse_args()
 
@@ -34,16 +42,17 @@ def main() -> None:
         except Exception:
             window = None
 
-    output_dir = args.output_dir or pathlib.Path(args.media_dir) / "beats_mixed"
+    output_dir = str(args.output_dir or pathlib.Path(args.media_dir) / "beats_mixed")
 
     print(f"音频文件: {args.audio_path}")
     print(f"元数据: {args.beats_meta}")
     print(f"素材目录: {args.media_dir}")
     print(f"输出目录: {output_dir}")
     print(f"窗口: {window or '使用建议窗口'}")
+    print(f"素材类型: {args.media_type}")
     print("-" * 30)
 
-    media_data = get_resolution_topn(args.media_dir, top_n=1, media_type="video")
+    media_data = get_resolution_topn(args.media_dir, top_n=1, media_type=args.media_type)
     media_resolution, media_count, media_files = media_data["resolution"], media_data["count"], media_data["files"]
     if media_files:
         print(f"素材文件中最高分辨率: {media_resolution}，共 {media_count} 个文件")

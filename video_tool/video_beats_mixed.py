@@ -4,11 +4,11 @@ import os
 import json
 import random
 import pathlib
+import traceback
 from typing import Optional, Tuple, List, Dict, Any
 from moviepy.editor import concatenate_videoclips, AudioFileClip, VideoFileClip, ImageClip
 from moviepy.video.fx import all as vfx
 from utils.gpu_detect import is_nvenc_available
-
 
 class VideoBeatsMixed:
     """根据 BGM 卡点元数据与用户选择窗口，使用视频/图片素材合成卡点视频。"""
@@ -28,16 +28,72 @@ class VideoBeatsMixed:
             raise ValueError("beats_meta dict must not be empty")
         if (not isinstance(media_files, list)) or (len(media_files) == 0):
             raise ValueError("media_files must be a non-empty list")
-        if not media_files:
-            raise ValueError("media_files must not be empty")
         if (not isinstance(output_dir, str)) or (not output_dir.strip()):
             raise ValueError("output_dir must not be empty")
 
         self.audio_path = pathlib.Path(audio_path)
         self.media_files = [pathlib.Path(p) for p in media_files]
         self.output_dir = pathlib.Path(output_dir)
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         self.window = window
         self.meta = beats_meta
+    
+    def _make_video_clip(self, path: pathlib.Path, dur: float) -> Any:
+        """构建视频片段：随机截取到目标时长，不足则循环补齐。"""
+        v = VideoFileClip(str(path))
+        vdur = float(v.duration or 0.0)
+        if vdur > dur:
+            start = 0.0
+            try:
+                start = random.uniform(0.0, max(0.0, vdur - dur))
+            except Exception:
+                start = 0.0
+            clip = v.subclip(start, start + dur)
+        else:
+            clip = v.subclip(0, max(0.0, min(dur, vdur)))
+            try:
+                need = max(0.0, dur - float(clip.duration or 0.0))
+                if need > 0.05:
+                    clip = clip.fx(vfx.loop, duration=dur)
+            except Exception:
+                pass
+        return clip
+
+    def _make_image_clip(self, path: pathlib.Path, dur: float) -> Any:
+        """构建图片片段：设置目标时长并提供默认帧率。"""
+        try:
+            return ImageClip(str(path)).set_duration(dur).set_fps(24)
+        except Exception:
+            return ImageClip(str(path)).set_duration(dur)
+
+    def _build_clips_from_images(self, beats_info: List[Dict[str, Any]], picks: List[pathlib.Path]) -> List[Any]:
+        """根据卡点时长生成图片片段列表。"""
+        clips: List[Any] = []
+        for info, path in zip(beats_info, picks):
+            dur = max(0.2, float(info.get("duration", 0.5)))
+            try:
+                clips.append(self._make_image_clip(path, dur))
+            except Exception:
+                continue
+        return clips
+
+    def _build_clips_from_media(self, beats_info: List[Dict[str, Any]], picks: List[pathlib.Path]) -> List[Any]:
+        """根据素材类型（视频/图片）生成对应片段列表。"""
+        clips: List[Any] = []
+        for info, path in zip(beats_info, picks):
+            dur = max(0.2, float(info.get("duration", 0.5)))
+            try:
+                if self._is_video_file(path.name):
+                    clip = self._make_video_clip(path, dur)
+                else:
+                    clip = self._make_image_clip(path, dur)
+                clips.append(clip)
+            except Exception:
+                continue
+        return clips
         
     @staticmethod
     def _is_video_file(path: str) -> bool:
@@ -191,6 +247,7 @@ class VideoBeatsMixed:
         try:
             final = concatenate_videoclips(clips, method="compose")
         except Exception:
+            traceback.print_exc()
             return None
 
         s, e = audio_window
@@ -199,23 +256,28 @@ class VideoBeatsMixed:
                 bgm = AudioFileClip(str(self.audio_path)).subclip(s, e)
                 final = final.set_audio(bgm)
         except Exception:
+            traceback.print_exc()   
             pass
 
         try:
             use_nvenc = bool(is_nvenc_available())
         except Exception:
+            traceback.print_exc()
             use_nvenc = False
         codec = "h264_nvenc" if use_nvenc else "libx264"
         ffmpeg_params = ["-preset", "p6", "-cq", "32"] if use_nvenc else ["-preset", "slow", "-crf", "28"]
+        fps = getattr(final, "fps", None) or 30
         try:
             final.write_videofile(
                 str(out_path),
                 audio_codec="aac",
                 codec=codec,
                 ffmpeg_params=ffmpeg_params,
+                fps=fps,
                 logger=None,
             )
         except Exception:
+            traceback.print_exc()
             return None
         finally:
             try:
@@ -230,38 +292,15 @@ class VideoBeatsMixed:
         beats_info = self._extract_beats_info(window)
         if not beats_info:
             return None
+        # 若仅提供图片素材，走独立的图片剪辑构建流程
+        img_only = all(self._is_image_file(p.name) for p in self.media_files) and len(self.media_files) > 0
         picks = self._collect_media(len(beats_info))
         if not picks:
             return None
-
-        clips: List[Any] = []
-        for info, path in zip(beats_info, picks):
-            dur = max(0.2, float(info.get("duration", 0.5)))
-            try:
-                if self._is_video_file(path.name):
-                    v = VideoFileClip(str(path))
-                    vdur = float(v.duration or 0.0)
-                    if vdur > dur:
-                        start = 0.0
-                        try:
-                            start = random.uniform(0.0, max(0.0, vdur - dur))
-                        except Exception:
-                            start = 0.0
-                        clip = v.subclip(start, start + dur)
-                    else:
-                        clip = v.subclip(0, max(0.0, min(dur, vdur)))
-                        # 若视频长度不足，循环填充到目标时长
-                        try:
-                            need = max(0.0, dur - float(clip.duration or 0.0))
-                            if need > 0.05:
-                                clip = clip.fx(vfx.loop, duration=dur)
-                        except Exception:
-                            pass
-                else:
-                    clip = ImageClip(str(path)).set_duration(dur)
-                clips.append(clip)
-            except Exception:
-                continue
+        if img_only:
+            clips = self._build_clips_from_images(beats_info, picks)
+        else:
+            clips = self._build_clips_from_media(beats_info, picks)
 
         # 对齐总时长到窗口长度：最后一段微调
         try:
@@ -271,7 +310,7 @@ class VideoBeatsMixed:
             if diff > 0.05:
                 last = clips[-1]
                 try:
-                    from moviepy.video.fx import all as vfx
+                    
                     if hasattr(last, "fx"):
                         clips[-1] = last.fx(vfx.loop, duration=float(last.duration or 0.0) + diff)
                     else:
@@ -294,6 +333,7 @@ class VideoBeatsMixed:
                         remain -= shrink
                     i -= 1
         except Exception:
+            traceback.print_exc()
             pass
 
         # 输出文件名
@@ -310,5 +350,14 @@ def video_beats_mixed(
     window: Optional[Tuple[float, float]] = None,
 ) -> pathlib.Path | None:
     """功能函数：生成卡点混剪视频并返回输出路径。"""
-    runner = VideoBeatsMixed(audio_path=audio_path, beats_meta=beats_meta, media_files=media_files, output_dir=output_dir, window=window)
+    meta_obj: Dict[str, Any]
+    if isinstance(beats_meta, str):
+        try:
+            with open(beats_meta, "r", encoding="utf-8") as f:
+                meta_obj = json.load(f)
+        except Exception:
+            meta_obj = {}
+    else:
+        meta_obj = beats_meta
+    runner = VideoBeatsMixed(audio_path=audio_path, beats_meta=meta_obj, media_files=media_files, output_dir=output_dir, window=window)
     return runner.run()
