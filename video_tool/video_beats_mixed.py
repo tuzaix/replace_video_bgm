@@ -5,6 +5,9 @@ import json
 import random
 import pathlib
 from typing import Optional, Tuple, List, Dict, Any
+from moviepy.editor import concatenate_videoclips, AudioFileClip, VideoFileClip, ImageClip
+from moviepy.video.fx import all as vfx
+from utils.gpu_detect import is_nvenc_available
 
 
 class VideoBeatsMixed:
@@ -13,40 +16,29 @@ class VideoBeatsMixed:
     def __init__(
         self,
         audio_path: str,
-        beats_meta: str | dict,
-        media_dir: str,
-        output_dir: Optional[str] = None,
+        beats_meta: dict,
+        media_files: List[str],
+        output_dir: str,
         window: Optional[Tuple[float, float]] = None,
     ) -> None:
         """初始化混剪器。"""
+        if (not isinstance(audio_path, str)) or (not audio_path.strip()):
+            raise ValueError("audio_path must not be empty")
+        if (isinstance(beats_meta, dict) and not beats_meta):
+            raise ValueError("beats_meta dict must not be empty")
+        if (not isinstance(media_files, list)) or (len(media_files) == 0):
+            raise ValueError("media_files must be a non-empty list")
+        if not media_files:
+            raise ValueError("media_files must not be empty")
+        if (not isinstance(output_dir, str)) or (not output_dir.strip()):
+            raise ValueError("output_dir must not be empty")
+
         self.audio_path = pathlib.Path(audio_path)
-        self.media_dir = pathlib.Path(media_dir)
-        self.output_dir = pathlib.Path(output_dir) if output_dir else self.media_dir / "beats_mixed"
+        self.media_files = [pathlib.Path(p) for p in media_files]
+        self.output_dir = pathlib.Path(output_dir)
         self.window = window
-        self.meta = self._load_metadata(beats_meta)
-        # 若传入的音频文件不存在，尝试使用元数据中的音频路径
-        try:
-            if (not self.audio_path.exists()) and isinstance(self.meta.get("audio"), str):
-                cand = pathlib.Path(self.meta["audio"])  # type: ignore[index]
-                if cand.exists():
-                    self.audio_path = cand
-        except Exception:
-            pass
-        try:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-
-    def _load_metadata(self, beats_meta: str | dict) -> dict:
-        """加载卡点元数据（支持路径或字典）。"""
-        if isinstance(beats_meta, dict):
-            return beats_meta
-        try:
-            with open(beats_meta, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
+        self.meta = beats_meta
+        
     @staticmethod
     def _is_video_file(path: str) -> bool:
         """判断是否为视频文件。"""
@@ -64,7 +56,7 @@ class VideoBeatsMixed:
         if isinstance(self.window, tuple) and len(self.window) == 2:
             s, e = float(self.window[0]), float(self.window[1])
             if e > s:
-                return s, e
+                return self._clamp_window_to_audio((s, e))
         # 读取 suggestion.highlight
         try:
             h = (self.meta.get("suggestion", {}) or {}).get("highlight", {}) or {}
@@ -72,14 +64,14 @@ class VideoBeatsMixed:
             s = float(h.get("start_time", h.get("start", 0.0)))
             e = float(h.get("end_time", h.get("end", max(s, s + 30.0))))
             if e > s:
-                return s, e
+                return self._clamp_window_to_audio((s, e))
         except Exception:
             pass
         # 回退：整段音频长度或根据 beats 推断
         try:
             dur = float((self.meta.get("meta", {}) or {}).get("duration", 0.0))
             if dur > 0:
-                return 0.0, dur
+                return self._clamp_window_to_audio((0.0, dur))
         except Exception:
             pass
         try:
@@ -88,10 +80,37 @@ class VideoBeatsMixed:
                 b0 = float(min(beats))
                 b1 = float(max(beats))
                 if b1 > b0:
-                    return b0, b1
+                    return self._clamp_window_to_audio((b0, b1))
         except Exception:
             pass
-        return 0.0, 30.0
+        return self._clamp_window_to_audio((0.0, 30.0))
+
+    def _get_audio_duration(self) -> float:
+        try:
+            from moviepy.editor import AudioFileClip
+            clip = AudioFileClip(str(self.audio_path))
+            dur = float(clip.duration or 0.0)
+            try:
+                clip.close()
+            except Exception:
+                pass
+            return max(0.0, dur)
+        except Exception:
+            return 0.0
+
+    def _clamp_window_to_audio(self, window: Tuple[float, float]) -> Tuple[float, float]:
+        s, e = float(window[0]), float(window[1])
+        dur = self._get_audio_duration()
+        if dur <= 0.0:
+            s = max(0.0, s)
+            e = max(s, e)
+            return (s, e)
+        s = max(0.0, min(s, dur))
+        e = max(0.0, min(e, dur))
+        if e <= s:
+            s = 0.0
+            e = dur
+        return (s, e)
 
     def _extract_beats_info(self, window: Tuple[float, float]) -> List[Dict[str, Any]]:
         """从元数据中提取窗口内的卡点信息列表。"""
@@ -139,52 +158,50 @@ class VideoBeatsMixed:
         return beats_info
 
     def _collect_media(self, count: int) -> List[pathlib.Path]:
-        """收集并随机选择指定数量的视频或图片素材（不足则循环补齐并打乱）。"""
+        """从传入的媒体文件数组中随机抽取指定数量（不足则循环补齐并打乱）。"""
         candidates: List[pathlib.Path] = []
         try:
-            for name in os.listdir(str(self.media_dir)):
-                p = self.media_dir / name
-                if p.is_file() and (self._is_video_file(name) or self._is_image_file(name)):
-                    candidates.append(p)
+            for p in self.media_files:
+                if p.is_file():
+                    name = p.name
+                    if self._is_video_file(name) or self._is_image_file(name):
+                        candidates.append(p)
         except Exception:
             pass
         if not candidates:
             return []
-        picks: List[pathlib.Path] = []
         try:
             random.shuffle(candidates)
-            while len(picks) < count:
-                picks.extend(candidates)
-            picks = picks[:count]
+        except Exception:
+            pass
+        picks: List[pathlib.Path] = []
+        while len(picks) < count:
+            picks.extend(candidates)
+            if not candidates:
+                break
+        picks = picks[:count]
+        try:
             random.shuffle(picks)
         except Exception:
-            picks = candidates[:count]
+            pass
         return picks
 
     def _concat_and_mux(self, clips: List[Any], audio_window: Tuple[float, float], out_path: pathlib.Path) -> pathlib.Path | None:
         """拼接视频片段并与指定窗口的 BGM 写出。"""
         try:
-            from moviepy.editor import concatenate_videoclips, AudioFileClip
-        except Exception:
-            return None
-
-        # 拼接片段
-        try:
             final = concatenate_videoclips(clips, method="compose")
         except Exception:
             return None
 
-        # 提取 BGM 指定窗口并设置
         s, e = audio_window
         try:
-            bgm = AudioFileClip(str(self.audio_path)).subclip(s, e)
-            final = final.set_audio(bgm)
+            if e > s:
+                bgm = AudioFileClip(str(self.audio_path)).subclip(s, e)
+                final = final.set_audio(bgm)
         except Exception:
             pass
 
-        # 写出视频：自动选择 GPU/CPU 编码器
         try:
-            from utils.gpu_detect import is_nvenc_available
             use_nvenc = bool(is_nvenc_available())
         except Exception:
             use_nvenc = False
@@ -215,12 +232,6 @@ class VideoBeatsMixed:
             return None
         picks = self._collect_media(len(beats_info))
         if not picks:
-            return None
-
-        try:
-            from moviepy.editor import VideoFileClip, ImageClip
-            from moviepy.video.fx import all as vfx
-        except Exception:
             return None
 
         clips: List[Any] = []
@@ -257,25 +268,31 @@ class VideoBeatsMixed:
             total = sum(float(c.duration or 0.0) for c in clips)
             target = float(window[1] - window[0])
             diff = float(target - total)
-            if abs(diff) > 0.05:
+            if diff > 0.05:
                 last = clips[-1]
-                if diff > 0:
-                    # 延长最后一段
-                    try:
-                        from moviepy.video.fx import all as vfx
-                        if hasattr(last, "fx"):
-                            clips[-1] = last.fx(vfx.loop, duration=float(last.duration or 0.0) + diff)
-                        else:
-                            clips[-1] = last.set_duration(float(last.duration or 0.0) + diff)
-                    except Exception:
+                try:
+                    from moviepy.video.fx import all as vfx
+                    if hasattr(last, "fx"):
+                        clips[-1] = last.fx(vfx.loop, duration=float(last.duration or 0.0) + diff)
+                    else:
                         clips[-1] = last.set_duration(float(last.duration or 0.0) + diff)
-                else:
-                    # 截短最后一段
-                    try:
-                        newd = max(0.2, float(last.duration or 0.0) + diff)
-                        clips[-1] = last.subclip(0, newd)
-                    except Exception:
-                        clips[-1] = last.set_duration(max(0.2, float(last.duration or 0.0) + diff))
+                except Exception:
+                    clips[-1] = last.set_duration(float(last.duration or 0.0) + diff)
+            elif diff < -0.05:
+                i = len(clips) - 1
+                remain = -diff
+                while i >= 0 and remain > 0.05:
+                    cur = clips[i]
+                    curd = float(cur.duration or 0.0)
+                    shrink = min(curd - 0.2, remain)
+                    if shrink > 0.0:
+                        try:
+                            newd = max(0.2, curd - shrink)
+                            clips[i] = cur.subclip(0, newd)
+                        except Exception:
+                            clips[i] = cur.set_duration(max(0.2, curd - shrink))
+                        remain -= shrink
+                    i -= 1
         except Exception:
             pass
 
@@ -288,10 +305,10 @@ class VideoBeatsMixed:
 def video_beats_mixed(
     audio_path: str,
     beats_meta: str | dict,
-    media_dir: str,
-    output_dir: Optional[str] = None,
+    media_files: List[str],
+    output_dir: str,
     window: Optional[Tuple[float, float]] = None,
 ) -> pathlib.Path | None:
     """功能函数：生成卡点混剪视频并返回输出路径。"""
-    runner = VideoBeatsMixed(audio_path=audio_path, beats_meta=beats_meta, media_dir=media_dir, output_dir=output_dir, window=window)
+    runner = VideoBeatsMixed(audio_path=audio_path, beats_meta=beats_meta, media_files=media_files, output_dir=output_dir, window=window)
     return runner.run()
