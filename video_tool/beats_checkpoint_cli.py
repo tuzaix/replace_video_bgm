@@ -1,44 +1,66 @@
-from __future__ import annotations
-
 import argparse
-import pathlib
-import sys
-from typing import Optional
+
+from .beats_checkpoint import beats_checkpoint
 
 
-def _import_backend():
-    try:
-        from .beats_checkpoint import BeatsCheckpoint  # type: ignore
-        return BeatsCheckpoint
-    except Exception:
-        proj_root = pathlib.Path(__file__).resolve().parent.parent
-        if str(proj_root) not in sys.path:
-            sys.path.insert(0, str(proj_root))
-        from video_tool.beats_checkpoint import BeatsCheckpoint  # type: ignore
-        return BeatsCheckpoint
+def main() -> None:
+    """命令行入口：生成音频卡点与可视化 JSON。"""
+    parser = argparse.ArgumentParser(
+        description="使用 Demucs+Librosa 在鼓点上检测卡点并生成可视化元数据。",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
 
+    parser.add_argument("audio_path", type=str, help="输入音频文件路径")
+    parser.add_argument("-o", "--output_dir", dest="output_dir", type=str, default=None, help="输出目录（默认：<音频目录>/beats_meta）")
+    parser.add_argument("-t", "--temp_dir", dest="temp_dir", type=str, default=None, help="临时目录（默认：<音频目录>/temp）")
 
-def main(argv: Optional[list[str]] = None) -> int:
-    BeatsCheckpoint = _import_backend()
-    parser = argparse.ArgumentParser(description="Detect beat checkpoints from audio (Demucs + Librosa)")
-    parser.add_argument("audio", help="Audio file path")
-    parser.add_argument("--out-dir", dest="out_dir", default=None, help="Output directory for checkpoints (default: <audio_dir>/beats_meta)")
-    parser.add_argument("--temp-dir", dest="temp_dir", default=None, help="Temporary directory (default: <audio_dir>/temp)")
-    parser.add_argument("--model", dest="model", default="htdemucs", help="Demucs model name")
-    parser.add_argument("--device", dest="device", default="gpu", choices=["cpu", "gpu"], help="Preferred device")
-    parser.add_argument("--mode", dest="mode", default="default", choices=["default", "fast", "slow", "dynamic"], help="Interval filtering mode")
-    parser.add_argument("--min-interval", dest="min_interval", type=float, default=None, help="Custom minimum interval in seconds (overrides mode except dynamic)")
+    parser.add_argument(
+        "--mode",
+        dest="mode",
+        default="default",
+        choices=["default", "fast", "slow", "dynamic"],
+        help="间隔过滤模式：default/fast/slow/dynamic",
+    )
+    parser.add_argument(
+        "--min-interval",
+        dest="min_interval",
+        type=float,
+        default=None,
+        help="自定义最小间隔秒（动态模式除外）",
+    )
+    parser.add_argument(
+        "-d",
+        "--device",
+        dest="device",
+        type=str,
+        default="gpu",
+        choices=["cpu", "gpu"],
+        help="设备选择：cpu/gpu（默认 gpu）",
+    )
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args()
 
-    bc = BeatsCheckpoint(audio_path=args.audio, output_dir=args.out_dir, temp_dir=args.temp_dir, model=args.model, device=args.device, interval_mode=args.mode, min_interval=args.min_interval)
-    json_path, timestamps = bc.run()
-    print(str(json_path))
-    print("checkpoints_count=", len(timestamps))
-    if timestamps:
-        print("first_seconds=", ", ".join([f"{t:.3f}" for t in timestamps[:10]]))
-    return 0
+    print(f"音频文件: {args.audio_path}")
+    print(f"输出目录: {args.output_dir or '默认'}")
+    print(f"临时目录: {args.temp_dir or '默认'}")
+    print(f"模式: {args.mode}")
+    print(f"最小间隔: {args.min_interval if args.min_interval is not None else '默认'}")
+    print(f"设备: {args.device}")
+    print("-" * 30)
+
+    out = beats_checkpoint(
+        audio_path=args.audio_path,
+        output_dir=args.output_dir,
+        temp_dir=args.temp_dir,
+        mode=args.mode,
+        min_interval=args.min_interval,
+        device=args.device,
+    )
+    if out is None:
+        print("生成失败")
+    else:
+        print(f"已生成: {out}")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
