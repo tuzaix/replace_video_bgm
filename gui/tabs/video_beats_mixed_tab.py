@@ -35,9 +35,13 @@ import pathlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6 import QtWidgets, QtCore, QtGui
+from moviepy.editor import VideoFileClip
 
 from gui.utils import theme
 from gui.precheck import run_preflight_checks
+from utils.calcu_video_info import get_resolution_topn
+from video_tool.beats_checkpoint import beats_checkpoint
+from video_tool.video_beats_mixed import video_beats_mixed
 
 
 def _is_audio_file(name: str) -> bool:
@@ -79,8 +83,7 @@ class VideoBeatsMixedWorker(QtCore.QObject):
     def run(self, video_dirs: List[str], audio_dirs: List[str], output_dir: str, out_count: int, threads: int, mode: str, min_interval: float, clip_seconds: float) -> None:
         """后台线程执行：采集卡点并生成混剪视频。"""
         try:
-            from video_tool.beats_checkpoint import beats_checkpoint
-            from video_tool.video_beats_mixed import video_beats_mixed
+            pass
         except Exception as e:
             self.error.emit(f"导入逻辑失败: {e}")
             return
@@ -89,33 +92,44 @@ class VideoBeatsMixedWorker(QtCore.QObject):
         audio_files: List[pathlib.Path] = []
         for d in audio_dirs:
             try:
-                for name in os.listdir(d):
-                    if _is_audio_file(name):
-                        p = pathlib.Path(d) / name
-                        if p.is_file():
-                            audio_files.append(p)
+                if os.path.isfile(d) and _is_audio_file(os.path.basename(d)):
+                    audio_files.append(pathlib.Path(d))
+                elif os.path.isdir(d):
+                    for name in os.listdir(d):
+                        if _is_audio_file(name):
+                            p = pathlib.Path(d) / name
+                            if p.is_file():
+                                audio_files.append(p)
             except Exception:
                 continue
 
         media_files: List[pathlib.Path] = []
         for d in video_dirs:
             try:
-                for name in os.listdir(d):
-                    if _is_video_file(name) or _is_image_file(name):
-                        p = pathlib.Path(d) / name
-                        if p.is_file():
-                            media_files.append(p)
+                media_data = get_resolution_topn(d, top_n=1, media_type="all", recursive=False)
+                files = media_data.get("files", []) if isinstance(media_data, dict) else []
+                for p in files:
+                    if isinstance(p, pathlib.Path) and p.is_file():
+                        media_files.append(p)
             except Exception:
-                continue
+                # 回退：若筛分失败则尝试直接收集目录下文件
+                try:
+                    for name in os.listdir(d):
+                        if _is_video_file(name) or _is_image_file(name):
+                            p = pathlib.Path(d) / name
+                            if p.is_file():
+                                media_files.append(p)
+                except Exception:
+                    continue
 
         if not audio_files:
-            self.error.emit("未在音频目录中找到音频文件")
+            self.error.emit("未在音频输入中找到音频文件")
             return
         if not media_files:
             self.error.emit("未在视频目录中找到可用素材文件")
             return
 
-        total_tasks = len(audio_files) * max(1, int(out_count))
+        total_tasks = max(1, int(out_count))
         self.progress.emit(0, total_tasks)
 
         results: List[str] = []
@@ -124,8 +138,9 @@ class VideoBeatsMixedWorker(QtCore.QObject):
         def _emit_progress() -> None:
             self.progress.emit(done, total_tasks)
 
-        self.phase.emit("Generating beats meta…")
+        self.phase.emit("meta")
         metas: Dict[str, Dict] = {}
+        meta_done = 0
         for a in audio_files:
             if self._stopping:
                 self.error.emit("任务已取消")
@@ -150,8 +165,13 @@ class VideoBeatsMixedWorker(QtCore.QObject):
             except Exception:
                 meta_obj = {}
             metas[str(a)] = meta_obj
+            meta_done += 1
+            try:
+                self.progress.emit(meta_done, len(audio_files))
+            except Exception:
+                pass
 
-        self.phase.emit("Mixing videos…")
+        self.phase.emit("mix")
 
         def process_one(audio_path: pathlib.Path, meta_obj: Dict) -> Optional[str]:
             nonlocal done
@@ -190,10 +210,13 @@ class VideoBeatsMixedWorker(QtCore.QObject):
         try:
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futures = []
-                for a in audio_files:
+                assigned: List[pathlib.Path] = []
+                for idx in range(total_tasks):
+                    a = audio_files[idx % len(audio_files)]
+                    assigned.append(a)
+                for a in assigned:
                     meta_obj = metas.get(str(a), {})
-                    for k in range(max(1, int(out_count))):
-                        futures.append(ex.submit(process_one, a, meta_obj))
+                    futures.append(ex.submit(process_one, a, meta_obj))
                 for f in as_completed(futures):
                     if self._stopping:
                         break
@@ -222,6 +245,18 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         self._worker: Optional[VideoBeatsMixedWorker] = None
         self._is_running: bool = False
         self._preflight_passed: bool = False
+        self.mode_label_to_key: Dict[str, str] = {
+            "默认": "default",
+            "快速": "fast",
+            "缓慢": "slow",
+            "动态": "dynamic",
+        }
+        self.mode_key_to_label: Dict[str, str] = {v: k for k, v in self.mode_label_to_key.items()}
+        self.mode_interval_map: Dict[str, float] = {
+            "default": 0.33,
+            "fast": 0.25,
+            "slow": 0.60,
+        }
         self._build_page()
 
     def is_running(self) -> bool:
@@ -295,15 +330,18 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         self.audio_dirs_list = QtWidgets.QListWidget()
         self.audio_dirs_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.audio_dirs_list.setMinimumHeight(5 * 22)
-        gl2.addWidget(QtWidgets.QLabel("音频目录："))
+        gl2.addWidget(QtWidgets.QLabel("音频输入："))
         gl2.addWidget(self.audio_dirs_list)
 
         row_a_btns = QtWidgets.QHBoxLayout()
-        btn_add_a = QtWidgets.QPushButton("添加目录")
+        btn_add_a_dir = QtWidgets.QPushButton("添加目录")
+        btn_add_a_file = QtWidgets.QPushButton("添加文件")
         btn_rm_a = QtWidgets.QPushButton("移除选中")
-        btn_add_a.clicked.connect(self._on_add_audio_dir)
+        btn_add_a_dir.clicked.connect(self._on_add_audio_dir)
+        btn_add_a_file.clicked.connect(self._on_add_audio_file)
         btn_rm_a.clicked.connect(self._on_remove_selected_audio_dirs)
-        row_a_btns.addWidget(btn_add_a)
+        row_a_btns.addWidget(btn_add_a_dir)
+        row_a_btns.addWidget(btn_add_a_file)
         row_a_btns.addWidget(btn_rm_a)
         gl2.addLayout(row_a_btns)
 
@@ -321,7 +359,7 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
             pass
         self.highlight_max_label = QtWidgets.QLabel("45")
         self.highlight_value = QtWidgets.QLabel("15")
-        self.highlight_slider.valueChanged.connect(lambda v: self.highlight_value.setText(str(v)))
+        self.highlight_slider.valueChanged.connect(self._on_highlight_changed)
         row_high.addWidget(self.highlight_min_label)
         row_high.addWidget(self.highlight_slider, 1)
         row_high.addWidget(self.highlight_max_label)
@@ -329,17 +367,24 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         gl2.addLayout(row_high)
 
         row_mode = QtWidgets.QHBoxLayout()
-        row_mode.addWidget(QtWidgets.QLabel("间隔模式："), 0)
+        label_mode = QtWidgets.QLabel("间隔模式：")
+        row_mode.addWidget(label_mode, 0)
         self.mode_combo = QtWidgets.QComboBox()
-        self.mode_combo.addItems(["default", "fast", "slow", "dynamic"])
+        try:
+            for lbl, key in self.mode_label_to_key.items():
+                self.mode_combo.addItem(lbl, key)
+        except Exception:
+            self.mode_combo.addItems(list(self.mode_label_to_key.keys()))
         self.interval_spin = QtWidgets.QDoubleSpinBox()
         self.interval_spin.setRange(0.25, 3.0)
         self.interval_spin.setSingleStep(0.05)
         self.interval_spin.setValue(0.25)
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
-        row_mode.addWidget(self.mode_combo)
-        row_mode.addWidget(QtWidgets.QLabel("间隔(秒)："))
-        row_mode.addWidget(self.interval_spin)
+        row_mode.addWidget(self.mode_combo, 0)
+        row_mode.addSpacing(12)
+        label_interval = QtWidgets.QLabel("间隔(秒)：")
+        row_mode.addWidget(label_interval, 0)
+        row_mode.addWidget(self.interval_spin, 0)
         gl2.addLayout(row_mode)
 
         # group3：混剪参数
@@ -353,6 +398,12 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         self.count_spin = QtWidgets.QSpinBox()
         self.count_spin.setRange(1, 100)
         self.count_spin.setValue(10)
+        try:
+            self.count_spin.setKeyboardTracking(True)
+            self.count_spin.setAccelerated(True)
+            self.count_spin.setFocusPolicy(QtCore.Qt.StrongFocus)
+        except Exception:
+            pass
         row_cnt.addWidget(self.count_spin, 1)
         gl3.addLayout(row_cnt)
 
@@ -388,35 +439,76 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         vl.setContentsMargins(10, 8, 10, 8)
         vl.setSpacing(8)
 
+
+         # a. 进度与开始/停止
+        status_group = QtWidgets.QGroupBox("运行状态")
+        status_vbox = QtWidgets.QVBoxLayout(status_group)
+        status_vbox.setContentsMargins(8, 8, 8, 8)
+        status_vbox.setSpacing(8)
+
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setTextVisible(True)
-        self.progress.setStyleSheet(theme.build_progressbar_stylesheet(height=18))
+        try:
+            self.progress.setTextVisible(True)
+            self.progress.setFormat("0 | 0")
+        except Exception:
+            pass
 
         self.run_btn = QtWidgets.QPushButton("开始")
-        self.run_btn.setStyleSheet(theme.build_button_stylesheet(height=theme.BUTTON_HEIGHT, bg_color=theme.PRIMARY_BLUE, hover_color=theme.PRIMARY_BLUE_HOVER))
         self.run_btn.clicked.connect(self._on_toggle_run)
 
         row_top = QtWidgets.QHBoxLayout()
         row_top.addWidget(self.progress, 1)
         row_top.addWidget(self.run_btn)
+        status_vbox.addLayout(row_top)
+        vl.addWidget(status_group)
+
         vl.addLayout(row_top)
+        try:
+            self._apply_progressbar_style(chunk_color=theme.PRIMARY_BLUE)
+            self._apply_action_button_style(running=False)
+        except Exception:
+            pass
+
+         # b. 结果列表
+        result_group = QtWidgets.QGroupBox("执行结果")
+        result_vbox = QtWidgets.QVBoxLayout(result_group)
+        result_vbox.setContentsMargins(8, 8, 8, 8)
+        result_vbox.setSpacing(8)
 
         self.result_table = QtWidgets.QTableWidget(0, 3)
         self.result_table.setHorizontalHeaderLabels(["输出文件", "时长(s)", "大小(MB)"])
-        self.result_table.horizontalHeader().setStretchLastSection(True)
+        try:
+            hdr = self.result_table.horizontalHeader()
+            hdr.setStretchLastSection(False)
+            hdr.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+            self._apply_results_table_column_widths()
+            self.result_table.installEventFilter(self)
+        except Exception:
+            pass
         self.result_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.result_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.result_table.doubleClicked.connect(self._on_open_selected_result)
-
-        vl.addWidget(self.result_table, 1)
+        result_vbox.addWidget(self.result_table, 1)
+        vl.addWidget(result_group)
         return panel
+
+    def _current_mode_key(self) -> str:
+        try:
+            data = self.mode_combo.currentData()
+            if isinstance(data, str) and data:
+                return data
+        except Exception:
+            pass
+        t = self.mode_combo.currentText().strip()
+        return self.mode_label_to_key.get(t, "default")
 
     def _on_mode_changed(self, text: str) -> None:
         """间隔模式联动：dynamic 模式禁用间隔框，并设置默认值。"""
-        mapping = {"default": 0.33, "fast": 0.25, "slow": 0.60}
-        if text == "dynamic":
+        mapping = self.mode_interval_map
+        key = self._current_mode_key()
+        if key == "dynamic":
             self.interval_spin.setEnabled(False)
             try:
                 self.interval_spin.setValue(mapping["default"])  # 仅展示，不参与提交
@@ -425,7 +517,7 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         else:
             self.interval_spin.setEnabled(True)
             try:
-                self.interval_spin.setValue(mapping.get(text, 0.33))
+                self.interval_spin.setValue(mapping.get(key, 0.33))
             except Exception:
                 pass
 
@@ -442,10 +534,37 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
             self.video_dirs_list.takeItem(row)
 
     def _on_add_audio_dir(self) -> None:
-        """添加一个音频目录到列表。"""
+        """添加一个音频目录到列表（展开目录中的音频文件）。"""
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择音频目录")
-        if d:
-            self.audio_dirs_list.addItem(d)
+        if not d:
+            return
+        try:
+            for name in os.listdir(d):
+                if _is_audio_file(name):
+                    p = os.path.join(d, name)
+                    if os.path.isfile(p):
+                        self.audio_dirs_list.addItem(p)
+        except Exception:
+            pass
+
+    def _on_add_audio_file(self) -> None:
+        """添加一个或多个音频文件到列表。"""
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "选择音频文件", filter="音频文件 (*.mp3 *.wav *.m4a *.aac *.flac *.ogg)")
+        try:
+            for f in files:
+                if f and os.path.isfile(f) and _is_audio_file(os.path.basename(f)):
+                    self.audio_dirs_list.addItem(f)
+        except Exception:
+            pass
+
+    def _on_highlight_changed(self, v: int) -> None:
+        """滑块变更时同步标签并在滑块上显示提示。"""
+        try:
+            self.highlight_value.setText(str(v))
+            pos = self.highlight_slider.mapToGlobal(self.highlight_slider.rect().center())
+            QtWidgets.QToolTip.showText(pos, str(v), self.highlight_slider)
+        except Exception:
+            pass
 
     def _on_remove_selected_audio_dirs(self) -> None:
         """移除音频目录列表中选中的项。"""
@@ -494,9 +613,20 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         out_dir = self.output_dir_edit.text().strip()
         out_count = int(self.count_spin.value())
         threads = int(self.threads_spin.value())
-        mode = self.mode_combo.currentText().strip()
+        mode = self._current_mode_key()
         min_interval = float(self.interval_spin.value())
         clip_seconds = float(self.highlight_slider.value())
+
+        try:
+            self.count_spin.interpretText()
+            out_count = int(self.count_spin.value())
+        except Exception:
+            pass
+        try:
+            self.threads_spin.interpretText()
+            threads = int(self.threads_spin.value())
+        except Exception:
+            pass
 
         if not v_dirs or not a_dirs:
             QtWidgets.QMessageBox.warning(self, "提示", "请至少选择一个视频目录和一个音频目录")
@@ -536,21 +666,148 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         self._worker.moveToThread(self._thread)
         self._worker.start.connect(self._worker.run)
         self._thread.started.connect(lambda: self._worker.start.emit(v_dirs, a_dirs, out_dir, out_count, threads, mode, min_interval, clip_seconds))
-        self._worker.phase.connect(lambda t: self.progress.setFormat(f"{t} %p%"))
+        self._worker.phase.connect(self._on_phase)
         self._worker.progress.connect(self._on_progress)
         self._worker.error.connect(self._on_error)
         self._worker.finished.connect(self._on_finished)
         self._thread.start()
 
     def _on_progress(self, done: int, total: int) -> None:
-        """根据完成数量更新进度条。"""
-        val = 0
+        """根据完成数量更新进度条，分阶段加权显示“完成数 | 总数”。"""
         try:
-            if total > 0:
-                val = int(round(100.0 * done / total))
+            start = int(getattr(self, "_phase_start", 0))
+            span = int(getattr(self, "_phase_span", 100))
+            if total <= 0:
+                self.progress.setValue(start)
+                self.progress.setFormat("0 | 0")
+                return
+            ratio = max(0.0, min(1.0, float(done) / float(total)))
+            weighted = int(start + span * ratio)
+            self.progress.setValue(max(0, min(100, weighted)))
+            self.progress.setFormat(f"{int(done)} | {int(total)}")
         except Exception:
-            val = 0
-        self.progress.setValue(val)
+            try:
+                self.progress.setValue(0)
+                self.progress.setFormat("0 | 0")
+            except Exception:
+                pass
+
+    def _on_phase(self, name: str) -> None:
+        """阶段切换：设置分段权重与初始文本。"""
+        try:
+            if name in {"meta", "Generating beats meta…"}:
+                self._phase_start = 0
+                self._phase_span = 30
+                self.progress.setFormat("0 | 0")
+            elif name in {"mix", "Mixing videos…"}:
+                self._phase_start = 30
+                self._phase_span = 70
+                self.progress.setFormat("0 | 0")
+            else:
+                self._phase_start = 0
+                self._phase_span = 100
+                self.progress.setFormat("0 | 0")
+        except Exception:
+            pass
+
+    def _apply_progressbar_style(self, chunk_color: str = theme.PRIMARY_BLUE) -> None:
+        """统一设置进度条样式与高度（参考 generate_cover_tab）。"""
+        try:
+            if self.progress is None:
+                return
+            self.progress.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            screen = QtWidgets.QApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInch() if screen else 96.0
+            scale = max(1.0, dpi / 96.0)
+        except Exception:
+            scale = 1.0
+        base_h = 32
+        height = int(max(28, min(52, base_h * scale)))
+        try:
+            self.progress.setFixedHeight(height)
+            self._control_height = height
+        except Exception:
+            try:
+                self._control_height = getattr(self, "_control_height", getattr(theme, "BUTTON_HEIGHT", height))
+            except Exception:
+                self._control_height = height
+        try:
+            font = self.progress.font()
+            base_pt = 11
+            pt_size = int(max(base_pt, min(16, base_pt * scale)))
+            font.setPointSize(pt_size)
+            self.progress.setFont(font)
+        except Exception:
+            pass
+        try:
+            style = theme.build_progressbar_stylesheet(height=height, chunk_color=chunk_color)
+            self.progress.setStyleSheet(style)
+        except Exception:
+            pass
+
+    def _apply_action_button_style(self, running: bool) -> None:
+        """统一设置开始/停止按钮样式与高度（参考 generate_cover_tab）。"""
+        try:
+            if self.run_btn is None:
+                return
+            height = int(getattr(self, "_control_height", theme.BUTTON_HEIGHT))
+            primary_bg = theme.PRIMARY_BLUE
+            primary_bg_hover = theme.PRIMARY_BLUE_HOVER
+            danger_bg = theme.DANGER_RED
+            danger_bg_hover = theme.DANGER_RED_HOVER
+            idle_style = theme.build_button_stylesheet(
+                height=height,
+                bg_color=primary_bg,
+                hover_color=primary_bg_hover,
+                disabled_bg=theme.PRIMARY_BLUE_DISABLED,
+                radius=theme.BUTTON_RADIUS,
+                pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+                pad_v=theme.BUTTON_PADDING_VERTICAL,
+            )
+            running_style = theme.build_button_stylesheet(
+                height=height,
+                bg_color=danger_bg,
+                hover_color=danger_bg_hover,
+                disabled_bg=theme.DANGER_RED_DISABLED,
+                radius=theme.BUTTON_RADIUS,
+                pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+                pad_v=theme.BUTTON_PADDING_VERTICAL,
+            )
+            try:
+                if self.progress is not None:
+                    self.run_btn.setFont(self.progress.font())
+            except Exception:
+                pass
+            self.run_btn.setStyleSheet(running_style if running else idle_style)
+            self.run_btn.setFixedHeight(height)
+        except Exception:
+            pass
+
+    def _apply_results_table_column_widths(self) -> None:
+        """按 70%/15%/15% 比例设置结果表列宽。"""
+        if not getattr(self, "result_table", None):
+            return
+        try:
+            total = self.result_table.viewport().width() or self.result_table.width()
+            w0 = int(total * 0.70)
+            w1 = int(total * 0.15)
+            w2 = int(total * 0.15)
+            self.result_table.setColumnWidth(0, w0)
+            self.result_table.setColumnWidth(1, w1)
+            self.result_table.setColumnWidth(2, w2)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        try:
+            if obj is getattr(self, "result_table", None) and event.type() == QtCore.QEvent.Resize:
+                QtCore.QTimer.singleShot(0, self._apply_results_table_column_widths)
+        except Exception:
+            pass
+        try:
+            return super().eventFilter(obj, event)
+        except Exception:
+            return False
 
     def _on_error(self, msg: str) -> None:
         """错误处理：弹窗提示并复位 UI。"""
@@ -563,7 +820,6 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
             try:
                 dur = 0.0
                 try:
-                    from moviepy.editor import VideoFileClip
                     c = VideoFileClip(p)
                     dur = float(c.duration or 0.0)
                     try:
