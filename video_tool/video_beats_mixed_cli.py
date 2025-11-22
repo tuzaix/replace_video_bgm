@@ -30,6 +30,14 @@ def main() -> None:
         default="video",
         help="素材类型：'video' 或 'image'（默认 'video'）",
     )
+    # 增加clip_min_interval参数
+    parser.add_argument(
+        "--clip_min_interval",
+        dest="clip_min_interval",
+        type=float,
+        default=0.8,
+        help="最小clip间隔（秒），默认0.8",
+    )
 
     args = parser.parse_args()
 
@@ -50,6 +58,7 @@ def main() -> None:
     print(f"输出目录: {output_dir}")
     print(f"窗口: {window or '使用建议窗口'}")
     print(f"素材类型: {args.media_type}")
+    print(f"最小clip间隔: {args.clip_min_interval}")
     print("-" * 30)
 
     media_data = get_resolution_topn(args.media_dir, top_n=1, media_type=args.media_type)
@@ -63,6 +72,7 @@ def main() -> None:
         media_files=media_files,
         output_dir=output_dir,
         window=window,
+        clip_min_interval=args.clip_min_interval,
     )
     if out is None:
         print("生成失败")

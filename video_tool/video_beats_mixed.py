@@ -256,6 +256,7 @@ class VideoBeatsMixed:
             return None
 
         s, e = audio_window
+        bgm = None
         try:
             if e > s:
                 bgm = AudioFileClip(str(self.audio_path)).subclip(s, e)
@@ -289,14 +290,23 @@ class VideoBeatsMixed:
                 final.close()
             except Exception:
                 pass
+            try:
+                if bgm is not None:
+                    bgm.close()
+            except Exception:
+                pass
+            try:
+                for c in clips:
+                    if hasattr(c, "close"):
+                        c.close()
+            except Exception:
+                pass
         return out_path if out_path.exists() else None
 
     def run(self) -> pathlib.Path | None:
         """执行卡点混剪并输出最终视频路径。"""
         window = self._resolve_window()
         beats_info = self._extract_beats_info(window)
-        import pprint 
-        pprint.pprint(beats_info)
         if not beats_info:
             return None
         # 若仅提供图片素材，走独立的图片剪辑构建流程
@@ -355,6 +365,7 @@ def video_beats_mixed(
     media_files: List[str],
     output_dir: str,
     window: Optional[Tuple[float, float]] = None,
+    clip_min_interval: Optional[float] = None,
 ) -> pathlib.Path | None:
     """功能函数：生成卡点混剪视频并返回输出路径。"""
     meta_obj: Dict[str, Any]
@@ -366,5 +377,5 @@ def video_beats_mixed(
             meta_obj = {}
     else:
         meta_obj = beats_meta
-    runner = VideoBeatsMixed(audio_path=audio_path, beats_meta=meta_obj, media_files=media_files, output_dir=output_dir, window=window)
+    runner = VideoBeatsMixed(audio_path=audio_path, beats_meta=meta_obj, media_files=media_files, output_dir=output_dir, window=window, clip_min_interval=clip_min_interval)
     return runner.run()
