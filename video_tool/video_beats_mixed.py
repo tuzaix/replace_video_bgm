@@ -5,10 +5,16 @@ import json
 import random
 import pathlib
 import traceback
+import subprocess
+import shutil
+import time
 from typing import Optional, Tuple, List, Dict, Any
 from moviepy.editor import concatenate_videoclips, AudioFileClip, VideoFileClip, ImageClip
 from moviepy.video.fx import all as vfx
 from utils.gpu_detect import is_nvenc_available
+from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+from utils.xprint import xprint
+from utils.calcu_video_info import ffprobe_duration, ffprobe_stream_info
 
 class VideoBeatsMixed:
     """根据 BGM 卡点元数据与用户选择窗口，使用视频/图片素材合成卡点视频。"""
@@ -42,7 +48,16 @@ class VideoBeatsMixed:
         self.window = window
         self.meta = beats_meta
         self.clip_min_interval = clip_min_interval
-        self.temp_dir = self.output_dir.parent / "beats_mixed_temp"
+        self.temp_root = self.output_dir.parent / "beats_mixed_temp"
+        try:
+            self.temp_root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        ts = int(time.time() * 1000)
+        rid = f"clips_{ts}_{random.randint(1000,9999)}"
+        self.run_id = rid
+        
+        self.temp_dir = self.temp_root / self.run_id
         try:
             self.temp_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -53,6 +68,9 @@ class VideoBeatsMixed:
             os.environ.setdefault("TMP", str(self.temp_dir))
         except Exception:
             pass
+        env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffprobe=False)
+        self.ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg") or "ffmpeg"
+        self.ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe") or "ffprobe"
     
     def _make_video_clip(self, path: pathlib.Path, dur: float) -> Any:
         """构建视频片段：随机截取到目标时长，不足则循环补齐。"""
@@ -229,6 +247,200 @@ class VideoBeatsMixed:
             i = j
         return beats_info
 
+    def _pick_random_start(self, vdur: float, seg_dur: float) -> float:
+        try:
+            return float(random.uniform(0.0, max(0.0, vdur - seg_dur)))
+        except Exception:
+            return 0.0
+
+    def _slice_video_moviepy(self, in_path: pathlib.Path, start: float, duration: float, idx: int) -> pathlib.Path | None:
+        outp = self.temp_dir / f"seg_{self.run_id}_{idx:04d}.mp4"
+        try:
+            v = VideoFileClip(str(in_path))
+            vdur = float(v.duration or 0.0)
+            end = min(vdur, float(start + duration))
+            if end <= start:
+                end = min(vdur, start + max(0.2, duration))
+            clip = v.subclip(float(start), float(end))
+            fps_val = None
+            try:
+                if getattr(clip, "fps", None):
+                    fps_val = int(round(float(clip.fps)))
+                elif getattr(v, "fps", None):
+                    fps_val = int(round(float(v.fps)))
+                else:
+                    sinfo = ffprobe_stream_info(pathlib.Path(in_path))
+                    fr = str(sinfo.get("r_frame_rate", ""))
+                    if fr and "/" in fr:
+                        a, b = fr.split("/", 1)
+                        fps_val = int(round(float(a) / float(b)))
+            except Exception:
+                fps_val = None
+            kwargs = {
+                "codec": "libx264",
+                "audio": False,
+                "ffmpeg_params": ["-movflags", "+faststart"],
+                "logger": None,
+            }
+            if fps_val and fps_val > 0:
+                kwargs["fps"] = int(fps_val)
+            clip.write_videofile(str(outp), **kwargs)
+            try:
+                clip.close()
+            except Exception:
+                pass
+            try:
+                v.close()
+            except Exception:
+                pass
+            if outp.exists():
+                return outp
+        except Exception:
+            traceback.print_exc()
+            return None
+
+    def _image_to_segment(self, in_path: pathlib.Path, duration: float, idx: int, base_w: int, base_h: int) -> pathlib.Path | None:
+        outp = self.temp_dir / f"imgseg_{self.run_id}_{idx:04d}.mp4"
+        try:
+            # vf = f"scale={base_w}:{base_h}:force_original_aspect_ratio=decrease,pad={base_w}:{base_h}:(ow-iw)/2:(oh-ih)/2:color=black"
+            cmd = [
+                self.ffmpeg_bin,
+                "-y",
+                "-loop","1",
+                "-i", str(in_path),
+                "-t", f"{duration:.3f}",
+                # "-vf", vf,
+                "-r", 25,
+                "-pix_fmt","yuv420p",
+                "-c:v","libx264",
+                "-movflags", "+faststart",
+                str(outp),
+            ]
+            si = None
+            kwargs = {}
+            xprint(f"_image_to_segment: {cmd}")
+            try:
+                if os.name == "nt":
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+            except Exception:
+                kwargs = {}
+            r = subprocess.run(cmd, capture_output=True, **kwargs)
+            if r.returncode == 0 and outp.exists():
+                return outp
+        except Exception:
+            traceback.print_exc()
+            pass
+        return None
+
+    def _concat_segments_copy(self, segs: List[pathlib.Path]) -> pathlib.Path | None:
+        lst = self.temp_dir / f"concat_list_{self.run_id}.txt"
+        try:
+            with open(lst, "w", encoding="utf-8") as f:
+                for p in segs:
+                    f.write(f"file '{str(p).replace("'", "\\'")}'\n")
+        except Exception:
+            return None
+        outp = self.temp_dir / f"video_no_audio_{self.run_id}.mp4"
+        try:
+            cmd = [
+                self.ffmpeg_bin,
+                "-y",
+                "-f","concat",
+                "-safe","0",
+                "-i", str(lst),
+                # 保持时间戳并避免 vsync 引入的加速/降速
+                "-fflags", "+genpts",
+                "-vsync", "passthrough",
+                "-c","copy",
+                "-movflags", "+faststart",
+                str(outp),
+            ]
+            si = None
+            kwargs = {}
+            xprint(f"_concat_segments_copy: {cmd}")
+            try:
+                if os.name == "nt":
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+            except Exception:
+                kwargs = {}
+            r = subprocess.run(cmd, capture_output=True, **kwargs)
+            if r.returncode == 0 and outp.exists():
+                return outp
+        except Exception:
+            traceback.print_exc()
+            pass
+        return None
+
+    def _make_bgm_segment(self, s: float, e: float) -> pathlib.Path | None:
+        outa = self.temp_dir / f"bgm_{self.run_id}.m4a"
+        try:
+            dur = max(0.0, float(e - s))
+            cmd = [
+                self.ffmpeg_bin,
+                "-y",
+                "-ss", f"{s:.3f}",
+                "-t", f"{dur:.3f}",
+                "-i", str(self.audio_path),
+                "-c:a","aac",
+                "-b:a","192k",
+                "-ar","44100",
+                str(outa),
+            ]
+            si = None
+            kwargs = {}
+            xprint(f"_make_bgm_segment: {cmd}")
+            try:
+                if os.name == "nt":
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+            except Exception:
+                kwargs = {}
+            r = subprocess.run(cmd, capture_output=True, **kwargs)
+            if r.returncode == 0 and outa.exists():
+                return outa
+        except Exception:
+            traceback.print_exc()
+            pass
+        return None
+
+    def _mux_video_audio_copy(self, video_no_audio: pathlib.Path, bgm_path: pathlib.Path, out_path: pathlib.Path) -> pathlib.Path | None:
+        try:
+            cmd = [
+                self.ffmpeg_bin,
+                "-y",
+                "-i", str(video_no_audio),
+                "-i", str(bgm_path),
+                "-map","0:v:0",
+                "-map","1:a:0",
+                "-c:v","copy",
+                "-c:a","copy",
+                "-shortest",
+                "-movflags", "+faststart",
+                str(out_path),
+            ]
+            si = None
+            kwargs = {}
+            xprint(f"_mux_video_audio_copy: {cmd}")
+            try:
+                if os.name == "nt":
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+            except Exception:
+                kwargs = {}
+            r = subprocess.run(cmd, capture_output=True, **kwargs)
+            if r.returncode == 0 and out_path.exists():
+                return out_path
+        except Exception:
+            traceback.print_exc()
+            pass
+        return None
+
     def _collect_media(self, count: int) -> List[pathlib.Path]:
         """从传入的媒体文件数组中随机抽取指定数量（不足则循环补齐并打乱）。"""
         candidates: List[pathlib.Path] = []
@@ -258,119 +470,83 @@ class VideoBeatsMixed:
             pass
         return picks
 
-    def _concat_and_mux(self, clips: List[Any], audio_window: Tuple[float, float], out_path: pathlib.Path) -> pathlib.Path | None:
-        """拼接视频片段并与指定窗口的 BGM 写出。"""
-        try:
-            final = concatenate_videoclips(clips, method="compose")
-        except Exception:
-            traceback.print_exc()
-            return None
-
-        s, e = audio_window
-        bgm = None
-        try:
-            if e > s:
-                bgm = AudioFileClip(str(self.audio_path)).subclip(s, e)
-                final = final.set_audio(bgm)
-        except Exception:
-            traceback.print_exc()   
-            pass
-
-        try:
-            use_nvenc = bool(is_nvenc_available())
-        except Exception:
-            traceback.print_exc()
-            use_nvenc = False
-        codec = "h264_nvenc" if use_nvenc else "libx264"
-        ffmpeg_params = ["-preset", "p6", "-cq", "32"] if use_nvenc else ["-preset", "slow", "-crf", "28"]
-        fps = getattr(final, "fps", None) or 30
-        temp_audiofile = str(self.temp_dir / f"temp_audio_{random.randint(100000,999999)}.m4a")
-        try:
-            final.write_videofile(
-                str(out_path),
-                audio_codec="aac",
-                codec=codec,
-                ffmpeg_params=ffmpeg_params,
-                fps=fps,
-                temp_audiofile=temp_audiofile,
-                remove_temp=True,
-                logger=None,
-            )
-        except Exception:
-            traceback.print_exc()
-            return None
-        finally:
-            try:
-                final.close()
-            except Exception:
-                pass
-            try:
-                if bgm is not None:
-                    bgm.close()
-            except Exception:
-                pass
-            try:
-                for c in clips:
-                    if hasattr(c, "close"):
-                        c.close()
-            except Exception:
-                pass
-        return out_path if out_path.exists() else None
-
     def run(self) -> pathlib.Path | None:
-        """执行卡点混剪并输出最终视频路径。"""
+        # 获取切片的窗口范围
         window = self._resolve_window()
+        if window is None:
+            return None
+        # 获取窗口的鼓点信息
         beats_info = self._extract_beats_info(window)
         if not beats_info:
             return None
-        # 若仅提供图片素材，走独立的图片剪辑构建流程
-        img_only = all(self._is_image_file(p.name) for p in self.media_files) and len(self.media_files) > 0
+        # 根据鼓点个数，随机获取视频切片
         picks = self._collect_media(len(beats_info))
         if not picks:
             return None
-        if img_only:
-            clips = self._build_clips_from_images(beats_info, picks)
-        else:
-            clips = self._build_clips_from_media(beats_info, picks)
+      
+        # 根据鼓点信息+切片视频/图片，生成视频片段（优化视频内存）  
+        segs: List[pathlib.Path] = []
+        for idx, (info, path) in enumerate(zip(beats_info, picks)):
+            dur = max(0.2, float(info.get("duration", 0.5)))
+            if self._is_video_file(path.name):
+                vdur = ffprobe_duration(path)
+                start = self._pick_random_start(vdur, dur)
+                seg = self._slice_video_moviepy(path, start, dur, idx)
+            else:
+                seg = self._image_to_segment(path, dur, idx)
+            if seg is None:
+                continue
+            segs.append(seg)
+        if not segs:
+            return None
 
-        # 对齐总时长到窗口长度：最后一段微调
-        try:
-            total = sum(float(c.duration or 0.0) for c in clips)
-            target = float(window[1] - window[0])
-            diff = float(target - total)
-            if diff > 0.05:
-                last = clips[-1]
-                try:
-                    
-                    if hasattr(last, "fx"):
-                        clips[-1] = last.fx(vfx.loop, duration=float(last.duration or 0.0) + diff)
-                    else:
-                        clips[-1] = last.set_duration(float(last.duration or 0.0) + diff)
-                except Exception:
-                    clips[-1] = last.set_duration(float(last.duration or 0.0) + diff)
-            elif diff < -0.05:
-                i = len(clips) - 1
-                remain = -diff
-                while i >= 0 and remain > 0.05:
-                    cur = clips[i]
-                    curd = float(cur.duration or 0.0)
-                    shrink = min(curd - 0.2, remain)
-                    if shrink > 0.0:
-                        try:
-                            newd = max(0.2, curd - shrink)
-                            clips[i] = cur.subclip(0, newd)
-                        except Exception:
-                            clips[i] = cur.set_duration(max(0.2, curd - shrink))
-                        remain -= shrink
-                    i -= 1
-        except Exception:
-            traceback.print_exc()
-            pass
-
-        # 输出文件名
+        video_no_audio = self._concat_segments_copy(segs)
+        if video_no_audio is None:
+            return None
+        s, e = window
+        bgm = self._make_bgm_segment(s, e)
+        if bgm is None:
+            return None
         rand_id = random.randint(100000, 999999)
         out_path = self.output_dir / f"beats_mixed_{rand_id}.mp4"
-        return self._concat_and_mux(clips, window, out_path)
+        final = self._mux_video_audio_copy(video_no_audio, bgm, out_path)
+
+        try:
+            if self.temp_dir.exists():
+                self.temp_dir.rmdir()
+                xprint(f"_concat_segments_copy: 临时目录 {self.temp_dir} 已删除")
+        except Exception:
+            pass
+        # try:
+        #     for p in segs:
+        #         try:
+        #             if p.exists():
+        #                 p.unlink()
+        #         except Exception:
+        #             pass
+        #     try:
+        #         if video_no_audio and pathlib.Path(video_no_audio).exists():
+        #             pathlib.Path(video_no_audio).unlink()
+        #     except Exception:
+        #         pass
+        #     try:
+        #         cl = self.temp_dir / f"concat_list_{self.run_id}.txt"
+        #         if cl.exists():
+        #             cl.unlink()
+        #     except Exception:
+        #         pass
+        #     try:
+        #         if bgm and pathlib.Path(bgm).exists():
+        #             pathlib.Path(bgm).unlink()
+        #     except Exception:
+        #         pass
+        #     try:
+        #         shutil.rmtree(self.temp_dir, ignore_errors=True)
+        #     except Exception:
+        #         pass
+        # except Exception:
+        #     pass
+        return final
 
 
 def video_beats_mixed(

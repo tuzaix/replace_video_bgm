@@ -112,6 +112,66 @@ def probe_resolution(path: pathlib.Path) -> Tuple[int, int] | None:
     except Exception:
         return None
 
+def ffprobe_duration(path: pathlib.Path) -> float:
+    try:
+        cmd = [ffprobe_bin, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
+        si = None
+        kwargs = {}
+        try:
+            if os.name == "nt":
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+        except Exception:
+            kwargs = {}
+        r = subprocess.run(cmd, capture_output=True, **kwargs)
+        if r.returncode == 0:
+            txt = (r.stdout or b"").decode("utf-8", errors="ignore").strip()
+            return float(txt)
+    except Exception:
+        pass
+    try:
+        v = VideoFileClip(str(path))
+        d = float(v.duration or 0.0)
+        v.close()
+        return d
+    except Exception:
+        return 0.0
+
+def ffprobe_stream_info(path: pathlib.Path) -> Dict[str, Any]:
+    try:
+        cmd = [
+            ffprobe_bin,
+            "-v","error",
+            "-select_streams","v:0",
+            "-show_entries","stream=width,height,codec_name,r_frame_rate,pix_fmt",
+            "-of","json",
+            str(path),
+        ]
+        si = None
+        kwargs = {}
+        try:
+            if os.name == "nt":
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+        except Exception:
+            kwargs = {}
+        r = subprocess.run(cmd, capture_output=True, **kwargs)
+        if r.returncode == 0:
+            import json as _json
+            data = _json.loads((r.stdout or b"{}").decode("utf-8", errors="ignore") or "{}")
+            st = (data.get("streams") or [{}])[0]
+            return {
+                "width": int(st.get("width" or 0) or 0),
+                "height": int(st.get("height" or 0) or 0),
+                "codec": str(st.get("codec_name" or "") or ""),
+                "pix_fmt": str(st.get("pix_fmt" or "") or ""),
+                "r_frame_rate": str(st.get("r_frame_rate" or "") or ""),
+            }
+    except Exception:
+        pass
+    return {"width": 0, "height": 0, "codec": "", "pix_fmt": "", "r_frame_rate": ""}
 
 def group_by_resolution(paths: List[pathlib.Path]) -> Dict[Tuple[int, int], List[pathlib.Path]]:
     """按分辨率对素材进行分组。"""
