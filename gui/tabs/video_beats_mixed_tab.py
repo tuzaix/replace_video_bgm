@@ -40,27 +40,9 @@ from moviepy.editor import VideoFileClip
 from gui.utils import theme
 from gui.precheck import run_preflight_checks
 from utils.calcu_video_info import get_resolution_topn
+from utils.common_utils import is_audio_file, is_video_file, is_image_file
 from video_tool.beats_checkpoint import beats_checkpoint
 from video_tool.video_beats_mixed import video_beats_mixed
-
-
-def _is_audio_file(name: str) -> bool:
-    """判断是否为常见音频文件。"""
-    ext = os.path.splitext(name)[1].lower()
-    return ext in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
-
-
-def _is_video_file(name: str) -> bool:
-    """判断是否为常见视频文件。"""
-    ext = os.path.splitext(name)[1].lower()
-    return ext in {".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".m4v"}
-
-
-def _is_image_file(name: str) -> bool:
-    """判断是否为常见图片文件。"""
-    ext = os.path.splitext(name)[1].lower()
-    return ext in {".jpg", ".jpeg", ".png", ".bmp"}
-
 
 class VideoBeatsMixedWorker(QtCore.QObject):
     """后台执行卡点采集与混剪生成的工作器。"""
@@ -92,11 +74,11 @@ class VideoBeatsMixedWorker(QtCore.QObject):
         audio_files: List[pathlib.Path] = []
         for d in audio_dirs:
             try:
-                if os.path.isfile(d) and _is_audio_file(os.path.basename(d)):
+                if os.path.isfile(d) and is_audio_file(os.path.basename(d)):
                     audio_files.append(pathlib.Path(d))
                 elif os.path.isdir(d):
                     for name in os.listdir(d):
-                        if _is_audio_file(name):
+                        if is_audio_file(name):
                             p = pathlib.Path(d) / name
                             if p.is_file():
                                 audio_files.append(p)
@@ -115,7 +97,7 @@ class VideoBeatsMixedWorker(QtCore.QObject):
                 # 回退：若筛分失败则尝试直接收集目录下文件
                 try:
                     for name in os.listdir(d):
-                        if _is_video_file(name) or _is_image_file(name):
+                        if  is_video_file(name) or is_image_file(name):
                             p = pathlib.Path(d) / name
                             if p.is_file():
                                 media_files.append(p)
@@ -540,7 +522,7 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
             return
         try:
             for name in os.listdir(d):
-                if _is_audio_file(name):
+                if is_audio_file(name):
                     p = os.path.join(d, name)
                     if os.path.isfile(p):
                         self.audio_dirs_list.addItem(p)
@@ -552,7 +534,7 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "选择音频文件", filter="音频文件 (*.mp3 *.wav *.m4a *.aac *.flac *.ogg)")
         try:
             for f in files:
-                if f and os.path.isfile(f) and _is_audio_file(os.path.basename(f)):
+                if f and os.path.isfile(f) and is_audio_file(os.path.basename(f)):
                     self.audio_dirs_list.addItem(f)
         except Exception:
             pass

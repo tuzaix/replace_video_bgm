@@ -247,7 +247,14 @@ class BeatsCheckpoint:
         out_json = self.output_dir / f"{self.audio_path.stem}.json"
         # 判断是否已经存在 JSON 文件
         if out_json.exists():
-            return out_json
+            # 检查一下主要的参数是否有变化，mode, min_interval, suggestion.highlight(end_time-start_time)是否有变化，否则重新生成
+            try:
+                with open(out_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("mode") == mode and data.get("min_interval") == min_interval and data.get("suggestion", {}).get("highlight", {}).get("end_time") - data.get("suggestion", {}).get("highlight", {}).get("start_time") == clip_duration:
+                        return out_json
+            except Exception:
+                pass
         
         drums_path = self._separate_drums()
         if drums_path is None or not drums_path.exists():
