@@ -242,15 +242,24 @@ class BeatsCheckpoint:
                 best_start = float(start)
         return {"start_time": best_start, "end_time": best_start + float(clip_duration), "beat_count": int(best_cnt)}
 
-    def run(self, mode: str = "default", min_interval: Optional[float] = None) -> Optional[pathlib.Path]:
+    def run(self, mode: str = "default", min_interval: Optional[float] = None, clip_duration: Optional[float] = None) -> Optional[pathlib.Path]:
         """执行分离、检测与 JSON 写出，返回 JSON 路径。"""
+        out_json = self.output_dir / f"{self.audio_path.stem}.json"
+        # 判断是否已经存在 JSON 文件
+        if out_json.exists():
+            return out_json
+        
         drums_path = self._separate_drums()
         if drums_path is None or not drums_path.exists():
             return None
         beats = self._detect_beats(drums_path, mode=mode, min_interval=min_interval)
        
         wf_vals, duration, sr = self._compute_waveform(points_per_second=15)
-        highlight = self._find_highlight_segment(beats, duration, clip_duration=30.0)
+        try:
+            cd = float(clip_duration) if clip_duration is not None else 30.0
+        except Exception:
+            cd = 30.0
+        highlight = self._find_highlight_segment(beats, duration, clip_duration=cd)
 
         payload = {
             "audio": str(self.audio_path),
@@ -269,8 +278,6 @@ class BeatsCheckpoint:
                 "highlight": highlight,
             },
         }
-
-        out_json = self.output_dir / f"{self.audio_path.stem}.json"
         try:
             with open(out_json, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -279,7 +286,7 @@ class BeatsCheckpoint:
         return out_json
 
 
-def beats_checkpoint(audio_path: str, output_dir: Optional[str] = None, temp_dir: Optional[str] = None, mode: str = "default", min_interval: Optional[float] = None, device: str = "gpu") -> Optional[pathlib.Path]:
+def beats_checkpoint(audio_path: str, output_dir: Optional[str] = None, temp_dir: Optional[str] = None, mode: str = "default", min_interval: Optional[float] = None, clip_duration: Optional[float] = None, device: str = "gpu") -> Optional[pathlib.Path]:
     """功能函数：生成卡点与可视化元数据并输出 JSON。"""
     runner = BeatsCheckpoint(audio_path=audio_path, output_dir=output_dir, temp_dir=temp_dir, device=device)
-    return runner.run(mode=mode, min_interval=min_interval)
+    return runner.run(mode=mode, min_interval=min_interval, clip_duration=clip_duration)
