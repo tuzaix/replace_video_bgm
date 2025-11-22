@@ -42,6 +42,17 @@ class VideoBeatsMixed:
         self.window = window
         self.meta = beats_meta
         self.clip_min_interval = clip_min_interval
+        self.temp_dir = self.output_dir.parent / "beats_mixed_temp"
+        try:
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            os.environ.setdefault("TMPDIR", str(self.temp_dir))
+            os.environ.setdefault("TEMP", str(self.temp_dir))
+            os.environ.setdefault("TMP", str(self.temp_dir))
+        except Exception:
+            pass
     
     def _make_video_clip(self, path: pathlib.Path, dur: float) -> Any:
         """构建视频片段：随机截取到目标时长，不足则循环补齐。"""
@@ -273,6 +284,7 @@ class VideoBeatsMixed:
         codec = "h264_nvenc" if use_nvenc else "libx264"
         ffmpeg_params = ["-preset", "p6", "-cq", "32"] if use_nvenc else ["-preset", "slow", "-crf", "28"]
         fps = getattr(final, "fps", None) or 30
+        temp_audiofile = str(self.temp_dir / f"temp_audio_{random.randint(100000,999999)}.m4a")
         try:
             final.write_videofile(
                 str(out_path),
@@ -280,6 +292,8 @@ class VideoBeatsMixed:
                 codec=codec,
                 ffmpeg_params=ffmpeg_params,
                 fps=fps,
+                temp_audiofile=temp_audiofile,
+                remove_temp=True,
                 logger=None,
             )
         except Exception:
