@@ -70,7 +70,7 @@ class VideoBeatsMixedWorker(QtCore.QObject):
             self.error.emit(f"导入逻辑失败: {e}")
             return
 
-        self.phase.emit("Scanning media…")
+        self.phase.emit("检测音频文件")
         audio_files: List[pathlib.Path] = []
         for d in audio_dirs:
             try:
@@ -84,7 +84,8 @@ class VideoBeatsMixedWorker(QtCore.QObject):
                                 audio_files.append(p)
             except Exception:
                 continue
-
+        
+        self.phase.emit("检测视频/图片素材")
         media_files: List[pathlib.Path] = []
         for d in video_dirs:
             try:
@@ -120,7 +121,7 @@ class VideoBeatsMixedWorker(QtCore.QObject):
         def _emit_progress() -> None:
             self.progress.emit(done, total_tasks)
 
-        self.phase.emit("meta")
+        self.phase.emit("生成音频卡点")
         metas: Dict[str, Dict] = {}
         meta_done = 0
         for a in audio_files:
@@ -153,7 +154,7 @@ class VideoBeatsMixedWorker(QtCore.QObject):
             except Exception:
                 pass
 
-        self.phase.emit("mix")
+        self.phase.emit("混剪视频")
 
         def process_one(audio_path: pathlib.Path, meta_obj: Dict) -> Optional[str]:
             nonlocal done
@@ -653,18 +654,20 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         self._thread.start()
 
     def _on_progress(self, done: int, total: int) -> None:
-        """根据完成数量更新进度条，分阶段加权显示“完成数 | 总数”。"""
+        """根据完成数量更新进度条，分阶段加权显示“阶段：完成数 | 总数”。"""
         try:
             start = int(getattr(self, "_phase_start", 0))
             span = int(getattr(self, "_phase_span", 100))
+            label = str(getattr(self, "_phase_label", "")) or ""
             if total <= 0:
                 self.progress.setValue(start)
-                self.progress.setFormat("0 | 0")
+                self.progress.setFormat(f"{label}: 0 | 0" if label else "0 | 0")
                 return
             ratio = max(0.0, min(1.0, float(done) / float(total)))
             weighted = int(start + span * ratio)
             self.progress.setValue(max(0, min(100, weighted)))
-            self.progress.setFormat(f"{int(done)} | {int(total)}")
+            fmt = f"{int(done)} | {int(total)}"
+            self.progress.setFormat(f"{label}: {fmt}" if label else fmt)
         except Exception:
             try:
                 self.progress.setValue(0)
@@ -678,15 +681,18 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
             if name in {"meta", "Generating beats meta…"}:
                 self._phase_start = 0
                 self._phase_span = 30
-                self.progress.setFormat("0 | 0")
+                self._phase_label = "解析BGM"
+                self.progress.setFormat(f"{self._phase_label}: 0 | 0")
             elif name in {"mix", "Mixing videos…"}:
                 self._phase_start = 30
                 self._phase_span = 70
-                self.progress.setFormat("0 | 0")
+                self._phase_label = "混剪视频"
+                self.progress.setFormat(f"{self._phase_label}: 0 | 0")
             else:
                 self._phase_start = 0
                 self._phase_span = 100
-                self.progress.setFormat("0 | 0")
+                self._phase_label = str(name or "")
+                self.progress.setFormat(f"{self._phase_label}: 0 | 0" if self._phase_label else "0 | 0")
         except Exception:
             pass
 
