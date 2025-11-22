@@ -9,7 +9,7 @@ import subprocess
 import shutil
 import time
 from typing import Optional, Tuple, List, Dict, Any
-from moviepy.editor import concatenate_videoclips, AudioFileClip, VideoFileClip, ImageClip
+from moviepy.editor import AudioFileClip, VideoFileClip, ImageClip
 from moviepy.video.fx import all as vfx
 from utils.gpu_detect import is_nvenc_available
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
@@ -174,7 +174,6 @@ class VideoBeatsMixed:
 
     def _get_audio_duration(self) -> float:
         try:
-            from moviepy.editor import AudioFileClip
             clip = AudioFileClip(str(self.audio_path))
             dur = float(clip.duration or 0.0)
             try:
@@ -513,9 +512,11 @@ class VideoBeatsMixed:
 
         try:
             if self.temp_dir.exists():
-                self.temp_dir.rmdir()
+                # 不管目录是否为空，都直接删除
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
                 xprint(f"_concat_segments_copy: 临时目录 {self.temp_dir} 已删除")
         except Exception:
+            traceback.print_exc()
             pass
         # try:
         #     for p in segs:
