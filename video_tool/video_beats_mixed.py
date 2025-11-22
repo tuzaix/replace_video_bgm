@@ -169,48 +169,51 @@ class VideoBeatsMixed:
         return (s, e)
 
     def _extract_beats_info(self, window: Tuple[float, float]) -> List[Dict[str, Any]]:
-        """从元数据中提取窗口内的卡点信息列表。"""
         s, e = window
         beats_info: List[Dict[str, Any]] = []
-        # 若已有预生成的 beats_checkpoint_meta，优先使用
-        pre = self.meta.get("beats_checkpoint_meta")
-        if isinstance(pre, list) and pre:
-            for item in pre:
-                try:
-                    t0 = float(item.get("start_time", 0.0))
-                    dur = float(item.get("duration", 0.0))
-                    t1 = float(item.get("end_time", t0 + max(0.2, dur)))
-                    if s <= t0 < e:
-                        # 若超出窗口，截断到窗口尾
-                        t1 = min(t1, e)
-                        beats_info.append({
-                            "idx": int(item.get("idx", len(beats_info))),
-                            "start_time": t0,
-                            "end_time": t1,
-                            "duration": max(0.2, float(t1 - t0)),
-                        })
-                except Exception:
-                    continue
-            if beats_info:
-                return beats_info
-
-        # 否则从 beats 列表生成：持续到下一个鼓点或窗口尾
-        beats = self.meta.get("beats") or []
+        mi = 0.33
         try:
-            beats = [float(x) for x in beats]
+            v = self.meta.get("min_interval")
+            if v is not None:
+                mi = max(0.2, float(v))
+        except Exception:
+            mi = max(0.2, mi)
+        beats_raw = self.meta.get("beats") or []
+        try:
+            beats = [float(x) for x in beats_raw]
         except Exception:
             beats = []
         beats = [t for t in beats if s <= t < e]
         beats.sort()
-        for i, t in enumerate(beats):
-            next_t = beats[i + 1] if (i + 1) < len(beats) else e
-            t1 = min(e, float(next_t))
+        i = 0
+        idx = 0
+        while i < len(beats):
+            t0 = float(beats[i])
+            j = i + 1
+            cur_end = t0
+            while True:
+                next_t = float(beats[j]) if j < len(beats) else float(e)
+                total = float(next_t - t0)
+                if total >= mi:
+                    cur_end = min(float(e), float(next_t))
+                    break
+                if j >= len(beats):
+                    cur_end = min(float(e), float(t0 + mi))
+                    break
+                j += 1
+
+            dur = float(cur_end - t0)
+            if dur < mi:
+                dur = mi
+                cur_end = t0 + dur
             beats_info.append({
-                "idx": i,
-                "start_time": float(t),
-                "end_time": float(t1),
-                "duration": max(0.2, float(t1 - t)),
+                "idx": idx,
+                "start_time": t0,
+                "end_time": cur_end,
+                "duration": max(0.2, dur),
             })
+            idx += 1
+            i = j
         return beats_info
 
     def _collect_media(self, count: int) -> List[pathlib.Path]:
@@ -290,6 +293,8 @@ class VideoBeatsMixed:
         """执行卡点混剪并输出最终视频路径。"""
         window = self._resolve_window()
         beats_info = self._extract_beats_info(window)
+        import pprint 
+        pprint.pprint(beats_info)
         if not beats_info:
             return None
         # 若仅提供图片素材，走独立的图片剪辑构建流程
