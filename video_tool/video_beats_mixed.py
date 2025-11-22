@@ -247,7 +247,7 @@ class VideoBeatsMixed:
                 "-i", str(in_path),
                 "-t", f"{duration:.3f}",
                 # "-vf", vf,
-                "-r", 25,
+                "-r", "25",
                 "-pix_fmt","yuv420p",
                 "-c:v", "h264_nvenc" if self._use_nvenc else "libx264",
                 *( ["-preset","p4","-cq","28"] if self._use_nvenc else ["-preset","slow","-crf","20"] ),

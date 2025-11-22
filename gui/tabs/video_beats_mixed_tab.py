@@ -329,7 +329,7 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         gl2.addLayout(row_a_btns)
 
         row_high = QtWidgets.QHBoxLayout()
-        row_high.addWidget(QtWidgets.QLabel("卡点窗口时长(秒)："), 0)
+        row_high.addWidget(QtWidgets.QLabel("窗口时长(秒)："), 0)
         self.highlight_min_label = QtWidgets.QLabel("10")
         self.highlight_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.highlight_slider.setRange(10, 45)
@@ -350,7 +350,7 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         gl2.addLayout(row_high)
 
         row_mode = QtWidgets.QHBoxLayout()
-        label_mode = QtWidgets.QLabel("间隔模式：")
+        label_mode = QtWidgets.QLabel("采点模式：")
         row_mode.addWidget(label_mode, 0)
         self.mode_combo = QtWidgets.QComboBox()
         try:
@@ -361,11 +361,11 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         self.interval_spin = QtWidgets.QDoubleSpinBox()
         self.interval_spin.setRange(0.25, 3.0)
         self.interval_spin.setSingleStep(0.05)
-        self.interval_spin.setValue(0.25)
+        self.interval_spin.setValue(0.33)
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
         row_mode.addWidget(self.mode_combo, 0)
         row_mode.addSpacing(12)
-        label_interval = QtWidgets.QLabel("间隔(秒)：")
+        label_interval = QtWidgets.QLabel("鼓点间隔(秒)：")
         row_mode.addWidget(label_interval, 0)
         row_mode.addWidget(self.interval_spin, 0)
         gl2.addLayout(row_mode)

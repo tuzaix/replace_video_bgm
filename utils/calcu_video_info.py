@@ -44,7 +44,6 @@ def list_media(
                     if is_video_file(p):
                         out.append(p)
                     elif is_image_file(p):
-                        print(p)
                         out.append(p)
     except Exception:
         traceback.print_exc()
