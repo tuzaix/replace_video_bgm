@@ -236,7 +236,7 @@ class VideoBeatsMixed:
             traceback.print_exc()
             return None
 
-    def _image_to_segment(self, in_path: pathlib.Path, duration: float, idx: int, base_w: int, base_h: int) -> pathlib.Path | None:
+    def _image_to_segment(self, in_path: pathlib.Path, duration: float, idx: int) -> pathlib.Path | None:
         outp = self.temp_dir / f"imgseg_{self.run_id}_{idx:04d}.mp4"
         try:
             # vf = f"scale={base_w}:{base_h}:force_original_aspect_ratio=decrease,pad={base_w}:{base_h}:(ow-iw)/2:(oh-ih)/2:color=black"

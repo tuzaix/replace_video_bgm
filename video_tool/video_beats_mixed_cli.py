@@ -22,14 +22,6 @@ def main() -> None:
         default=None,
         help="卡点窗口，格式 'start,end'（秒）。为空则使用元数据建议窗口",
     )
-    # 增加对视频素材的支持
-    parser.add_argument(
-        "--media_type",
-        dest="media_type",
-        type=str,
-        default="video",
-        help="素材类型：'video' 或 'image'（默认 'video'）",
-    )
     # 增加clip_min_interval参数
     parser.add_argument(
         "--clip_min_interval",
@@ -57,11 +49,10 @@ def main() -> None:
     print(f"素材目录: {args.media_dir}")
     print(f"输出目录: {output_dir}")
     print(f"窗口: {window or '使用建议窗口'}")
-    print(f"素材类型: {args.media_type}")
     print(f"最小clip间隔: {args.clip_min_interval}")
     print("-" * 30)
 
-    media_data = get_resolution_topn(args.media_dir, top_n=1, media_type=args.media_type)
+    media_data = get_resolution_topn(args.media_dir, top_n=1)
     media_resolution, media_count, media_files = media_data["resolution"], media_data["count"], media_data["files"]
     if media_files:
         print(f"素材文件中最高分辨率: {media_resolution}，共 {media_count} 个文件")
