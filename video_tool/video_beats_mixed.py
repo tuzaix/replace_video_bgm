@@ -20,6 +20,7 @@ class VideoBeatsMixed:
         media_files: List[str],
         output_dir: str,
         window: Optional[Tuple[float, float]] = None,
+        clip_min_interval: Optional[float] = None,
     ) -> None:
         """初始化混剪器。"""
         if (not isinstance(audio_path, str)) or (not audio_path.strip()):
@@ -40,6 +41,7 @@ class VideoBeatsMixed:
             pass
         self.window = window
         self.meta = beats_meta
+        self.clip_min_interval = clip_min_interval
     
     def _make_video_clip(self, path: pathlib.Path, dur: float) -> Any:
         """构建视频片段：随机截取到目标时长，不足则循环补齐。"""
@@ -173,7 +175,7 @@ class VideoBeatsMixed:
         beats_info: List[Dict[str, Any]] = []
         mi = 0.33
         try:
-            v = self.meta.get("min_interval")
+            v = self.clip_min_interval
             if v is not None:
                 mi = max(0.2, float(v))
         except Exception:
