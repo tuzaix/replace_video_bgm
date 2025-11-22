@@ -9,11 +9,11 @@ import subprocess
 import shutil
 import time
 from typing import Optional, Tuple, List, Dict, Any
-from moviepy.editor import AudioFileClip, VideoFileClip, ImageClip
-from moviepy.video.fx import all as vfx
+from moviepy.editor import AudioFileClip, VideoFileClip
 from utils.gpu_detect import is_nvenc_available
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 from utils.xprint import xprint
+from utils.common_utils import is_video_file, is_image_file
 from utils.calcu_video_info import ffprobe_duration, ffprobe_stream_info
 
 class VideoBeatsMixed:
@@ -71,73 +71,11 @@ class VideoBeatsMixed:
         env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffprobe=False)
         self.ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg") or "ffmpeg"
         self.ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe") or "ffprobe"
-    
-    def _make_video_clip(self, path: pathlib.Path, dur: float) -> Any:
-        """构建视频片段：随机截取到目标时长，不足则循环补齐。"""
-        v = VideoFileClip(str(path))
-        vdur = float(v.duration or 0.0)
-        if vdur > dur:
-            start = 0.0
-            try:
-                start = random.uniform(0.0, max(0.0, vdur - dur))
-            except Exception:
-                start = 0.0
-            clip = v.subclip(start, start + dur)
-        else:
-            clip = v.subclip(0, max(0.0, min(dur, vdur)))
-            try:
-                need = max(0.0, dur - float(clip.duration or 0.0))
-                if need > 0.05:
-                    clip = clip.fx(vfx.loop, duration=dur)
-            except Exception:
-                pass
-        return clip
-
-    def _make_image_clip(self, path: pathlib.Path, dur: float) -> Any:
-        """构建图片片段：设置目标时长并提供默认帧率。"""
         try:
-            return ImageClip(str(path)).set_duration(dur).set_fps(24)
+            self._use_nvenc = bool(is_nvenc_available())
         except Exception:
-            return ImageClip(str(path)).set_duration(dur)
-
-    def _build_clips_from_images(self, beats_info: List[Dict[str, Any]], picks: List[pathlib.Path]) -> List[Any]:
-        """根据卡点时长生成图片片段列表。"""
-        clips: List[Any] = []
-        for info, path in zip(beats_info, picks):
-            dur = max(0.2, float(info.get("duration", 0.5)))
-            try:
-                clips.append(self._make_image_clip(path, dur))
-            except Exception:
-                continue
-        return clips
-
-    def _build_clips_from_media(self, beats_info: List[Dict[str, Any]], picks: List[pathlib.Path]) -> List[Any]:
-        """根据素材类型（视频/图片）生成对应片段列表。"""
-        clips: List[Any] = []
-        for info, path in zip(beats_info, picks):
-            dur = max(0.2, float(info.get("duration", 0.5)))
-            try:
-                if self._is_video_file(path.name):
-                    clip = self._make_video_clip(path, dur)
-                else:
-                    clip = self._make_image_clip(path, dur)
-                clips.append(clip)
-            except Exception:
-                continue
-        return clips
-        
-    @staticmethod
-    def _is_video_file(path: str) -> bool:
-        """判断是否为视频文件。"""
-        ext = os.path.splitext(path)[1].lower()
-        return ext in {".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".m4v"}
-
-    @staticmethod
-    def _is_image_file(path: str) -> bool:
-        """判断是否为图片文件。"""
-        ext = os.path.splitext(path)[1].lower()
-        return ext in {".jpg", ".jpeg", ".png", ".bmp"}
-
+            self._use_nvenc = False
+    
     def _resolve_window(self) -> Tuple[float, float]:
         """确定卡点窗口：优先使用用户窗口，否则使用元数据中的建议窗口。"""
         if isinstance(self.window, tuple) and len(self.window) == 2:
@@ -311,7 +249,8 @@ class VideoBeatsMixed:
                 # "-vf", vf,
                 "-r", 25,
                 "-pix_fmt","yuv420p",
-                "-c:v","libx264",
+                "-c:v", "h264_nvenc" if self._use_nvenc else "libx264",
+                *( ["-preset","p4","-cq","28"] if self._use_nvenc else ["-preset","slow","-crf","20"] ),
                 "-movflags", "+faststart",
                 str(outp),
             ]
@@ -447,7 +386,7 @@ class VideoBeatsMixed:
             for p in self.media_files:
                 if p.is_file():
                     name = p.name
-                    if self._is_video_file(name) or self._is_image_file(name):
+                    if is_video_file(name) or is_image_file(name):
                         candidates.append(p)
         except Exception:
             pass
@@ -487,7 +426,7 @@ class VideoBeatsMixed:
         segs: List[pathlib.Path] = []
         for idx, (info, path) in enumerate(zip(beats_info, picks)):
             dur = max(0.2, float(info.get("duration", 0.5)))
-            if self._is_video_file(path.name):
+            if is_video_file(path.name):
                 vdur = ffprobe_duration(path)
                 start = self._pick_random_start(vdur, dur)
                 seg = self._slice_video_moviepy(path, start, dur, idx)
