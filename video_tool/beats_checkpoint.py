@@ -46,7 +46,7 @@ class BeatsCheckpoint:
         self.audio_path = pathlib.Path(audio_path)
         parent = self.audio_path.parent
         self.output_dir = pathlib.Path(output_dir) if output_dir else parent / "beats_meta"
-        self.temp_dir = pathlib.Path(temp_dir) if temp_dir else parent / "temp"
+        self.temp_dir = pathlib.Path(temp_dir) if temp_dir else parent / "temp" / self.audio_path.stem
         self.device = device
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -270,7 +270,7 @@ class BeatsCheckpoint:
             },
         }
 
-        out_json = self.output_dir / f"{self.audio_path.stem}_beats.json"
+        out_json = self.output_dir / f"{self.audio_path.stem}.json"
         try:
             with open(out_json, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)

@@ -35,8 +35,8 @@ def main() -> None:
         "--clip_min_interval",
         dest="clip_min_interval",
         type=float,
-        default=0.8,
-        help="最小clip间隔（秒），默认0.8",
+        default=None,
+        help="最小clip间隔（秒），默认None",
     )
 
     args = parser.parse_args()
