@@ -445,8 +445,6 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         row_top.addWidget(self.run_btn)
         status_vbox.addLayout(row_top)
         vl.addWidget(status_group)
-
-        vl.addLayout(row_top)
         try:
             self._apply_progressbar_style(chunk_color=theme.PRIMARY_BLUE)
             self._apply_action_button_style(running=False)
