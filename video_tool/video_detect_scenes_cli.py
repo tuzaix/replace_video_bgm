@@ -2,7 +2,7 @@ import argparse
 import sys
 import traceback
 
-from .video_detect_scenes import detect_scenes_transnet, save_scenes_results
+from .video_detect_scenes import VideoDetectScenes, save_scenes_results
 
 
 def main() -> None:
@@ -21,6 +21,15 @@ def main() -> None:
         default=None,
         help="输出目录（默认：视频同目录的 scenes 子目录）",
     )
+    parser.add_argument(
+        "-d",
+        "--device",
+        dest="device",
+        type=str,
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="设备选择：auto/cpu/cuda（默认 auto）",
+    )
 
     args = parser.parse_args()
 
@@ -29,28 +38,20 @@ def main() -> None:
     print("-" * 30)
 
     try:
-        result = detect_scenes_transnet(args.video_path)
-        fps = float(result.get("fps", 30.0))
-        scenes_frames = list(result.get("scenes_frames", []))
-        scenes_seconds = list(result.get("scenes_seconds", []))
-
+        saved = save_scenes_results(args.video_path, output_dir=args.output_dir, device=args.device)
+        clips_meta = list(saved.get("clips_meta", []))
         print("AI检测完成，前3个镜头：")
-        preview_count = min(3, len(scenes_frames))
+        preview_count = min(3, len(clips_meta))
         for i in range(preview_count):
-            sf, ef = scenes_frames[i]
-            if i < len(scenes_seconds):
-                s, e = scenes_seconds[i]
-            else:
-                s, e = (sf / fps), (ef / fps)
+            m = clips_meta[i]
             item = {
-                "start_frame": sf,
-                "end_frame": ef,
-                "start_time": f"{s:.2f}s",
-                "end_time": f"{e:.2f}s",
+                "start_frame": int(m.get("start_frame", 0)),
+                "end_frame": int(m.get("end_frame", 0)),
+                "start_time": f"{float(m.get('start_time', 0.0)):.2f}s",
+                "end_time": f"{float(m.get('end_time', 0.0)):.2f}s",
+                "path": str(m.get("path", "")),
             }
             print(item)
-
-        saved = save_scenes_results(args.video_path, args.output_dir, result=result)
     except RuntimeError as e:
         print(f"错误：{e}", file=sys.stderr)
         sys.exit(1)
@@ -62,6 +63,10 @@ def main() -> None:
     print("已保存镜头分割结果：")
     print(f"  - JSON: {saved.get('json_path')}")
     print(f"  - TXT: {saved.get('txt_path')}")
+    clips = saved.get("clips") or []
+    print(f"  - Clips: {len(clips)} 个")
+    if clips:
+        print(f"  - Clips 目录: {saved.get('output_dir')}")
 
 
 if __name__ == "__main__":

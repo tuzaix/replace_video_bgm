@@ -218,6 +218,6 @@ def detect_scenes_transnet(video_path: str) -> Dict[str, Any]:
     return VideoDetectScenes(video_path).detect()
 
 
-def save_scenes_results(video_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
+def save_scenes_results(video_path: str, output_dir: Optional[str] = None, device: str = "auto") -> Dict[str, Any]:
     """函数式封装：保存镜头检测结果并输出切片。"""
-    return VideoDetectScenes(video_path, output_dir=output_dir).save()
+    return VideoDetectScenes(video_path, output_dir=output_dir, device=device).save()
