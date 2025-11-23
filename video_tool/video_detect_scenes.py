@@ -64,17 +64,79 @@ def detect_scenes_transnet(video_path: str) -> Dict[str, Any]:
     若环境未配置，将抛出 RuntimeError，提示用户按照指南安装。
     """
     model = TransNetV2()
-    predictions, scenes = model.predict_video(video_path)
-    fps = _get_fps(video_path)
-    scenes_seconds: List[Tuple[float, float]] = []
     try:
-        for s, e in scenes:
-            scenes_seconds.append((float(s) / fps, float(e) / fps))
+        import torch  # type: ignore
+        if torch.cuda.is_available():
+            try:
+                model = TransNetV2(device="cuda")  # type: ignore
+            except Exception:
+                try:
+                    model.to("cuda")  # type: ignore
+                except Exception:
+                    pass
     except Exception:
-        scenes_seconds = []
+        pass
+    fps = _get_fps(video_path)
+    scenes_frames: List[Tuple[int, int]] = []
+    scenes_seconds: List[Tuple[float, float]] = []
+    # 优先使用 analyze_video 获取标准化结果
+    try:
+        results = model.analyze_video(video_path)  # type: ignore[attr-defined]
+        fps = float(results.get("fps", fps))
+        scenes_data = results.get("scenes", [])
+        for item in scenes_data:
+            try:
+                if isinstance(item, dict):
+                    if "start_frame" in item and "end_frame" in item:
+                        s = int(item["start_frame"]) 
+                        e = int(item["end_frame"]) 
+                    elif "start" in item and "end" in item:
+                        s = int(item["start"]) 
+                        e = int(item["end"]) 
+                    elif "start_time" in item and "end_time" in item:
+                        st = float(item["start_time"]) 
+                        et = float(item["end_time"]) 
+                        s = int(round(st * fps))
+                        e = int(round(et * fps))
+                    else:
+                        continue
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    s = int(item[0])
+                    e = int(item[1])
+                else:
+                    continue
+                scenes_frames.append((s, e))
+                scenes_seconds.append((float(s) / fps, float(e) / fps))
+            except Exception:
+                continue
+    except Exception:
+        # 退回 predict_video + predictions_to_scenes
+        try:
+            video_frames, single_frame_pred, all_frame_pred = model.predict_video(video_path)  # type: ignore[attr-defined]
+            try:
+                scenes_data = model.predictions_to_scenes(single_frame_pred)  # type: ignore[attr-defined]
+            except Exception:
+                scenes_data = []
+            for item in scenes_data:
+                try:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        s = int(item[0])
+                        e = int(item[1])
+                    elif isinstance(item, dict):
+                        s = int(item.get("start", item.get("start_frame", 0)))
+                        e = int(item.get("end", item.get("end_frame", 0)))
+                    else:
+                        continue
+                    scenes_frames.append((s, e))
+                    scenes_seconds.append((float(s) / fps, float(e) / fps))
+                except Exception:
+                    continue
+        except Exception:
+            scenes_frames = []
+            scenes_seconds = []
     return {
         "fps": float(fps),
-        "scenes_frames": [(int(s), int(e)) for s, e in scenes],
+        "scenes_frames": scenes_frames,
         "scenes_seconds": scenes_seconds,
     }
 

@@ -1,5 +1,6 @@
 import argparse
 import sys
+import traceback
 
 from .video_detect_scenes import detect_scenes_transnet, save_scenes_results
 
@@ -54,6 +55,7 @@ def main() -> None:
         print(f"错误：{e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
+        traceback.print_exc()
         print(f"错误：镜头分割执行失败: {e}", file=sys.stderr)
         sys.exit(1)
 
