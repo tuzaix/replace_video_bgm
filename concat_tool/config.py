@@ -12,23 +12,23 @@ from typing import Tuple
 
 # NVENC CQ values per preset (lower is higher quality/larger size)
 QUALITY_NVENC_CQ = {
-    "balanced": "33",
-    "compact": "35",
-    "tiny": "37",
-}
-
-# x264 CRF values per preset (lower is higher quality/larger size)
-QUALITY_X264_CRF = {
-    "balanced": "28",
+    "balanced": "27",
     "compact": "29",
     "tiny": "31",
 }
 
+# x264 CRF values per preset (lower is higher quality/larger size)
+QUALITY_X264_CRF = {
+    "balanced": "22",
+    "compact": "24",
+    "tiny": "26",
+}
+
 # AAC audio bitrate per preset
 QUALITY_AAC_BITRATE = {
-    "balanced": "96k",
-    "compact": "80k",
-    "tiny": "64k",
+    "balanced": "128k",
+    "compact": "96k",
+    "tiny": "80k",
 }
 
 

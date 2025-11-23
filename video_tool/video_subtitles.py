@@ -2,21 +2,30 @@ from __future__ import annotations
 
 import os
 from typing import Optional, Iterable, Tuple, Dict, Any
+import threading
 import tempfile
 import subprocess
 import shutil
+import uuid
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+from utils.xprint import xprint
+from utils.common_utils import format_srt_timestamp
 
-bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffmpeg=True)
+env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffmpeg=True)
+ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe")
+ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg")
+
 try:
     from faster_whisper import WhisperModel  # type: ignore
 except Exception:
     raise RuntimeError("未找到 faster-whisper。请先安装：pip install faster-whisper，并确保 FFmpeg 可用。")
 
-
 class VideoSubtitles:
     """使用 faster-whisper 为视频生成 SRT 字幕文件。"""
+
+    _MODEL_CACHE: Dict[str, Any] = {}
+    _CACHE_LOCK: threading.Lock = threading.Lock()
 
     def __init__(self, model_size: Optional[str] = None, device: str = "auto", model_path: Optional[str] = None) -> None:
         """初始化字幕生成器。
@@ -49,29 +58,18 @@ class VideoSubtitles:
             self.model_size = self._auto_select_model_size()
 
         self.model_path = model_path
-        # 如果不指定 model_path，则报错
         if not self.model_path:
-            raise ValueError("未指定 model_path。请通过 --model-path 或设置环境变量 WHISPER_MODEL_DIR 提供模型目录。")
+            raise ValueError("未指定模型目录。请通过 --model-path 或设置环境变量 WHISPER_MODEL_DIR 提供模型目录。")
+
+        # 自动选择计算类型
         compute_type = "float16" if self.device == "cuda" else "int8"
 
-        # 根据模型类型获取模型子目录
         repo_id = self._map_model_to_repo(self.model_size)
-        local_model = os.path.join(self.model_path, repo_id)
-       
-        self.model = self._WhisperModel(local_model, device=self.device, compute_type=compute_type)
-           
-
-    @staticmethod
-    def _format_timestamp(seconds: float) -> str:
-        """将秒值格式化为 SRT 时间戳。"""
-        milliseconds = int(round(seconds * 1000.0))
-        hours = milliseconds // 3_600_000
-        milliseconds -= hours * 3_600_000
-        minutes = milliseconds // 60_000
-        milliseconds -= minutes * 60_000
-        secs = milliseconds // 1000
-        milliseconds -= secs * 1000
-        return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+        xprint(f"映射模型大小 {self.model_size} 到仓库 ID {repo_id}")
+        model_dir = self._pick_model_dir(self.model_path, repo_id)
+        xprint(f"使用模型目录: {model_dir}")
+        self.model_path = model_dir
+        self.model = self._get_or_create_model(model_dir, self.device, compute_type)
 
     def transcribe(self, video_path: str, beam_size: int = 5, translate: bool = False) -> Tuple[Iterable[Any], Dict[str, Any]]:
         """执行语音识别并返回分段与信息。"""
@@ -82,11 +80,11 @@ class VideoSubtitles:
             else:
                 segments, info = self.model.transcribe(video_path, beam_size=beam_size, vad_filter=True)
         except Exception:
-            tmpdir = tempfile.mkdtemp(prefix="whisper_audio_")
+            base_dir = os.path.dirname(video_path)
+            tmpdir = os.path.join(base_dir, "temp_subtitles", uuid.uuid4().hex[:8])
+            os.makedirs(tmpdir, exist_ok=True)
             tmpwav = os.path.join(tmpdir, "audio.wav")
-            ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
-            abspath = os.path.abspath(video_path)
-            in_arg = f"file:{abspath.replace('\\', '/')}"
+            in_arg = f"file:{video_path.replace('\\', '/')}"
             try:
                 res = subprocess.run([
                     ffmpeg_bin,
@@ -165,8 +163,8 @@ class VideoSubtitles:
                 else:
                     chunks = [(s, e, raw_text)]
                 for cs, ce, ctext in chunks:
-                    start = self._format_timestamp(cs)
-                    end = self._format_timestamp(ce)
+                    start = format_srt_timestamp(cs)
+                    end = format_srt_timestamp(ce)
                     f.write(f"{idx}\n")
                     f.write(f"{start} --> {end}\n")
                     f.write(f"{ctext}\n\n")
@@ -230,6 +228,7 @@ class VideoSubtitles:
         return result
 
     def _gpu_info(self) -> Tuple[bool, float]:
+        ''' 获取 GPU 信息 '''
         try:
             import torch  # type: ignore
             if torch.cuda.is_available():
@@ -239,6 +238,35 @@ class VideoSubtitles:
         except Exception:
             pass
         return False, 0.0
+
+    def _get_or_create_model(self, model_dir: str, device: str, compute_type: str) -> Any:
+        ''' 获取或创建 Whisper 模型实例 '''
+        key = f"{os.path.abspath(model_dir)}|{device}|{compute_type}"
+        m = self._MODEL_CACHE.get(key)
+        if m is not None:
+            return m
+        with self._CACHE_LOCK:
+            m2 = self._MODEL_CACHE.get(key)
+            if m2 is not None:
+                return m2
+            inst = self._WhisperModel(model_dir, device=device, compute_type=compute_type)
+            self._MODEL_CACHE[key] = inst
+            return inst
+
+    def _pick_model_dir(self, base_dir: str, repo_id: str) -> str:
+        ''' 检查模型目录是否有模型 '''
+        head, tail = repo_id.split("/")
+        cand = os.path.join(base_dir, head, tail)
+        xprint(f"检查模型目录: {cand} (直接)")
+        try:
+            if os.path.isdir(cand):
+                has_bin = os.path.isfile(os.path.join(cand, "model.bin"))
+                has_cfg = os.path.isfile(os.path.join(cand, "config.json"))
+                if has_bin or has_cfg:
+                    return cand
+        except Exception:
+            pass
+        raise FileNotFoundError(f"未找到模型目录: {base_dir}（期望包含 {head}/{tail} 或直接为模型目录）")
 
     def _auto_select_model_size(self) -> str:
         # 根据机器硬件自动选择模型大小
