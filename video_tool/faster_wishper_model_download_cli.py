@@ -53,6 +53,7 @@ def download_faster_whisper_models(model_size: Optional[str] = None, proxy: Opti
         repo_id = _map_model_to_repo(s)
         head, tail = repo_id.split("/")
         target_dir = os.path.join(base_dir, head, tail) if base_dir else _default_local_dir(repo_id)
+        print(f"下载模型 {repo_id} 到 {target_dir}")
         os.makedirs(target_dir, exist_ok=True)
         snapshot_download(
             repo_id=repo_id,
