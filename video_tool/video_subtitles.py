@@ -18,7 +18,7 @@ except Exception:
 class VideoSubtitles:
     """使用 faster-whisper 为视频生成 SRT 字幕文件。"""
 
-    def __init__(self, model_size: str = "medium", device: str = "auto", model_path: Optional[str] = None, proxy: Optional[str] = "127.0.0.1:7897") -> None:
+    def __init__(self, model_size: Optional[str] = None, device: str = "auto", model_path: Optional[str] = None) -> None:
         """初始化字幕生成器。
 
         参数
@@ -29,72 +29,37 @@ class VideoSubtitles:
             运行设备："auto"、"cuda"、"cpu"。
         model_path: Optional[str]
             本地模型目录（优先）。
-        proxy: Optional[str]
-            下载代理，默认 "127.0.0.1:7897"。
+        当未指定 model_size 或指定为 "auto" 时，将根据硬件环境自动选择合适的模型大小。
         """
-
         self._WhisperModel = WhisperModel  # type: ignore
-        self.model_size = model_size
+        self.model_size = model_size or "auto"
         self.device = device
-        self.model_path = model_path
-        self.proxy = proxy
+        # 自动选择cpu或cuda
+        if self.device == "auto":
+            try:
+                import torch  # type: ignore
+                if torch.cuda.is_available():
+                    self.device = "cuda"
+                else:
+                    self.device = "cpu"
+            except Exception:
+                self.device = "cpu"
 
+        if self.model_size == "auto":
+            self.model_size = self._auto_select_model_size()
+
+        self.model_path = model_path
+        # 如果不指定 model_path，则报错
+        if not self.model_path:
+            raise ValueError("未指定 model_path。请通过 --model-path 或设置环境变量 WHISPER_MODEL_DIR 提供模型目录。")
         compute_type = "float16" if self.device == "cuda" else "int8"
 
+        # 根据模型类型获取模型子目录
         repo_id = self._map_model_to_repo(self.model_size)
-        default_dir = self._default_local_dir(repo_id)
-        local_dir = self._resolve_local_model_dir(repo_id)
-
-        if not local_dir:
-            try:
-                local_dir = self._download_model(repo_id, self.proxy)
-            except Exception:
-                local_dir = None
-
-        if isinstance(local_dir, str) and os.path.isdir(local_dir):
-            try:
-                self.model = self._WhisperModel(local_dir, device=self.device, compute_type=compute_type)
-                self.model_path = local_dir
-                return
-            except Exception:
-                pass
-
-        try:
-            self.model = self._WhisperModel(self.model_size, device=self.device, compute_type=compute_type)
-            return
-        except Exception:
-            candidates: list[str] = []
-            env_dir = os.environ.get("WHISPER_MODEL_DIR", "")
-            if env_dir:
-                candidates.append(os.path.join(env_dir, self.model_size))
-                candidates.append(env_dir)
-            try:
-                repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-                candidates.append(os.path.join(repo_root, "vendor", "whisper", self.model_size))
-            except Exception:
-                pass
-            for p in candidates:
-                try:
-                    if p and os.path.isdir(p):
-                        self.model = self._WhisperModel(p, device=self.device, compute_type=compute_type)
-                        return
-                except Exception:
-                    continue
-            try:
-                self.model = self._WhisperModel(self.model_size, device="cpu", compute_type="int8")
-            except Exception as e:
-                raise RuntimeError(
-                    "无法加载 Whisper 模型。无网络环境下请准备离线模型目录：\n"
-                    "- 通过设置环境变量 WHISPER_MODEL_DIR 指向包含模型文件的目录；\n"
-                    "- 或将模型放置到 vendor/whisper/<model_size> 目录；\n"
-                    "- 或暂时联网以下载并缓存模型。\n"
-                    f"原始错误: {e}"
-                )
-        try:
-            if isinstance(default_dir, str) and os.path.isdir(default_dir):
-                self.model_path = default_dir
-        except Exception:
-            pass
+        local_model = os.path.join(self.model_path, repo_id)
+       
+        self.model = self._WhisperModel(local_model, device=self.device, compute_type=compute_type)
+           
 
     @staticmethod
     def _format_timestamp(seconds: float) -> str:
@@ -183,7 +148,7 @@ class VideoSubtitles:
         meta = {"language": getattr(info, "language", None), "language_probability": float(getattr(info, "language_probability", 0.0))}
         return segments, meta
 
-    def save_srt(self, video_path: str, output_srt_path: Optional[str] = None, translate: bool = False) -> str:
+    def save_srt(self, video_path: str, output_srt_path: Optional[str] = None, translate: bool = False, max_chars_per_line: Optional[int] = 14, max_lines_per_caption: int = 2) -> str:
         """生成并保存 SRT 文件，返回输出路径。"""
         vp = os.path.abspath(video_path)
         out_path = output_srt_path or os.path.join(os.path.dirname(vp), f"{os.path.splitext(os.path.basename(vp))[0]}.srt")
@@ -191,14 +156,103 @@ class VideoSubtitles:
         with open(out_path, "w", encoding="utf-8") as f:
             idx = 1
             for seg in segments:
-                start = self._format_timestamp(float(getattr(seg, "start", 0.0)))
-                end = self._format_timestamp(float(getattr(seg, "end", 0.0)))
-                text = str(getattr(seg, "text", "")).strip()
-                f.write(f"{idx}\n")
-                f.write(f"{start} --> {end}\n")
-                f.write(f"{text}\n\n")
-                idx += 1
+                s = float(getattr(seg, "start", 0.0))
+                e = float(getattr(seg, "end", 0.0))
+                raw_text = str(getattr(seg, "text", "")).strip()
+                chunks: list[tuple[float, float, str]]
+                if isinstance(max_chars_per_line, int) and max_chars_per_line > 0:
+                    chunks = self._split_segment_text(s, e, raw_text, max_chars_per_line, max_lines_per_caption)
+                else:
+                    chunks = [(s, e, raw_text)]
+                for cs, ce, ctext in chunks:
+                    start = self._format_timestamp(cs)
+                    end = self._format_timestamp(ce)
+                    f.write(f"{idx}\n")
+                    f.write(f"{start} --> {end}\n")
+                    f.write(f"{ctext}\n\n")
+                    idx += 1
         return out_path
+
+    def _wrap_text(self, text: str, max_chars: int) -> list[str]:
+        """按最大字数将文本换行，优先在空白或常见标点处分割。"""
+        t = (text or "").strip()
+        if max_chars <= 0:
+            return [t]
+        lines: list[str] = []
+        buf: list[str] = []
+        count = 0
+        seps = set(" ，。！？；、,.!?;:—-")
+        for ch in t:
+            buf.append(ch)
+            count += 1
+            if count >= max_chars and ch in seps:
+                lines.append("".join(buf).strip())
+                buf = []
+                count = 0
+        if buf:
+            # 若最后一段超长，仍需按字数硬切
+            rem = "".join(buf)
+            while len(rem) > max_chars:
+                lines.append(rem[:max_chars])
+                rem = rem[max_chars:]
+            if rem:
+                lines.append(rem)
+        return [ln for ln in lines if ln]
+
+    def _split_segment_text(self, start: float, end: float, text: str, max_chars_per_line: int, max_lines_per_caption: int) -> list[tuple[float, float, str]]:
+        """将一个识别片段按行数与每行字数拆分为多个字幕块。"""
+        lines = self._wrap_text(text, max_chars_per_line)
+        if not lines:
+            return [(start, end, text)]
+        groups: list[list[str]] = []
+        cur: list[str] = []
+        for ln in lines:
+            cur.append(ln)
+            if len(cur) >= max_lines_per_caption:
+                groups.append(cur)
+                cur = []
+        if cur:
+            groups.append(cur)
+        total_chars = sum(len("".join(g)) for g in groups) or 1
+        dur = max(0.0, float(end) - float(start))
+        result: list[tuple[float, float, str]] = []
+        cur_s = float(start)
+        for g in groups:
+            gtext = "\n".join(g)
+            frac = float(len("".join(g))) / float(total_chars)
+            gd = dur * frac if dur > 0 else 0.0
+            ce = cur_s + gd if gd > 0 else float(end)
+            result.append((cur_s, ce, gtext))
+            cur_s = ce
+        if result and result[-1][1] < end:
+            last_s, _, last_t = result[-1]
+            result[-1] = (last_s, end, last_t)
+        return result
+
+    def _gpu_info(self) -> Tuple[bool, float]:
+        try:
+            import torch  # type: ignore
+            if torch.cuda.is_available():
+                props = torch.cuda.get_device_properties(0)
+                vram_gb = float(getattr(props, "total_memory", 0)) / (1024 ** 3)
+                return True, vram_gb
+        except Exception:
+            pass
+        return False, 0.0
+
+    def _auto_select_model_size(self) -> str:
+        # 根据机器硬件自动选择模型大小
+        gpu, vram = self._gpu_info()
+        if gpu:
+            if vram >= 8.0:
+                prefer = "large-v3"
+            elif vram >= 4.0:
+                prefer = "medium"
+            else:
+                prefer = "small"
+        else:
+            prefer = "medium"
+        return prefer
 
     def _map_model_to_repo(self, size: str) -> str:
         """将模型大小映射为 Hugging Face 仓库标识。"""
@@ -211,51 +265,3 @@ class VideoSubtitles:
             "tiny": "Systran/faster-whisper-tiny",
         }
         return mapping.get(normalized, f"Systran/faster-whisper-{normalized}")
-
-    def _default_local_dir(self, repo_id: str) -> str:
-        """返回默认的本地模型目录（与模块同级的 models 子目录）。"""
-        tail = repo_id.split("/")[-1]
-        return os.path.abspath(os.path.join(os.path.dirname(__file__), "models", tail))
-
-    def _resolve_local_model_dir(self, repo_id: str) -> Optional[str]:
-        """解析并返回可用的本地模型目录路径。"""
-        if isinstance(self.model_path, str) and os.path.isdir(self.model_path):
-            return self.model_path
-        env_dir = os.environ.get("WHISPER_MODEL_DIR", "").strip()
-        if env_dir:
-            candidate = os.path.join(env_dir, self.model_size)
-            if os.path.isdir(candidate):
-                return candidate
-            if os.path.isdir(env_dir):
-                return env_dir
-        default_dir = self._default_local_dir(repo_id)
-        if os.path.isdir(default_dir):
-            return default_dir
-        try:
-            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-            vendor_dir = os.path.join(repo_root, "vendor", "whisper", self.model_size)
-            if os.path.isdir(vendor_dir):
-                return vendor_dir
-        except Exception:
-            pass
-        return None
-
-    def _download_model(self, repo_id: str, proxy: Optional[str]) -> str:
-        """下载模型到默认目录并返回绝对路径。"""
-        try:
-            from huggingface_hub import snapshot_download  # type: ignore
-        except Exception:
-            raise RuntimeError("未找到 huggingface_hub。请先安装：pip install huggingface_hub")
-        target_dir = self._default_local_dir(repo_id)
-        os.makedirs(target_dir, exist_ok=True)
-        if proxy:
-            url = proxy if proxy.startswith("http") else f"http://{proxy}"
-            os.environ.setdefault("HTTP_PROXY", url)
-            os.environ.setdefault("HTTPS_PROXY", url)
-        snapshot_download(
-            repo_id=repo_id,
-            local_dir=target_dir,
-            local_dir_use_symlinks=False,
-            resume_download=True,
-        )
-        return target_dir
