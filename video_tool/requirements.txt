@@ -27,3 +27,4 @@ pandas==2.3.3
 # 字幕生成
 faster_whisper==1.2.1
 huggingface_hub==1.1.5
+pydub==0.25.1
