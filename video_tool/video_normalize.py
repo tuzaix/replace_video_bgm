@@ -121,9 +121,11 @@ class VideoNormalize:
         xprint({"phase": "input_stream_info", "info": sinfo})
         xprint({"mode": m, "ffmpeg": self.ffmpeg, "hardware": self.hw})
         xprint(f"视频分辨率: {w}x{h}")
+
         res_name = f"{w}x{h}" if (w > 0 and h > 0) else "unknown"
         out_dir = vp.parent / "normalized" / res_name
         out_file = out_dir / f"{vp.stem}.mp4"
+
         if out_file.exists():
             return str(out_file)
         out_dir.mkdir(parents=True, exist_ok=True)
