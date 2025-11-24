@@ -185,6 +185,7 @@ class VideoSubtitles:
             buf.append(ch)
             count += 1
             if count >= max_chars and ch in seps:
+                xprint(len(buf), f"--{count}->", "".join(buf).strip())
                 lines.append("".join(buf).strip())
                 buf = []
                 count = 0
@@ -273,7 +274,7 @@ class VideoSubtitles:
         # 根据机器硬件自动选择模型大小
         gpu, vram = self._gpu_info()
         if gpu:
-            if vram >= 8.0:
+            if vram >= 7.9:
                 prefer = "large-v3"
             elif vram >= 4.0:
                 prefer = "medium"
