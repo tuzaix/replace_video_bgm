@@ -5,9 +5,10 @@ import uuid
 import shutil
 import subprocess
 from typing import Optional, List, Dict, Any, Tuple
+import threading
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
-
+# 初始化 FFmpeg 环境
 env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffmpeg=True)
 ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe")
 ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg")
@@ -23,6 +24,7 @@ class BroadcastVideoSlices:
     """直播长视频智能切片，支持语音语义与表演能量两种模式。"""
 
     _MODEL_CACHE: Dict[str, Any] = {}
+    _CACHE_LOCK: threading.Lock = threading.Lock()
 
     def __init__(
         self,
@@ -111,14 +113,19 @@ class BroadcastVideoSlices:
         m = self._MODEL_CACHE.get(key)
         if m is not None:
             return m
-        inst = self._WhisperModel(model_dir, device=device, compute_type=compute_type)
-        self._MODEL_CACHE[key] = inst
-        return inst
+        with self._CACHE_LOCK:
+            m2 = self._MODEL_CACHE.get(key)
+            if m2 is not None:
+                return m2
+            inst = self._WhisperModel(model_dir, device=device, compute_type=compute_type)
+            self._MODEL_CACHE[key] = inst
+            return inst
 
-    def _extract_audio(self, video_path: str) -> Tuple[str, str]:
+    def _extract_audio(self, video_path: str, temp_root: Optional[str] = None) -> Tuple[str, str]:
         """从视频提取临时音频 MP3，返回 (音频路径, 临时目录)。"""
         base_dir = os.path.dirname(os.path.abspath(video_path))
-        tmpdir = os.path.join(base_dir, "temp_slices", uuid.uuid4().hex[:8])
+        root = temp_root or base_dir
+        tmpdir = os.path.join(root, "temp_slices", uuid.uuid4().hex[:8])
         os.makedirs(tmpdir, exist_ok=True)
         audio_path = os.path.join(tmpdir, "audio.mp3")
         in_arg = f"file:{os.path.abspath(video_path).replace('\\', '/')}"
@@ -175,9 +182,10 @@ class BroadcastVideoSlices:
         silence_thresh: int = -40,
         min_segment_sec: int = 10,
         max_keep_sec: int = 60,
+        temp_root: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """基于音频能量的切片策略，提取完整段落或高潮 highlight。"""
-        audio_path, tmpdir = self._extract_audio(video_path)
+        audio_path, tmpdir = self._extract_audio(video_path, temp_root=temp_root)
         try:
             
             audio = AudioSegment.from_file(audio_path)
@@ -211,10 +219,12 @@ class BroadcastVideoSlices:
             except Exception:
                 pass
 
-    def cut_video(self, video_path: str, output_dir: str, mode: str = "speech", **kwargs: Any) -> List[str]:
-        """执行切片并返回输出文件路径列表。"""
-        os.makedirs(output_dir, exist_ok=True)
+    def cut_video(self, video_path: str, output_dir: Optional[str] = None, mode: str = "speech", **kwargs: Any) -> List[str]:
+        """执行切片并返回输出文件路径列表。默认输出目录为视频同名目录。"""
         name = os.path.splitext(os.path.basename(video_path))[0]
+        if not output_dir:
+            output_dir = os.path.join(os.path.dirname(os.path.abspath(video_path)), name)
+        os.makedirs(output_dir, exist_ok=True)
         if mode == "speech":
             clips = self.analyze_speech(
                 video_path,
@@ -230,6 +240,7 @@ class BroadcastVideoSlices:
                 silence_thresh=int(kwargs.get("silence_thresh", -40)),
                 min_segment_sec=int(kwargs.get("min_segment_sec", 10)),
                 max_keep_sec=int(kwargs.get("max_keep_sec", 60)),
+                temp_root=output_dir,
             )
         else:
             raise ValueError("mode 需为 'speech' 或 'performance'")
@@ -260,3 +271,27 @@ class BroadcastVideoSlices:
             subprocess.run(cmd)
             outs.append(out_path)
         return outs
+
+def slice_broadcast_video(
+    video_path: str,
+    out_dir: Optional[str] = None,
+    mode: str = "speech",
+    model_size: Optional[str] = None,
+    device: str = "auto",
+    model_path: Optional[str] = None,
+    **kwargs: Any,
+) -> List[str]:
+    """统一接口：执行直播长视频智能切片。
+
+    参数
+    ----
+    video_path: 输入视频文件路径
+    out_dir: 输出目录，默认在视频同目录创建同名子目录
+    mode: 切片模式 'speech' 或 'performance'
+    model_size: Whisper 模型大小（默认自动）
+    device: 运行设备（auto/cuda/cpu）
+    model_path: 模型根目录，需包含 Systran/faster-whisper-<size>
+    其余参数与模式相关
+    """
+    slicer = BroadcastVideoSlices(model_size=model_size, device=device, model_path=model_path)
+    return slicer.cut_video(video_path=video_path, output_dir=out_dir, mode=mode, **kwargs)

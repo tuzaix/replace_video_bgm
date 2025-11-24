@@ -38,7 +38,8 @@ def main() -> None:
     print("-" * 30)
 
     try:
-        saved = save_scenes_results(args.video_path, output_dir=args.output_dir, device=args.device)
+        detect_scenes = VideoDetectScenes(device=args.device)
+        saved = detect_scenes.save(args.video_path, output_dir=args.output_dir)
         clips_meta = list(saved.get("clips_meta", []))
         print("AI检测完成，前3个镜头：")
         preview_count = min(3, len(clips_meta))

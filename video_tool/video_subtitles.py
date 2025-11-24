@@ -23,7 +23,7 @@ except Exception:
 
 class VideoSubtitles:
     """使用 faster-whisper 为视频生成 SRT 字幕文件。"""
-
+    # 共享模型 缓存
     _MODEL_CACHE: Dict[str, Any] = {}
     _CACHE_LOCK: threading.Lock = threading.Lock()
 
@@ -149,7 +149,8 @@ class VideoSubtitles:
     def save_srt(self, video_path: str, output_srt_path: Optional[str] = None, translate: bool = False, max_chars_per_line: Optional[int] = 14, max_lines_per_caption: int = 2) -> str:
         """生成并保存 SRT 文件，返回输出路径。"""
         vp = os.path.abspath(video_path)
-        out_path = output_srt_path or os.path.join(os.path.dirname(vp), f"{os.path.splitext(os.path.basename(vp))[0]}.srt")
+        out_dir = output_srt_path or os.path.dirname(vp)
+        out_path = os.path.join(out_dir, f"{os.path.splitext(os.path.basename(vp))[0]}.srt")
         segments, _ = self.transcribe(vp, beam_size=5, translate=translate)
         with open(out_path, "w", encoding="utf-8") as f:
             idx = 1

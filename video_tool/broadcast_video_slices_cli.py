@@ -9,7 +9,7 @@ def main() -> None:
     """CLI 入口：直播长视频智能切片。"""
     p = argparse.ArgumentParser(description="直播长视频智能切片：语义/表演两种模式")
     p.add_argument("video", help="输入视频文件路径")
-    p.add_argument("out_dir", help="输出目录")
+    p.add_argument("out_dir", nargs="?", default=None, help="输出目录，默认视频同名目录")
     p.add_argument("--mode", choices=["speech", "performance"], default="speech", help="切片模式")
     p.add_argument("--model-size", default=None, help="模型大小，如 large-v3/medium/small；默认自动")
     p.add_argument("--device", default="auto", help="运行设备：auto/cuda/cpu")
@@ -31,13 +31,11 @@ def main() -> None:
     if not model_path:
         raise SystemExit("未指定模型目录：请使用 --model-path 或设置环境变量 WHISPER_MODEL_DIR")
 
-    slicer = BroadcastVideoSlices(
+    outs = BroadcastVideoSlices(
         model_size=args.model_size,
         device=args.device,
         model_path=model_path,
-    )
-
-    outs = slicer.cut_video(
+    ).cut_video(
         video_path=args.video,
         output_dir=args.out_dir,
         mode=args.mode,

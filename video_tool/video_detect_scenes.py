@@ -23,11 +23,10 @@ import torch  # type: ignore
 class VideoDetectScenes:
     """使用 TransNet V2 进行镜头分割并生成切片与元数据。"""
 
-    def __init__(self, video_path: str, output_dir: str = None, device: str = "auto") -> None:
+    def __init__(self, device: str = "auto") -> None:
         self.ffmpeg_bin = ffmpeg_bin
         self.device = device
         try:
-            
             if torch.cuda.is_available() and self.device == "auto":
                 self.device = "cuda"
         except Exception:
@@ -37,10 +36,6 @@ class VideoDetectScenes:
         except Exception:
             self.model = TransNetV2()  # type: ignore[call-arg]
         
-        self.video_path = video_path
-        self.output_dir = output_dir or os.path.join(os.path.dirname(video_path), "scenes")
-        os.makedirs(self.output_dir, exist_ok=True)
-
     def _get_fps(self, video_path: str) -> float:
         try:
             sinfo = ffprobe_stream_info(pathlib.Path(video_path))
@@ -53,12 +48,12 @@ class VideoDetectScenes:
             pass
         return 30.0
 
-    def detect(self) -> Dict[str, Any]:
-        fps = self._get_fps(self.video_path)
+    def detect(self, video_path: str) -> Dict[str, Any]:
+        fps = self._get_fps(video_path)
         scenes_frames: List[Tuple[int, int]] = []
         scenes_seconds: List[Tuple[float, float]] = []
         try:
-            results = self.model.analyze_video(self.video_path)  # type: ignore[attr-defined]
+            results = self.model.analyze_video(video_path)  # type: ignore[attr-defined]
             fps = float(results.get("fps", fps))
             scenes_data = results.get("scenes", [])
             for item in scenes_data:
@@ -88,7 +83,7 @@ class VideoDetectScenes:
                     continue
         except Exception:
             try:
-                video_frames, single_frame_pred, all_frame_pred = self.model.predict_video(self.video_path)  # type: ignore[attr-defined]
+                video_frames, single_frame_pred, all_frame_pred = self.model.predict_video(video_path)  # type: ignore[attr-defined]
                 try:
                     scenes_data = self.model.predictions_to_scenes(single_frame_pred)  # type: ignore[attr-defined]
                 except Exception:
@@ -116,11 +111,12 @@ class VideoDetectScenes:
             "scenes_seconds": scenes_seconds,
         }
 
-    def save(self) -> Dict[str, Any]:
-        vp = pathlib.Path(self.video_path)
-        out_dir = pathlib.Path(self.output_dir)
+    def save(self, video_path: str, output_dir: str = None) -> Dict[str, Any]:
+        vp = pathlib.Path(video_path)
+        out_dir = pathlib.Path(output_dir or os.path.dirname(video_path)) / "scenes"
+        out_dir.mkdir(parents=True, exist_ok=True)
     
-        data = self.detect()
+        data = self.detect(video_path)
         json_path = out_dir / (vp.stem + "_scenes.json")
         txt_path = out_dir / (vp.stem + "_scenes.txt")
 
@@ -215,9 +211,9 @@ class VideoDetectScenes:
 
 def detect_scenes_transnet(video_path: str) -> Dict[str, Any]:
     """函数式封装：返回镜头检测结果。"""
-    return VideoDetectScenes(video_path).detect()
+    return VideoDetectScenes().detect(video_path)
 
 
 def save_scenes_results(video_path: str, output_dir: Optional[str] = None, device: str = "auto") -> Dict[str, Any]:
     """函数式封装：保存镜头检测结果并输出切片。"""
-    return VideoDetectScenes(video_path, output_dir=output_dir, device=device).save()
+    return VideoDetectScenes().save(video_path, output_dir=output_dir)
