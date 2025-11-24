@@ -173,30 +173,53 @@ class VideoSubtitles:
         return out_path
 
     def _wrap_text(self, text: str, max_chars: int) -> list[str]:
-        """按最大字数将文本换行，优先在空白或常见标点处分割。"""
+        """按最大字数将文本换行，严格控制每行字符数，优先在分隔符处换行。"""
         t = (text or "").strip()
         if max_chars <= 0:
             return [t]
         lines: list[str] = []
         buf: list[str] = []
-        count = 0
+        last_sep_idx: int = -1
         seps = set(" ，。！？；、,.!?;:—-")
+
+        def flush_by_limit() -> None:
+            nonlocal buf, last_sep_idx, lines
+            if len(buf) <= max_chars:
+                return
+            if 0 <= last_sep_idx < len(buf) and last_sep_idx + 1 <= max_chars:
+                line = "".join(buf[: last_sep_idx + 1]).strip()
+                lines.append(line)
+                buf = buf[last_sep_idx + 1 :]
+            else:
+                line = "".join(buf[: max_chars]).strip()
+                lines.append(line)
+                buf = buf[max_chars :]
+            last_sep_idx = -1
+            for i, c in enumerate(buf):
+                if c in seps:
+                    last_sep_idx = i
+
         for ch in t:
             buf.append(ch)
-            count += 1
-            if count >= max_chars and ch in seps:
-                xprint(len(buf), f"--{count}->", "".join(buf).strip())
+            if ch in seps:
+                last_sep_idx = len(buf) - 1
+            flush_by_limit()
+
+        while buf:
+            if len(buf) <= max_chars:
                 lines.append("".join(buf).strip())
-                buf = []
-                count = 0
-        if buf:
-            # 若最后一段超长，仍需按字数硬切
-            rem = "".join(buf)
-            while len(rem) > max_chars:
-                lines.append(rem[:max_chars])
-                rem = rem[max_chars:]
-            if rem:
-                lines.append(rem)
+                break
+            cut_idx = -1
+            for i in range(min(max_chars, len(buf)) - 1, -1, -1):
+                if buf[i] in seps:
+                    cut_idx = i
+                    break
+            if cut_idx >= 0:
+                lines.append("".join(buf[: cut_idx + 1]).strip())
+                buf = buf[cut_idx + 1 :]
+            else:
+                lines.append("".join(buf[: max_chars]).strip())
+                buf = buf[max_chars :]
         return [ln for ln in lines if ln]
 
     def _split_segment_text(self, start: float, end: float, text: str, max_chars_per_line: int, max_lines_per_caption: int) -> list[tuple[float, float, str]]:
