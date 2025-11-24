@@ -8,7 +8,7 @@ from video_tool.broadcast_video_slices import BroadcastVideoSlices
 def main() -> None:
     """CLI 入口：直播长视频智能切片。"""
     p = argparse.ArgumentParser(description="直播长视频智能切片：语义/表演两种模式")
-    p.add_argument("video", help="输入视频文件路径")
+    p.add_argument("video_dir", help="输入视频目录路径")
     p.add_argument("out_dir", nargs="?", default=None, help="输出目录，默认视频同名目录")
     p.add_argument("--mode", choices=["speech", "performance"], default="speech", help="切片模式")
     p.add_argument("--model-size", default=None, help="模型大小，如 large-v3/medium/small；默认自动")
@@ -31,26 +31,35 @@ def main() -> None:
     if not model_path:
         raise SystemExit("未指定模型目录：请使用 --model-path 或设置环境变量 WHISPER_MODEL_DIR")
 
-    outs = BroadcastVideoSlices(
-        model_size=args.model_size,
-        device=args.device,
-        model_path=model_path,
-    ).cut_video(
-        video_path=args.video,
-        output_dir=args.out_dir,
-        mode=args.mode,
-        min_sec=args.min_sec,
-        max_sec=args.max_sec,
-        language=args.language,
-        target_duration=args.target_duration,
-        min_silence_len=args.min_silence_len,
-        silence_thresh=args.silence_thresh,
-        min_segment_sec=args.min_segment_sec,
-        max_keep_sec=args.max_keep_sec,
-    )
-    print("导出完成：")
-    for pth in outs:
-        print(pth)
+
+    video_dir = args.video_dir
+    video_files = [os.path.join(video_dir, f) for f in os.listdir(video_dir) if f.endswith((".mp4", ".avi", ".mov"))]
+
+    for video_file in video_files:
+        base_name = os.path.basename(video_file).split(".")[0]
+        out_dir = os.path.join(video_dir, base_name)
+        os.makedirs(out_dir, exist_ok=True)
+        
+        outs = BroadcastVideoSlices(
+            model_size=args.model_size,
+            device=args.device,
+            model_path=model_path,
+        ).cut_video(
+            video_path=video_file,
+            output_dir=out_dir,
+            mode=args.mode,
+            min_sec=args.min_sec,
+            max_sec=args.max_sec,      
+            language=args.language,
+            target_duration=args.target_duration,
+            min_silence_len=args.min_silence_len,
+            silence_thresh=args.silence_thresh,
+            min_segment_sec=args.min_segment_sec,
+            max_keep_sec=args.max_keep_sec,
+        )
+        print("导出完成：")
+        for pth in outs:
+            print(pth)
 
 
 if __name__ == "__main__":
