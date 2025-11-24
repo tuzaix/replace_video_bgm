@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import subprocess
 from typing import List, Tuple, Dict, Literal
 from moviepy.editor import ImageClip
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
@@ -14,10 +15,7 @@ ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg")
 
 import traceback
 
-def list_media(
-    dir_path: str,
-    recursive: bool = False,
-) -> List[pathlib.Path]:
+def list_media(dir_path: str, recursive: bool = False) -> List[pathlib.Path]:
     """列出目录下的视频/图片素材文件列表。
 
     参数
@@ -172,6 +170,7 @@ def ffprobe_stream_info(path: pathlib.Path) -> Dict[str, Any]:
                 "r_frame_rate": str(st.get("r_frame_rate" or "") or ""),
             }
     except Exception:
+        # traceback.print_exc()
         pass
     return {"width": 0, "height": 0, "codec": "", "pix_fmt": "", "r_frame_rate": ""}
 
@@ -205,7 +204,6 @@ def get_resolution_topn(
     列表，元素为 ((width, height), count)，按 count 从大到小排序。
     """
     paths = list_media(dir_path, recursive=recursive)
-    print(f"total {len(paths)} files")
     if not paths:
         return {}
     groups = group_by_resolution(paths)
@@ -219,3 +217,62 @@ def get_resolution_topn(
         } for k, v in items[: max(1, int(top_n))]
     ]
     return topn_data[0] if top_n == 1 else topn_data
+
+
+def get_resolution_dir_topn(
+    dir_path: str,
+    top_n: int = 1,
+    recursive: bool = False,
+) -> List[Dict[str, Any]]:
+    """计算目录下视频/图片分辨率分布并返回数量最多的 TopN 个目录。
+
+    参数
+    ----
+    dir_path: 素材目录路径
+    top_n: 返回的目录数量（默认 1）
+    recursive: 是否递归子目录
+
+    返回
+    ----
+    列表，元素为 {"resolution": (width, height), "count": 视频/图片数量, "files": 视频/图片文件列表}，按 count 从大到小排序。
+    """
+    
+    # 遍历目录下的 normalized下的分辨率目录，计算每个分辨率目录下的视频/图片数量
+    normalized_dir = pathlib.Path(dir_path) / "normalized"
+    if not normalized_dir.is_dir():
+        return  {
+            "resolution": k, 
+            "count": v, 
+            "files": [],
+        }
+    
+    # 遍历 normalized_dir 下的子目录，每个子目录的名称为分辨率，例如 "1920x1080"
+    res_dirs = [d for d in normalized_dir.iterdir() if d.is_dir()]
+    res_data = {}
+    for d in res_dirs:
+        res = tuple(map(int, d.name.split("x")))
+        paths = list_media(str(d))
+        res_count = len(paths)
+        res_data[res] = {
+            "resolution": res,
+            "count": res_count,
+            "files": paths,
+        }
+    items = sorted(res_data.items(), key=lambda kv: (-kv[1]["count"], -(kv[0][0] * kv[0][1])))
+    topn_data = [
+        {
+            "resolution": k, 
+            "count": v["count"], 
+            "files": v["files"],
+        } for k, v in items[: max(1, int(top_n))]
+    ]
+    topn_data = get_resolution_topn(dir_path, top_n=top_n, recursive=recursive)
+    return topn_data[0] if top_n == 1 else topn_data
+
+
+# 添加一个弹窗，提示用户当前的素材目录下还没对素材进行预处理，请点击【视频预处理】进行处理
+def confirm_resolution_dir(video_dir: str, normalized_dir: str = "normalized-1080p") -> bool:
+    """确认用户是否确认使用该分辨率目录下的素材。"""
+    normalized_dir = pathlib.Path(video_dir) / normalized_dir
+    # 确认目录下是否已经有归一化完成的视频/图片
+    return normalized_dir.is_dir()

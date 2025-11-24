@@ -39,7 +39,7 @@ from moviepy.editor import VideoFileClip
 
 from gui.utils import theme
 from gui.precheck import run_preflight_checks
-from utils.calcu_video_info import get_resolution_topn
+from utils.calcu_video_info import get_resolution_topn, get_resolution_dir_topn, confirm_resolution_dir
 from utils.common_utils import is_audio_file, is_video_file, is_image_file
 from video_tool.beats_checkpoint import beats_checkpoint
 from video_tool.video_beats_mixed import video_beats_mixed
@@ -87,9 +87,15 @@ class VideoBeatsMixedWorker(QtCore.QObject):
         
         self.phase.emit("检测视频/图片素材")
         media_files: List[pathlib.Path] = []
+        # 确认每个视频目录下是否有归一化完成的素材
+        confirm_normalized_dirs = {}
         for d in video_dirs:
             try:
-                media_data = get_resolution_topn(d, top_n=1, media_type="all", recursive=False)
+                confirm_normalized_dirs[d] = confirm_resolution_dir(d) # 检查是否有预处理的内容
+                if not confirm_normalized_dirs[d]:
+                    continue
+                # media_data = get_resolution_topn(d, top_n=1, media_type="all", recursive=False)
+                media_data = get_resolution_dir_topn(d, top_n=1, media_type="all", recursive=False)
                 files = media_data.get("files", []) if isinstance(media_data, dict) else []
                 for p in files:
                     if isinstance(p, pathlib.Path) and p.is_file():
@@ -104,6 +110,14 @@ class VideoBeatsMixedWorker(QtCore.QObject):
                                 media_files.append(p)
                 except Exception:
                     continue
+
+        # 检查是否有目录下没有归一化完成的素材
+        if not any(confirm_normalized_dirs.values()):
+            # 确认归一化目录下是否有视频/图片素材
+            normalized_dirs = [d for d, confirm in confirm_normalized_dirs.items() if not confirm]
+            not_normalized_dirs_str = "\n".join(normalized_dirs)
+            self.error.emit(f"下面视频目录未找到预处理的素材\n\n{not_normalized_dirs_str}\n\n请先点击【视频预处理】进行处理")
+            return
 
         if not audio_files:
             self.error.emit("未在音频输入中找到音频文件")
