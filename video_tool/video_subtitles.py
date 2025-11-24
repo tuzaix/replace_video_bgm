@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from typing import Optional, Iterable, Tuple, Dict, Any
 import threading
-import tempfile
 import subprocess
 import shutil
 import uuid
@@ -181,18 +180,27 @@ class VideoSubtitles:
         buf: list[str] = []
         last_sep_idx: int = -1
         seps = set(" ，。！？；、,.!?;:—-")
+        def _strip_line(s: str) -> str:
+            s = (s or "").strip()
+            while s and s[0] in seps:
+                s = s[1:].strip()
+            while s and s[-1] in seps:
+                s = s[:-1].strip()
+            return s
 
         def flush_by_limit() -> None:
             nonlocal buf, last_sep_idx, lines
             if len(buf) <= max_chars:
                 return
             if 0 <= last_sep_idx < len(buf) and last_sep_idx + 1 <= max_chars:
-                line = "".join(buf[: last_sep_idx + 1]).strip()
-                lines.append(line)
+                line = _strip_line("".join(buf[: last_sep_idx + 1]))
+                if line:
+                    lines.append(line)
                 buf = buf[last_sep_idx + 1 :]
             else:
-                line = "".join(buf[: max_chars]).strip()
-                lines.append(line)
+                line = _strip_line("".join(buf[: max_chars]))
+                if line:
+                    lines.append(line)
                 buf = buf[max_chars :]
             last_sep_idx = -1
             for i, c in enumerate(buf):
@@ -207,7 +215,9 @@ class VideoSubtitles:
 
         while buf:
             if len(buf) <= max_chars:
-                lines.append("".join(buf).strip())
+                line = _strip_line("".join(buf))
+                if line:
+                    lines.append(line)
                 break
             cut_idx = -1
             for i in range(min(max_chars, len(buf)) - 1, -1, -1):
@@ -215,10 +225,14 @@ class VideoSubtitles:
                     cut_idx = i
                     break
             if cut_idx >= 0:
-                lines.append("".join(buf[: cut_idx + 1]).strip())
+                line = _strip_line("".join(buf[: cut_idx + 1]))
+                if line:
+                    lines.append(line)
                 buf = buf[cut_idx + 1 :]
             else:
-                lines.append("".join(buf[: max_chars]).strip())
+                line = _strip_line("".join(buf[: max_chars]))
+                if line:
+                    lines.append(line)
                 buf = buf[max_chars :]
         return [ln for ln in lines if ln]
 
