@@ -30,15 +30,25 @@ def main() -> None:
         default="auto",
         help="设备选择：auto/cpu/cuda（默认 auto）",
     )
+    parser.add_argument(
+        "-t",
+        "--threshold",
+        dest="threshold",
+        type=float,
+        default=0.5,
+        help="镜头分割阈值（默认 0.5）",
+    )
 
     args = parser.parse_args()
 
     print(f"视频文件: {args.video_path}")
     print(f"输出目录: {args.output_dir or '默认（视频同目录的 scenes）'}")
+    print(f"设备选择: {args.device}")
+    print(f"阈值: {args.threshold}")
     print("-" * 30)
 
     try:
-        detect_scenes = VideoDetectScenes(device=args.device)
+        detect_scenes = VideoDetectScenes(device=args.device, threshold=args.threshold)
         saved = detect_scenes.save(args.video_path, output_dir=args.output_dir)
         clips_meta = list(saved.get("clips_meta", []))
         print("AI检测完成，前3个镜头：")

@@ -23,9 +23,10 @@ import torch  # type: ignore
 class VideoDetectScenes:
     """使用 TransNet V2 进行镜头分割并生成切片与元数据。"""
 
-    def __init__(self, device: str = "auto") -> None:
+    def __init__(self, device: str = "auto", threshold: float = 0.5) -> None:
         self.ffmpeg_bin = ffmpeg_bin
         self.device = device
+        self.threshold = threshold
         try:
             if torch.cuda.is_available() and self.device == "auto":
                 self.device = "cuda"
@@ -53,7 +54,7 @@ class VideoDetectScenes:
         scenes_frames: List[Tuple[int, int]] = []
         scenes_seconds: List[Tuple[float, float]] = []
         try:
-            results = self.model.analyze_video(video_path)  # type: ignore[attr-defined]
+            results = self.model.analyze_video(video_path, threshold=self.threshold)  # type: ignore[attr-defined]
             fps = float(results.get("fps", fps))
             scenes_data = results.get("scenes", [])
             for item in scenes_data:
@@ -85,7 +86,7 @@ class VideoDetectScenes:
             try:
                 video_frames, single_frame_pred, all_frame_pred = self.model.predict_video(video_path)  # type: ignore[attr-defined]
                 try:
-                    scenes_data = self.model.predictions_to_scenes(single_frame_pred)  # type: ignore[attr-defined]
+                    scenes_data = self.model.predictions_to_scenes(single_frame_pred, threshold=self.threshold)  # type: ignore[attr-defined]
                 except Exception:
                     scenes_data = []
                 for item in scenes_data:
@@ -110,6 +111,40 @@ class VideoDetectScenes:
             "scenes_frames": scenes_frames,
             "scenes_seconds": scenes_seconds,
         }
+
+    def _detect(self, video_path: str) -> Dict[str, Any]:
+        fps = self._get_fps(video_path)
+        scenes_frames: List[Tuple[int, int]] = []
+        scenes_seconds: List[Tuple[float, float]] = []
+        try:
+            video_frames, single_frame_pred, all_frame_pred = self.model.predict_video(video_path)  # type: ignore[attr-defined]
+            try:
+                scenes_data = self.model.predictions_to_scenes(single_frame_pred, threshold=self.threshold)  # type: ignore[attr-defined]
+            except Exception:
+                scenes_data = []
+            for item in scenes_data:
+                try:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        s = int(item[0])
+                        e = int(item[1])
+                    elif isinstance(item, dict):
+                        s = int(item.get("start", item.get("start_frame", 0)))
+                        e = int(item.get("end", item.get("end_frame", 0)))
+                    else:
+                        continue
+                    scenes_frames.append((s, e))
+                    scenes_seconds.append((float(s) / fps, float(e) / fps))
+                except Exception:
+                    continue
+        except Exception:
+            scenes_frames = []
+            scenes_seconds = []
+        return {
+            "fps": float(fps),
+            "scenes_frames": scenes_frames,
+            "scenes_seconds": scenes_seconds,
+        }
+
 
     def save(self, video_path: str, output_dir: str = None) -> Dict[str, Any]:
         vp = pathlib.Path(video_path)
