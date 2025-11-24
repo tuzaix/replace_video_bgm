@@ -128,6 +128,11 @@ class VideoNormalizeTab(QtWidgets.QWidget):
         try:
             if self._worker:
                 self._worker.stop()
+            if self._thread:
+                try:
+                    self._thread.quit()
+                except Exception:
+                    pass
             self._is_running = False
             self._apply_action_button_style(False)
         except Exception:
@@ -378,7 +383,7 @@ class VideoNormalizeTab(QtWidgets.QWidget):
     def _start_worker(self, dirs: List[str], mode: str, concurrency: int) -> None:
         """启动后台线程并连接信号。"""
         try:
-            self.results_table.setRowCount(0)
+            self._reset_results_table()
             self.progress_bar.setValue(0)
             self._thread = QtCore.QThread(self)
             self._worker = NormalizeWorker()
@@ -395,6 +400,26 @@ class VideoNormalizeTab(QtWidgets.QWidget):
         except Exception:
             self._is_running = False
             self._apply_action_button_style(False)
+
+    def _reset_results_table(self) -> None:
+        """重置结果列表页（清空内容、选择并滚动到顶部）。"""
+        try:
+            self.results_table.blockSignals(True)
+            self.results_table.clearSelection()
+            self.results_table.clearContents()
+            self.results_table.setRowCount(0)
+            try:
+                self.results_table.scrollToTop()
+            except Exception:
+                pass
+            self._apply_results_table_column_widths()
+        except Exception:
+            pass
+        finally:
+            try:
+                self.results_table.blockSignals(False)
+            except Exception:
+                pass
 
     def _on_progress(self, done: int, total: int) -> None:
         """更新进度条。"""
@@ -424,6 +449,8 @@ class VideoNormalizeTab(QtWidgets.QWidget):
                 if self._thread:
                     self._thread.quit()
                     self._thread.wait()
+                    self._thread = None
+                self._worker = None
             except Exception:
                 pass
             QtWidgets.QMessageBox.information(self, "完成", f"成功: {ok}, 失败: {fail}")
@@ -434,5 +461,24 @@ class VideoNormalizeTab(QtWidgets.QWidget):
         """显示错误消息。"""
         try:
             QtWidgets.QMessageBox.warning(self, "错误", msg)
+        except Exception:
+            pass
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        """窗口关闭时确保后台线程已停止并清理资源。"""
+        try:
+            self.request_stop()
+            try:
+                if self._thread:
+                    self._thread.quit()
+                    self._thread.wait()
+            except Exception:
+                pass
+            self._thread = None
+            self._worker = None
+        except Exception:
+            pass
+        try:
+            super().closeEvent(event)
         except Exception:
             pass
