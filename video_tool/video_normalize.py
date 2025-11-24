@@ -123,8 +123,10 @@ class VideoNormalize:
         xprint(f"视频分辨率: {w}x{h}")
         res_name = f"{w}x{h}" if (w > 0 and h > 0) else "unknown"
         out_dir = vp.parent / "normalized" / res_name
-        out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / f"{vp.stem}.mp4"
+        if out_file.exists():
+            return str(out_file)
+        out_dir.mkdir(parents=True, exist_ok=True)
         enc_params = self._build_params(m)
         try:
             # 根据分辨率设置码率上限（防止复杂场景暴涨）

@@ -33,6 +33,7 @@ from gui.tabs.extract_frames_tab import ExtractFramesTab
 from gui.tabs.video_concat_tab import VideoConcatTab
 from gui.tabs.generate_cover_tab import GenerateCoverTab
 from gui.tabs.video_bgm_replace_tab import VideoBgmReplaceTab
+from gui.tabs.video_normalize_tab import VideoNormalizeTab
 from gui.tabs.video_beats_mixed_tab import VideoBeatsMixedTab
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -75,6 +76,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _register_feature_tabs(self, tabs: QtWidgets.QTabWidget) -> None:
         """ 批量注册功能标签页到主窗口的 QTabWidget 中。"""
         tabs_mapping = [
+            {
+                "tab_name": "视频预处理",
+                "tab_widget": VideoNormalizeTab(self),
+            },
             {
                 "tab_name": "卡点混剪",
                 "tab_widget": VideoBeatsMixedTab(self),
