@@ -10,6 +10,8 @@ import threading
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 from utils.xprint import xprint
 from video_tool.slice_config import SliceConfig
+import pathlib
+from utils.calcu_video_info import ffprobe_duration
 import torch  # type: ignore
 import cv2  # type: ignore
 from PIL import Image  # type: ignore
@@ -188,6 +190,12 @@ class BroadcastVideoSlices:
             "-crf", str(int(crf)),
             "-c:a", "aac",
         ]
+
+    def _probe_media_duration(self, path: str) -> float:
+        try:
+            return float(ffprobe_duration(pathlib.Path(path)) or 0.0)
+        except Exception:
+            return 0.0
 
     def _auto_select_model_size(self) -> str:
         """根据硬件环境选择模型大小。"""
@@ -584,6 +592,8 @@ class BroadcastVideoSlices:
                 pass
         os.makedirs(temp_dir, exist_ok=True)
         outs: List[str] = []
+        original_duration = self._probe_media_duration(video_path)
+        total_export_duration = 0.0
         xprint({"phase": "jumpcut_render_start", "clusters": len(clusters)})
         for i, cluster in enumerate(clusters):
             concat_list_path = os.path.join(temp_dir, f"concat_list_{i}.txt")
@@ -621,12 +631,26 @@ class BroadcastVideoSlices:
                 out_path,
             ]
             subprocess.run(cmd_concat)
-            xprint({"phase": "jumpcut_render_done", "index": i + 1, "out": out_path, "chunks": len(chunk_paths)})
+            seg_dur = 0.0
+            try:
+                seg_dur = float(ffprobe_duration(pathlib.Path(out_path)) or 0.0)
+            except Exception:
+                seg_dur = 0.0
+            xprint({"phase": "jumpcut_render_done", "index": i + 1, "out": out_path, "chunks": len(chunk_paths), "duration": round(seg_dur, 3)})
             outs.append(out_path)
+            total_export_duration += seg_dur
         try:
             shutil.rmtree(temp_dir)
         except Exception:
             pass
+        coverage = (total_export_duration / original_duration) if original_duration > 0 else 0.0
+        xprint({
+            "phase": "jumpcut_duration_compare",
+            "original_sec": round(original_duration, 3),
+            "export_total_sec": round(total_export_duration, 3),
+            "diff_sec": round(original_duration - total_export_duration, 3),
+            "coverage": round(coverage, 4),
+        })
         xprint({"phase": "jumpcut_all_done", "outputs": len(outs)})
         return outs
 
@@ -678,13 +702,29 @@ class BroadcastVideoSlices:
         else:
             raise ValueError("mode 需为 'speech'、'performance'、'jumpcut' 或 场景化模式")
         outs: List[str] = []
-        xprint({"phase": "cut_start", "mode": mode, "clips": len(clips), "video": video_path, "output_dir": output_dir})
+        original_duration = self._probe_media_duration(video_path)
+        total_export_duration = 0.0
+        xprint({
+            "phase": "cut_start",
+            "mode": mode,
+            "clips": len(clips),
+            "video": video_path,
+            "output_dir": output_dir,
+            "original_duration": round(original_duration, 3),
+        })
         for idx, c in enumerate(clips):
             start = float(c["start"]) if c else 0.0
             end = float(c["end"]) if c else start
             duration = max(0.0, end - start)
             if duration < float(kwargs.get("min_export_sec", 0.0)):
                 continue
+            xprint({
+                "phase": "slice_debug",
+                "index": idx + 1,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "duration": round(duration, 3),
+            })
             out_name = f"{name}_{mode}_{idx + 1:03d}.mp4"
             out_path = os.path.join(output_dir, out_name)
             if mode in {"ecommerce", "game", "entertainment"}:
@@ -726,6 +766,15 @@ class BroadcastVideoSlices:
             subprocess.run(cmd)
             xprint({"phase": "export_done", "index": idx + 1, "out": out_path, "duration": round(duration, 3)})
             outs.append(out_path)
+            total_export_duration += duration
+        coverage = (total_export_duration / original_duration) if original_duration > 0 else 0.0
+        xprint({
+            "phase": "duration_compare",
+            "original_sec": round(original_duration, 3),
+            "export_total_sec": round(total_export_duration, 3),
+            "diff_sec": round(original_duration - total_export_duration, 3),
+            "coverage": round(coverage, 4),
+        })
         xprint({"phase": "cut_done", "outputs": len(outs)})
         return outs
 
