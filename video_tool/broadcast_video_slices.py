@@ -15,6 +15,7 @@ from utils.calcu_video_info import ffprobe_duration
 from utils.calcu_video_info import ffprobe_stream_info
 from video_tool.video_subtitles import VideoSubtitles
 from video_tool.subtitles_overlay import overlay_ass_subtitles
+from video_tool.ass_builder import srt_to_ass_with_highlight
 import torch  # type: ignore
 import cv2  # type: ignore
 from PIL import Image  # type: ignore
@@ -886,8 +887,7 @@ class BroadcastVideoSlices:
                     srt_path = vs.save_srt(final_path, output_srt_path=output_dir, translate=bool(kwargs.get("translate", False)))
                     style_cfg = getattr(SliceConfig, "SUBTITLE_STYLE", {
                         "font_name": "Microsoft YaHei",
-                        "font_size": 68,
-                        "primary_color": "#FFDE00",
+                        "primary_color": "#FFFFFF",
                         "outline_color": "#000000",
                         "back_color": "#000000",
                         "outline": 2,
@@ -895,10 +895,22 @@ class BroadcastVideoSlices:
                         "alignment": 2,
                         "margin_v": 30,
                         "encoding": 1,
-                        "highlight_color": "#FF0000",
+                        "highlight_color": "#FFE400",
+                        "reserved_lr_percent": 0.05,
+                        "pos_y_percent": 0.92,
                     })
                     ass_path = os.path.splitext(srt_path)[0] + ".ass"
-                    self._srt_to_ass_with_highlight(srt_path, ass_path, final_path, mode, style_cfg)
+                    max_cpl = kwargs.get("max_chars_per_line", 14)
+                    kw_cfg = self.keywords_config.get(mode, self.keywords_config.get("ecommerce", {}))
+                    srt_to_ass_with_highlight(
+                        srt_path=srt_path,
+                        ass_path=ass_path,
+                        video_path=final_path,
+                        mode=mode,
+                        style_cfg=style_cfg,
+                        keywords_cfg=kw_cfg,
+                        max_chars_per_line=max_cpl,
+                    )
                     use_nvenc = self._use_nvenc(bool(kwargs.get("use_nvenc", True)))
                     crf = int(kwargs.get("crf", 23))
                     subbed = self._overlay_subtitles(final_path, ass_path, use_nvenc, crf)

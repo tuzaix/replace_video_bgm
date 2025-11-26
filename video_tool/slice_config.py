@@ -120,14 +120,16 @@ class SliceConfig:
     }
     SUBTITLE_STYLE = {
         "font_name": "Microsoft YaHei",
-        "font_size": 42,
-        "primary_color": "#FFFFFF",
+        "primary_color": "#ffde00",
         "outline_color": "#000000",
         "back_color": "#000000",
         "outline": 2,
         "shadow": 0,
+        "bold": True,
         "alignment": 2,
         "margin_v": 30,
         "encoding": 1,
-        "highlight_color": "#FFE400",
+        "highlight_color": "#ff1837",
+        "reserved_lr_percent": 0.05,
+        "pos_y_percent": 0.85,
     }
