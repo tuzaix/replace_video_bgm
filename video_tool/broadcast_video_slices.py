@@ -8,7 +8,13 @@ from typing import Optional, List, Dict, Any, Tuple
 import threading
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
-# 初始化 FFmpeg 环境
+from utils.xprint import xprint
+from video_tool.slice_config import SliceConfig
+import torch  # type: ignore
+import cv2  # type: ignore
+from PIL import Image  # type: ignore
+from transformers import AutoProcessor, AutoModelForCausalLM  # type: ignore
+
 env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffmpeg=True)
 ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe")
 ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg")
@@ -19,9 +25,15 @@ except Exception:
     raise RuntimeError("未找到 faster-whisper。请先安装：pip install faster-whisper，并确保 FFmpeg 可用。")
 from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
+from pydub.utils import make_chunks
 
 class BroadcastVideoSlices:
-    """直播长视频智能切片，支持语音语义与表演能量两种模式。"""
+    """直播长视频智能切片，支持场景化模式与基础模式。
+
+    提供三类场景化模式：`ecommerce`、`game`、`entertainment`，以及兼容的基础模式：`speech`、`performance`。
+    - 场景化模式融合语音语义、音频能量、关键词打分与动态前后摇。
+    - 基础模式保持原有语义驱动或能量驱动逻辑以兼容旧用法。
+    """
 
     _MODEL_CACHE: Dict[str, Any] = {}
     _CACHE_LOCK: threading.Lock = threading.Lock()
@@ -31,45 +43,151 @@ class BroadcastVideoSlices:
         model_size: Optional[str] = None,
         device: str = "auto",
         model_path: Optional[str] = None,
+        vision_model_path_or_id: Optional[str] = None,
     ) -> None:
-        """初始化切片器。
+        """初始化切片器并加载 Whisper 模型。
 
         参数
         ----
-        model_size: 模型大小，支持 "large-v3"、"medium"、"small" 等；可为 None 使用自动选择
-        device: 运行设备，"auto"/"cuda"/"cpu"
-        model_path: 模型根目录，要求包含仓库子目录，例如 Systran/faster-whisper-medium
+        model_size: Whisper 模型大小（例如 "large-v3"、"medium"、"small"），缺省自动选择
+        device: 运行设备（"auto"/"cuda"/"cpu"），默认自动选择
+        model_path: 本地模型根目录路径，可直接传入已下载模型目录
         """
         self._WhisperModel = WhisperModel  # type: ignore
         self.model_size = model_size or self._auto_select_model_size()
         self.device = self._auto_pick_device(device)
         if not model_path:
-            raise ValueError("未指定模型目录。请通过 --model-path 或设置环境变量 WHISPER_MODEL_DIR 提供模型目录。")
+            raise ValueError("未指定模型目录。请通过 --model-path 提供模型目录。")
         self.model_path = self._pick_model_dir(model_path, self._map_model_to_repo(self.model_size))
         self.compute_type = "float16" if self.device == "cuda" else "int8"
         self.model = self._get_or_create_model(self.model_path, self.device, self.compute_type)
+        self.vision_model_id = vision_model_path_or_id or "microsoft/Florence-2-base"
+        self.keywords_config = SliceConfig.KEYWORDS_CONFIG
+        xprint({
+            "phase": "init",
+            "model_size": self.model_size,
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "model_path": self.model_path,
+            "vision_model": self.vision_model_id,
+        })
 
     def _auto_pick_device(self, device: str) -> str:
         """自动选择运行设备。"""
         if device != "auto":
             return device
         try:
-            import torch  # type: ignore
-            return "cuda" if torch.cuda.is_available() else "cpu"
+            return "cuda" if (torch and torch.cuda.is_available()) else "cpu"
         except Exception:
             return "cpu"
 
     def _gpu_info(self) -> Tuple[bool, float]:
         """返回 GPU 是否可用及显存大小（GB）。"""
         try:
-            import torch  # type: ignore
-            if torch.cuda.is_available():
+            if torch and torch.cuda.is_available():
                 props = torch.cuda.get_device_properties(0)
                 vram_gb = float(getattr(props, "total_memory", 0)) / (1024 ** 3)
                 return True, vram_gb
         except Exception:
             pass
         return False, 0.0
+
+    def _vision_available(self) -> bool:
+        """检测视觉验证依赖是否可用。"""
+        return bool(torch) and bool(cv2) and bool(Image) and bool(AutoProcessor) and bool(AutoModelForCausalLM)
+
+    def _build_vision_models(self) -> Tuple[Any, Any, str]:
+        """构建 Florence-2 视觉模型与处理器，返回 (model, processor, device)。"""
+        if AutoProcessor is None or AutoModelForCausalLM is None:
+            raise ImportError("transformers 未安装或不可用")
+        device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+        model_id = str(self.vision_model_id)
+        kwargs: Dict[str, Any] = {"trust_remote_code": True, "attn_implementation": "eager"}
+        if torch and torch.cuda.is_available():
+            try:
+                kwargs["dtype"] = torch.float16
+            except Exception:
+                pass
+        model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs).to(device).eval()
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        return model, processor, device
+
+    def _analyze_frame_caption(self, processor: Any, model: Any, device: str, pil_image: Any) -> str:
+        """使用 Florence-2 生成详细画面描述。"""
+        task_prompt = "<MORE_DETAILED_CAPTION>"
+        inputs = processor(text=task_prompt, images=pil_image, return_tensors="pt").to(device)
+        with torch.no_grad():
+            ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=512,
+                do_sample=False,
+                num_beams=2,
+            )
+        text = processor.batch_decode(ids, skip_special_tokens=False)[0]
+        out = processor.post_process_generation(text, task=task_prompt, image_size=(pil_image.width, pil_image.height))
+        return str(out.get(task_prompt, ""))
+
+    def filter_clips_by_vision(self, video_path: str, clips: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
+        """利用视觉模型过滤片段：抽取中帧，生成描述并按模式视觉关键词匹配。若依赖缺失，直接返回原片段。"""
+        if not clips:
+            return clips
+        if not self._vision_available():
+            return clips
+        try:
+            model, processor, device = self._build_vision_models()
+            cfg = self.keywords_config.get(mode, self.keywords_config["ecommerce"])
+            keys = [str(k).lower() for k in cfg.get("visual_keywords", [])]
+            cap = cv2.VideoCapture(video_path)
+            filtered: List[Dict[str, Any]] = []
+            xprint({"phase": "vision_filter_start", "clips": len(clips), "mode": mode})
+            for c in clips:
+                mid = (float(c.get("start", 0.0)) + float(c.get("end", 0.0))) / 2.0
+                cap.set(cv2.CAP_PROP_POS_MSEC, mid * 1000.0)
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil = Image.fromarray(rgb)
+                desc = self._analyze_frame_caption(processor, model, device, pil)
+                hit = any(k in desc.lower() for k in keys) if keys else True
+                if hit:
+                    c["visual_desc"] = desc
+                    filtered.append(c)
+            cap.release()
+            xprint({"phase": "vision_filter_done", "kept": len(filtered)})
+            return filtered
+        except Exception as e:
+            xprint({"phase": "vision_filter_error", "error": str(e)})
+            return clips
+
+    def _use_nvenc(self, prefer: bool = True) -> bool:
+        """是否使用 NVENC。若 prefer 为 True 且检测到 CUDA 可用则返回 True。"""
+        if not prefer:
+            return False
+        try:
+            import torch  # type: ignore
+            return bool(torch.cuda.is_available())
+        except Exception:
+            return False
+
+    def _ffmpeg_encode_args(self, use_nvenc: bool, crf: int) -> List[str]:
+        """根据是否启用 NVENC 生成编码参数。"""
+        if use_nvenc:
+            return [
+                "-c:v", "h264_nvenc",
+                "-preset", "p6",
+                "-tune", "hq",
+                "-rc", "vbr",
+                "-cq", str(int(crf)),
+                "-c:a", "aac",
+            ]
+        return [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", str(int(crf)),
+            "-c:a", "aac",
+        ]
 
     def _auto_select_model_size(self) -> str:
         """根据硬件环境选择模型大小。"""
@@ -129,6 +247,7 @@ class BroadcastVideoSlices:
         os.makedirs(tmpdir, exist_ok=True)
         audio_path = os.path.join(tmpdir, "audio.mp3")
         in_arg = f"file:{os.path.abspath(video_path).replace('\\', '/')}"
+        xprint({"phase": "extract_audio", "video": video_path, "audio_out": audio_path})
         r = subprocess.run([
             ffmpeg_bin,
             "-hide_banner",
@@ -150,12 +269,39 @@ class BroadcastVideoSlices:
         if r.returncode != 0:
             err = (r.stderr or b"").decode("utf-8", errors="ignore")
             raise RuntimeError(f"提取音频失败: {err}")
+        xprint({"phase": "extract_audio_done", "audio_path": audio_path})
         return audio_path, tmpdir
 
+    def _get_audio_peaks(self, audio: AudioSegment, chunk_len_ms: int = 500, threshold_ratio: float = 1.8) -> List[float]:
+        """计算音频 RMS 高能片段时间点（秒）。
+
+        参数
+        ----
+        audio: 音频对象
+        chunk_len_ms: 分块长度（毫秒）
+        threshold_ratio: 阈值系数（高能阈值 = 平均 RMS × 系数）
+        """
+        chunks = make_chunks(audio, chunk_len_ms)
+        rms_list = [float(c.rms or 0) for c in chunks] if chunks else []
+        avg = (sum(rms_list) / float(len(rms_list))) if rms_list else 0.0
+        threshold = avg * float(threshold_ratio)
+        peaks: List[float] = []
+        for i, rms in enumerate(rms_list):
+            if rms > threshold:
+                peaks.append(i * (chunk_len_ms / 1000.0))
+        xprint({
+            "phase": "audio_peaks",
+            "avg_rms": round(avg, 3),
+            "threshold": round(threshold, 3),
+            "peaks": len(peaks),
+        })
+        return peaks
+
     def analyze_speech(self, video_path: str, min_sec: int = 20, max_sec: int = 60, language: Optional[str] = "zh") -> List[Dict[str, Any]]:
-        """基于语音语义的切片策略，保证“话没说完不能断”。"""
+        """基础模式：基于语音语义的切片策略，保证“话没说完不能断”。"""
         segments, _ = self.model.transcribe(video_path, beam_size=5, vad_filter=True, language=language)
         segs = list(segments)
+        xprint({"phase": "asr_speech", "segments": len(segs), "language": language})
         if not segs:
             return []
         clips: List[Dict[str, Any]] = []
@@ -184,12 +330,13 @@ class BroadcastVideoSlices:
         max_keep_sec: int = 60,
         temp_root: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """基于音频能量的切片策略，提取完整段落或高潮 highlight。"""
+        """基础模式：基于音频能量的切片策略，提取完整段落或高潮 highlight。"""
         audio_path, tmpdir = self._extract_audio(video_path, temp_root=temp_root)
         try:
             
             audio = AudioSegment.from_file(audio_path)
             ranges = detect_nonsilent(audio, min_silence_len=min_silence_len, silence_thresh=silence_thresh)
+            xprint({"phase": "nonsilent_ranges", "count": len(ranges), "min_silence_len": min_silence_len, "silence_thresh": silence_thresh})
             clips: List[Dict[str, Any]] = []
             for start_ms, end_ms in ranges:
                 dur_sec = (end_ms - start_ms) / 1000.0
@@ -212,6 +359,7 @@ class BroadcastVideoSlices:
                 final_start = (start_ms + best_offset) / 1000.0
                 final_end = final_start + float(target_duration)
                 clips.append({"start": final_start, "end": final_end, "type": "highlight"})
+            xprint({"phase": "performance_clips", "count": len(clips)})
             return clips
         finally:
             try:
@@ -219,57 +367,366 @@ class BroadcastVideoSlices:
             except Exception:
                 pass
 
+    def _is_sentence_end(self, text: str) -> bool:
+        """判断文本是否以句号类标点结尾。"""
+        t = str(text or "").strip()
+        return bool(t) and (t[-1] in ["。", "！", "？", "!", "?", ".", "~"])
+
+    def _merge_overlapping_clips(self, clips: List[Dict[str, Any]], gap_tol: float = 2.0) -> List[Dict[str, Any]]:
+        """合并时间重叠或相邻的片段。"""
+        if not clips:
+            return []
+        xprint({"phase": "merge", "input": len(clips), "gap_tol": gap_tol})
+        sorted_clips = sorted(clips, key=lambda x: float(x.get("start", 0.0)))
+        merged: List[Dict[str, Any]] = []
+        cur = dict(sorted_clips[0])
+        for nx in sorted_clips[1:]:
+            if float(nx.get("start", 0.0)) < float(cur.get("end", 0.0)) + float(gap_tol):
+                cur["end"] = max(float(cur.get("end", 0.0)), float(nx.get("end", 0.0)))
+                cur["duration"] = float(cur["end"]) - float(cur.get("start", 0.0))
+                cur["text"] = str(cur.get("text", "")) + " | " + str(nx.get("text", ""))
+            else:
+                merged.append(cur)
+                cur = dict(nx)
+        merged.append(cur)
+        xprint({"phase": "merge_done", "output": len(merged)})
+        return merged
+
+    def analyze_content(self, video_path: str, mode: str = "ecommerce", language: str = "zh") -> List[Dict[str, Any]]:
+        """场景化综合分析：采用“锚点扩张”策略并应用强制时长上限与密度过滤。"""
+        config = self.keywords_config.get(mode, self.keywords_config["ecommerce"])
+        xprint({"phase": "analyze_content_start", "mode": mode})
+        segments, _ = self.model.transcribe(video_path, beam_size=5, language=language, vad_filter=True)
+        seg_list = list(segments)
+        xprint({"phase": "asr_segments", "count": len(seg_list), "language": language})
+        if not seg_list:
+            return []
+
+        peaks: List[float] = []
+        if mode == "game":
+            audio_path, tmpdir = self._extract_audio(video_path)
+            try:
+                audio = AudioSegment.from_file(audio_path)
+                peaks = self._get_audio_peaks(audio, chunk_len_ms=500, threshold_ratio=1.8)
+            finally:
+                try:
+                    shutil.rmtree(tmpdir)
+                except Exception:
+                    pass
+            xprint({"phase": "energy_peaks", "count": len(peaks)})
+
+        def _nearest_seg_index(ts: float) -> Optional[int]:
+            best_i = None
+            best_diff = 1e9
+            for i, s in enumerate(seg_list):
+                st = float(getattr(s, "start", 0.0) or 0.0)
+                ed = float(getattr(s, "end", st) or st)
+                mid = (st + ed) / 2.0
+                diff = abs(mid - ts)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_i = i
+            return best_i
+
+        anchors: List[int] = []
+        for i, seg in enumerate(seg_list):
+            text = str(getattr(seg, "text", ""))
+            if any((kw in text) for kw in config["high"]):
+                anchors.append(i)
+        if mode == "game" and peaks:
+            for t in peaks:
+                idx = _nearest_seg_index(t)
+                if idx is not None:
+                    anchors.append(idx)
+        anchors = sorted(set(anchors))
+        xprint({"phase": "anchors", "count": len(anchors)})
+        if not anchors:
+            return []
+
+        pre = float(config.get("pre_roll", config.get("lookback", 1.0)))
+        post = float(config.get("post_roll", config.get("padding", 0.5)))
+        raw_windows: List[Dict[str, Any]] = []
+        for idx in anchors:
+            s = seg_list[idx]
+            st = float(getattr(s, "start", 0.0) or 0.0)
+            ed = float(getattr(s, "end", st) or st)
+            win = {"start": max(0.0, st - pre), "end": ed + post, "anchor_text": str(getattr(s, "text", ""))}
+            raw_windows.append(win)
+
+        def _merge_overlapping_windows(windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if not windows:
+                return []
+            ws = sorted(windows, key=lambda x: float(x["start"]))
+            merged: List[Dict[str, Any]] = []
+            cur = dict(ws[0])
+            for nx in ws[1:]:
+                if float(nx["start"]) < float(cur["end"]):
+                    cur["end"] = max(float(cur["end"]), float(nx["end"]))
+                    cur["anchor_text"] = str(cur.get("anchor_text", "")) + " | " + str(nx.get("anchor_text", ""))
+                else:
+                    merged.append(cur)
+                    cur = dict(nx)
+            merged.append(cur)
+            return merged
+
+        merged = _merge_overlapping_windows(raw_windows)
+        xprint({"phase": "merged_windows", "count": len(merged)})
+
+        max_hard = float(config.get("max_hard_limit", 60.0))
+        min_dur = float(config.get("min_duration", 10.0))
+        min_hits = int(config.get("min_keyword_hits", 1))
+
+        # 计算密度（关键词/能量）与硬上限
+        def _density_hits(w: Dict[str, Any]) -> int:
+            s = float(w["start"]); e = float(w["end"]) 
+            hits = 0
+            for seg in seg_list:
+                st = float(getattr(seg, "start", 0.0) or 0.0)
+                ed = float(getattr(seg, "end", st) or st)
+                if st >= s and ed <= e:
+                    txt = str(getattr(seg, "text", ""))
+                    if any(kw in txt for kw in config["high"]):
+                        hits += 1
+                    elif any(kw in txt for kw in config["mid"]):
+                        hits += 1
+            if mode == "game" and hits < min_hits:
+                for t in peaks:
+                    if s <= t <= e:
+                        hits += 1
+                        break
+            return hits
+
+        clips: List[Dict[str, Any]] = []
+        for w in merged:
+            dur = float(w["end"]) - float(w["start"]) 
+            if dur > max_hard:
+                w["end"] = float(w["start"]) + max_hard
+                dur = max_hard
+            if dur < min_dur:
+                continue
+            if _density_hits(w) < min_hits:
+                continue
+            clips.append({
+                "start": float(w["start"]),
+                "end": float(w["end"]),
+                "duration": float(w["end"]) - float(w["start"]),
+                "text": str(w.get("anchor_text", "")),
+                "type": "highlight",
+            })
+        xprint({"phase": "clips_built", "count": len(clips)})
+        return self._merge_overlapping_clips(clips, gap_tol=2.0)
+
+    def analyze_jumpcut(self, video_path: str, mode: str = "ecommerce", language: str = "zh") -> List[List[Any]]:
+        """离散聚合跳剪：根据关键词筛选并保留上下文，按时间邻近聚类。
+
+        返回多个聚类，每个聚类由若干 ASR 段构成，将被拼接为一个输出短视频。
+        """
+        config = self.keywords_config.get(mode, self.keywords_config["ecommerce"])
+        xprint({"phase": "jumpcut_start", "mode": mode})
+        segments, _ = self.model.transcribe(video_path, beam_size=5, language=language, vad_filter=True)
+        seg_list = list(segments)
+        xprint({"phase": "jumpcut_asr", "segments": len(seg_list)})
+        if not seg_list:
+            return []
+
+        keywords = list(config.get("high", [])) + list(config.get("mid", []))
+        valuable: set[int] = set()
+        for i, seg in enumerate(seg_list):
+            txt = str(getattr(seg, "text", ""))
+            if any(k in txt for k in keywords):
+                valuable.add(i)
+                if i > 0:
+                    valuable.add(i - 1)
+                if i < len(seg_list) - 1:
+                    valuable.add(i + 1)
+        idxs = sorted(list(valuable))
+        xprint({"phase": "jumpcut_selected_indices", "count": len(idxs)})
+        if not idxs:
+            return []
+
+        max_gap = float(config.get("max_cluster_gap", 60.0))
+        max_out = float(config.get("max_output_duration", 60.0))
+        min_out = float(config.get("min_output_duration", 10.0))
+
+        clusters: List[List[Any]] = []
+        cur: List[Any] = [seg_list[idxs[0]]]
+        cur_dur = float((cur[0].end or cur[0].start) - (cur[0].start or 0.0))
+        last_idx = idxs[0]
+        for i in idxs[1:]:
+            seg = seg_list[i]
+            prev = seg_list[last_idx]
+            gap = float((seg.start or 0.0) - (prev.end or 0.0))
+            new_dur = float(cur_dur + ((seg.end or seg.start) - (seg.start or 0.0)))
+            if gap < max_gap and new_dur < max_out:
+                cur.append(seg)
+                cur_dur = new_dur
+            else:
+                if cur and cur_dur >= min_out:
+                    clusters.append(cur)
+                cur = [seg]
+                cur_dur = float((seg.end or seg.start) - (seg.start or 0.0))
+            last_idx = i
+
+        if cur and cur_dur >= min_out:
+            clusters.append(cur)
+        xprint({"phase": "jumpcut_clusters", "count": len(clusters)})
+        return clusters
+
+    def _render_jump_cuts(self, video_path: str, output_dir: str, clusters: List[List[Any]], crf: int = 23, use_nvenc: bool = False) -> List[str]:
+        """渲染跳剪输出：将离散句子片段重编码后用 concat 合并为短视频。"""
+        os.makedirs(output_dir, exist_ok=True)
+        name = os.path.splitext(os.path.basename(video_path))[0]
+        temp_dir = os.path.join(output_dir, "temp_jump_chunks")
+        if os.path.isdir(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+        os.makedirs(temp_dir, exist_ok=True)
+        outs: List[str] = []
+        xprint({"phase": "jumpcut_render_start", "clusters": len(clusters)})
+        for i, cluster in enumerate(clusters):
+            concat_list_path = os.path.join(temp_dir, f"concat_list_{i}.txt")
+            chunk_paths: List[str] = []
+            with open(concat_list_path, "w", encoding="utf-8") as f_list:
+                for j, seg in enumerate(cluster):
+                    start = max(0.0, float(seg.start or 0.0) - 0.1)
+                    duration = float((seg.end or start) - start) + 0.1
+                    chunk_name = f"chunk_{i}_{j}.mp4"
+                    chunk_path = os.path.join(temp_dir, chunk_name)
+                    cmd = [
+                        ffmpeg_bin,
+                        "-y",
+                        "-ss", f"{start:.3f}",
+                        "-t", f"{duration:.3f}",
+                        "-i", video_path,
+                    ] + self._ffmpeg_encode_args(use_nvenc, int(crf)) + [
+                        "-loglevel", "error",
+                        chunk_path,
+                    ]
+                    subprocess.run(cmd)
+                    abs_chunk = os.path.abspath(chunk_path).replace("\\", "/")
+                    f_list.write(f"file '{abs_chunk}'\n")
+                    chunk_paths.append(chunk_path)
+            out_name = f"{name}_jumpcut_{i + 1:03d}.mp4"
+            out_path = os.path.join(output_dir, out_name)
+            cmd_concat = [
+                ffmpeg_bin,
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_list_path,
+                "-c", "copy",
+                "-loglevel", "error",
+                out_path,
+            ]
+            subprocess.run(cmd_concat)
+            xprint({"phase": "jumpcut_render_done", "index": i + 1, "out": out_path, "chunks": len(chunk_paths)})
+            outs.append(out_path)
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
+        xprint({"phase": "jumpcut_all_done", "outputs": len(outs)})
+        return outs
+
     def cut_video(self, video_path: str, output_dir: Optional[str] = None, mode: str = "speech", **kwargs: Any) -> List[str]:
-        """执行切片并返回输出文件路径列表。默认输出目录为视频同名目录。"""
+        """执行切片并返回输出文件路径列表。默认输出目录为视频同名目录。
+
+        当 `mode` 为场景化模式（`ecommerce`/`game`/`entertainment`）时，使用融合算法生成高光片段并采用 `libx264+aac` 重编码导出，以保证切割精确与兼容性。
+        基础模式 `speech`/`performance` 保持原有策略与导出方式。
+        """
         name = os.path.splitext(os.path.basename(video_path))[0]
         if not output_dir:
             output_dir = os.path.join(os.path.dirname(os.path.abspath(video_path)), name)
         os.makedirs(output_dir, exist_ok=True)
-        if mode == "speech":
+        if mode in {"ecommerce", "game", "entertainment"}:
+            language = str(kwargs.get("language", "zh"))
+            clips = self.analyze_content(video_path, mode=mode, language=language)
+            if bool(kwargs.get("vision_verify", False)):
+                clips = self.filter_clips_by_vision(video_path, clips, mode)
+        elif mode == "jumpcut":
+            language = str(kwargs.get("language", "zh"))
+            profile = str(kwargs.get("profile", "ecommerce"))
+            clusters = self.analyze_jumpcut(video_path, mode=profile, language=language)
+            return self._render_jump_cuts(
+                video_path,
+                output_dir,
+                clusters,
+                crf=int(kwargs.get("crf", 23)),
+                use_nvenc=self._use_nvenc(bool(kwargs.get("use_nvenc", True))),
+            )
+        elif mode == "speech":
+            params = SliceConfig.SPEECH_PARAMS
             clips = self.analyze_speech(
                 video_path,
-                min_sec=int(kwargs.get("min_sec", 20)),
-                max_sec=int(kwargs.get("max_sec", 60)),
-                language=kwargs.get("language", "zh"),
+                min_sec=int(kwargs.get("min_sec", params["min_sec"])),
+                max_sec=int(kwargs.get("max_sec", params["max_sec"])),
+                language=kwargs.get("language", params["language"]),
             )
         elif mode == "performance":
+            params = SliceConfig.PERFORMANCE_PARAMS
             clips = self.analyze_performance(
                 video_path,
-                target_duration=int(kwargs.get("target_duration", 30)),
-                min_silence_len=int(kwargs.get("min_silence_len", 2000)),
-                silence_thresh=int(kwargs.get("silence_thresh", -40)),
-                min_segment_sec=int(kwargs.get("min_segment_sec", 10)),
-                max_keep_sec=int(kwargs.get("max_keep_sec", 60)),
+                target_duration=int(kwargs.get("target_duration", params["target_duration"])),
+                min_silence_len=int(kwargs.get("min_silence_len", params["min_silence_len"])),
+                silence_thresh=int(kwargs.get("silence_thresh", params["silence_thresh"])),
+                min_segment_sec=int(kwargs.get("min_segment_sec", params["min_segment_sec"])),
+                max_keep_sec=int(kwargs.get("max_keep_sec", params["max_keep_sec"])),
                 temp_root=output_dir,
             )
         else:
-            raise ValueError("mode 需为 'speech' 或 'performance'")
+            raise ValueError("mode 需为 'speech'、'performance'、'jumpcut' 或 场景化模式")
         outs: List[str] = []
+        xprint({"phase": "cut_start", "mode": mode, "clips": len(clips), "video": video_path, "output_dir": output_dir})
         for idx, c in enumerate(clips):
             start = float(c["start"]) if c else 0.0
             end = float(c["end"]) if c else start
             duration = max(0.0, end - start)
+            if duration < float(kwargs.get("min_export_sec", 0.0)):
+                continue
             out_name = f"{name}_{mode}_{idx + 1:03d}.mp4"
             out_path = os.path.join(output_dir, out_name)
-            cmd = [
-                ffmpeg_bin,
-                "-y",
-                "-ss",
-                f"{start:.3f}",
-                "-t",
-                f"{duration:.3f}",
-                "-i",
-                video_path,
-                "-c",
-                "copy",
-                "-avoid_negative_ts",
-                "1",
-                "-loglevel",
-                "error",
-                out_path,
-            ]
+            if mode in {"ecommerce", "game", "entertainment"}:
+                use_nvenc = self._use_nvenc(bool(kwargs.get("use_nvenc", True)))
+                crf = int(kwargs.get("crf", 23))
+                cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-ss",
+                    f"{start:.3f}",
+                    "-t",
+                    f"{duration:.3f}",
+                    "-i",
+                    video_path,
+                ] + self._ffmpeg_encode_args(use_nvenc, crf) + [
+                    "-loglevel",
+                    "error",
+                    out_path,
+                ]
+            else:
+                cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-ss",
+                    f"{start:.3f}",
+                    "-t",
+                    f"{duration:.3f}",
+                    "-i",
+                    video_path,
+                    "-c",
+                    "copy",
+                    "-avoid_negative_ts",
+                    "1",
+                    "-loglevel",
+                    "error",
+                    out_path,
+                ]
+            xprint({"cmd": cmd})
             subprocess.run(cmd)
+            xprint({"phase": "export_done", "index": idx + 1, "out": out_path, "duration": round(duration, 3)})
             outs.append(out_path)
+        xprint({"phase": "cut_done", "outputs": len(outs)})
         return outs
 
 def slice_broadcast_video(
@@ -279,6 +736,7 @@ def slice_broadcast_video(
     model_size: Optional[str] = None,
     device: str = "auto",
     model_path: Optional[str] = None,
+    vision_model_path: Optional[str] = None,
     **kwargs: Any,
 ) -> List[str]:
     """统一接口：执行直播长视频智能切片。
@@ -291,7 +749,13 @@ def slice_broadcast_video(
     model_size: Whisper 模型大小（默认自动）
     device: 运行设备（auto/cuda/cpu）
     model_path: 模型根目录，需包含 Systran/faster-whisper-<size>
+    vision_model_path: Florence-2 视觉模型路径
     其余参数与模式相关
     """
-    slicer = BroadcastVideoSlices(model_size=model_size, device=device, model_path=model_path)
+    slicer = BroadcastVideoSlices(
+        model_size=model_size, 
+        device=device, 
+        model_path=model_path,
+        vision_model_path_or_id=vision_model_path
+    )
     return slicer.cut_video(video_path=video_path, output_dir=out_dir, mode=mode, **kwargs)
