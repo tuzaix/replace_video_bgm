@@ -118,3 +118,16 @@ class SliceConfig:
         "max_sec": 60,
         "language": "zh",
     }
+    SUBTITLE_STYLE = {
+        "font_name": "Microsoft YaHei",
+        "font_size": 42,
+        "primary_color": "#FFFFFF",
+        "outline_color": "#000000",
+        "back_color": "#000000",
+        "outline": 2,
+        "shadow": 0,
+        "alignment": 2,
+        "margin_v": 30,
+        "encoding": 1,
+        "highlight_color": "#FFE400",
+    }

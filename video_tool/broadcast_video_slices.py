@@ -12,6 +12,9 @@ from utils.xprint import xprint
 from video_tool.slice_config import SliceConfig
 import pathlib
 from utils.calcu_video_info import ffprobe_duration
+from utils.calcu_video_info import ffprobe_stream_info
+from video_tool.video_subtitles import VideoSubtitles
+from video_tool.subtitles_overlay import overlay_ass_subtitles
 import torch  # type: ignore
 import cv2  # type: ignore
 from PIL import Image  # type: ignore
@@ -59,10 +62,11 @@ class BroadcastVideoSlices:
         self.model_size = model_size or self._auto_select_model_size()
         self.device = self._auto_pick_device(device)
         if not model_path:
-            raise ValueError("未指定模型目录。请通过 --model-path 提供模型目录。")
-        self.model_path = self._pick_model_dir(model_path, self._map_model_to_repo(self.model_size))
+            raise ValueError("未指定 faster-whisper 模型根目录。请通过 whisper_model_dir 或 --model-path 提供。")
+        self.whisper_model_dir_base = model_path
+        self.whisper_model_path = self._pick_model_dir(model_path, self._map_model_to_repo(self.model_size))
         self.compute_type = "float16" if self.device == "cuda" else "int8"
-        self.model = self._get_or_create_model(self.model_path, self.device, self.compute_type)
+        self.model = self._get_or_create_model(self.whisper_model_path, self.device, self.compute_type)
         self.vision_model_id = vision_model_path_or_id or "microsoft/Florence-2-base"
         self.keywords_config = SliceConfig.KEYWORDS_CONFIG
         xprint({
@@ -70,7 +74,8 @@ class BroadcastVideoSlices:
             "model_size": self.model_size,
             "device": self.device,
             "compute_type": self.compute_type,
-            "model_path": self.model_path,
+            "whisper_root": self.whisper_model_dir_base,
+            "whisper_model": self.whisper_model_path,
             "vision_model": self.vision_model_id,
         })
 
@@ -196,6 +201,115 @@ class BroadcastVideoSlices:
             return float(ffprobe_duration(pathlib.Path(path)) or 0.0)
         except Exception:
             return 0.0
+
+    def _ass_color(self, hex_rgb: str) -> str:
+        try:
+            h = hex_rgb.strip().lstrip("#")
+            r = int(h[0:2], 16)
+            g = int(h[2:4], 16)
+            b = int(h[4:6], 16)
+            return f"&H{b:02X}{g:02X}{r:02X}&"
+        except Exception:
+            return "&H00FFFFFF&"
+
+    def _srt_time_to_ass(self, t: str) -> str:
+        try:
+            hh, mm, rest = t.split(":")
+            ss, ms = rest.split(",")
+            cs = int(round(int(ms) / 10.0))
+            return f"{int(hh)}:{int(mm):02d}:{int(ss):02d}.{int(cs):02d}"
+        except Exception:
+            return "0:00:00.00"
+
+    def _ass_escape(self, s: str) -> str:
+        t = str(s or "")
+        t = t.replace("\r", "")
+        t = t.replace("\n", "\\N")
+        return t
+
+    def _ff_filter_escape_path(self, path: str) -> str:
+        p = os.path.abspath(path)
+        p = p.replace("\\", "/")
+        p = p.replace("'", "\\'")
+        p = p.replace(":", "\\:")
+        return p
+
+    def _srt_to_ass_with_highlight(self, srt_path: str, ass_path: str, video_path: str, mode: str, style_cfg: Dict[str, Any]) -> str:
+        try:
+            kw_cfg = self.keywords_config.get(mode, self.keywords_config.get("ecommerce", {}))
+            kws = list(kw_cfg.get("high", [])) + list(kw_cfg.get("mid", []))
+            info = ffprobe_stream_info(pathlib.Path(video_path))
+            w = int(info.get("width", 1920) or 1920)
+            h = int(info.get("height", 1080) or 1080)
+            font = str(style_cfg.get("font_name", "Microsoft YaHei"))
+            fsize = int(style_cfg.get("font_size", 42))
+            primary = self._ass_color(str(style_cfg.get("primary_color", "#FFFFFF")))
+            secondary = primary
+            outlinec = self._ass_color(str(style_cfg.get("outline_color", "#000000")))
+            backc = self._ass_color(str(style_cfg.get("back_color", "#000000")))
+            outline = int(style_cfg.get("outline", 2))
+            shadow = int(style_cfg.get("shadow", 0))
+            align = int(style_cfg.get("alignment", 2))
+            margin_v = int(style_cfg.get("margin_v", 30))
+            enc = int(style_cfg.get("encoding", 1))
+            hi_color = self._ass_color(str(style_cfg.get("highlight_color", "#FFE400")))
+
+            with open(srt_path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            header = []
+            header.append("[Script Info]")
+            header.append("Script Type: v4.00+")
+            header.append(f"PlayResX: {w}")
+            header.append(f"PlayResY: {h}")
+            header.append("ScaledBorderAndShadow: yes")
+            header.append("")
+            header.append("[V4+ Styles]")
+            header.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
+            header.append(f"Style: Default,{font},{fsize},{primary},{secondary},{outlinec},{backc},0,0,0,0,100,100,0,0,1,{outline},{shadow},{align},20,20,{margin_v},{enc}")
+            header.append("")
+            header.append("[Events]")
+            header.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
+
+            events = []
+            i = 0
+            while i < len(lines):
+                if not lines[i].strip():
+                    i += 1
+                    continue
+                try:
+                    _idx = lines[i].strip()
+                    i += 1
+                    if i >= len(lines):
+                        break
+                    ts_line = lines[i].strip()
+                    i += 1
+                    if "-->" not in ts_line:
+                        continue
+                    t1, t2 = [s.strip() for s in ts_line.split("-->")]
+                    text_buf = []
+                    while i < len(lines) and lines[i].strip():
+                        text_buf.append(lines[i])
+                        i += 1
+                    text = "\n".join(text_buf)
+                    ass_text = self._ass_escape(text)
+                    for kw in sorted(kws, key=lambda x: len(x), reverse=True):
+                        k = str(kw)
+                        if not k:
+                            continue
+                        ass_text = ass_text.replace(k, f"{'{\\c'}{hi_color}{'}'}{k}{'{\\c'}{primary}{'}'}")
+                    ev = f"Dialogue: 0,{self._srt_time_to_ass(t1)},{self._srt_time_to_ass(t2)},Default,,0,0,0,,{ass_text}"
+                    events.append(ev)
+                except Exception:
+                    i += 1
+                    continue
+            with open(ass_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(header + events))
+            return ass_path
+        except Exception:
+            return ass_path
+
+    def _overlay_subtitles(self, src_path: str, ass_path: str, use_nvenc: bool, crf: int) -> str:
+        return overlay_ass_subtitles(src_path=src_path, ass_path=ass_path, out_path=None, use_nvenc=use_nvenc, crf=crf)
 
     def _auto_select_model_size(self) -> str:
         """根据硬件环境选择模型大小。"""
@@ -765,7 +879,34 @@ class BroadcastVideoSlices:
             xprint({"cmd": cmd})
             subprocess.run(cmd)
             xprint({"phase": "export_done", "index": idx + 1, "out": out_path, "duration": round(duration, 3)})
-            outs.append(out_path)
+            final_path = out_path
+            try:
+                if bool(kwargs.get("add_subtitles", True)):
+                    vs = VideoSubtitles(model_size=self.model_size, device=self.device, model_path=self.whisper_model_dir_base)
+                    srt_path = vs.save_srt(final_path, output_srt_path=output_dir, translate=bool(kwargs.get("translate", False)))
+                    style_cfg = getattr(SliceConfig, "SUBTITLE_STYLE", {
+                        "font_name": "Microsoft YaHei",
+                        "font_size": 68,
+                        "primary_color": "#FFDE00",
+                        "outline_color": "#000000",
+                        "back_color": "#000000",
+                        "outline": 2,
+                        "shadow": 0,
+                        "alignment": 2,
+                        "margin_v": 30,
+                        "encoding": 1,
+                        "highlight_color": "#FF0000",
+                    })
+                    ass_path = os.path.splitext(srt_path)[0] + ".ass"
+                    self._srt_to_ass_with_highlight(srt_path, ass_path, final_path, mode, style_cfg)
+                    use_nvenc = self._use_nvenc(bool(kwargs.get("use_nvenc", True)))
+                    crf = int(kwargs.get("crf", 23))
+                    subbed = self._overlay_subtitles(final_path, ass_path, use_nvenc, crf)
+                    if os.path.isfile(subbed):
+                        final_path = subbed
+            except Exception as e:
+                xprint({"phase": "subtitle_error", "index": idx + 1, "error": str(e)})
+            outs.append(final_path)
             total_export_duration += duration
         coverage = (total_export_duration / original_duration) if original_duration > 0 else 0.0
         xprint({
@@ -784,6 +925,9 @@ def slice_broadcast_video(
     mode: str = "speech",
     model_size: Optional[str] = None,
     device: str = "auto",
+    whisper_model_dir: Optional[str] = None,
+    vision_model: Optional[str] = None,
+    # 向后兼容旧参数名
     model_path: Optional[str] = None,
     vision_model_path: Optional[str] = None,
     **kwargs: Any,
@@ -797,14 +941,16 @@ def slice_broadcast_video(
     mode: 切片模式 'speech' 或 'performance'
     model_size: Whisper 模型大小（默认自动）
     device: 运行设备（auto/cuda/cpu）
-    model_path: 模型根目录，需包含 Systran/faster-whisper-<size>
-    vision_model_path: Florence-2 视觉模型路径
+    whisper_model_dir: faster-whisper 本地模型根目录（推荐新参数名）
+    vision_model: Florence-2 模型 ID 或本地目录（推荐新参数名）
     其余参数与模式相关
     """
+    whisper_dir = whisper_model_dir or model_path
+    vision_id = vision_model or vision_model_path
     slicer = BroadcastVideoSlices(
-        model_size=model_size, 
-        device=device, 
-        model_path=model_path,
-        vision_model_path_or_id=vision_model_path
+        model_size=model_size,
+        device=device,
+        model_path=whisper_dir,
+        vision_model_path_or_id=vision_id,
     )
     return slicer.cut_video(video_path=video_path, output_dir=out_dir, mode=mode, **kwargs)
