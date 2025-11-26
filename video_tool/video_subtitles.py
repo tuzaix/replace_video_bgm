@@ -145,8 +145,18 @@ class VideoSubtitles:
         meta = {"language": getattr(info, "language", None), "language_probability": float(getattr(info, "language_probability", 0.0))}
         return segments, meta
 
-    def save_srt(self, video_path: str, output_srt_path: Optional[str] = None, translate: bool = False, max_chars_per_line: Optional[int] = 14, max_lines_per_caption: int = 2) -> str:
-        """生成并保存 SRT 文件，返回输出路径。"""
+    def save_srt(self, video_path: str, output_srt_path: Optional[str] = None, translate: bool = False, max_chars_per_line: Optional[int] = 14, max_lines_per_caption: int = 2, simplify_chinese: bool = True) -> str:
+        """生成并保存 SRT 文件，返回输出路径。
+
+        参数
+        ----
+        video_path: 输入视频路径
+        output_srt_path: 输出目录；默认同视频目录
+        translate: 是否启用英文翻译任务
+        max_chars_per_line: 每行最大字符数（用于分割）
+        max_lines_per_caption: 每条字幕的最大行数
+        simplify_chinese: 是否将文本转换为中文简体（需要 opencc 或 zhconv，若不可用则原样输出）
+        """
         vp = os.path.abspath(video_path)
         out_dir = output_srt_path or os.path.dirname(vp)
         out_path = os.path.join(out_dir, f"{os.path.splitext(os.path.basename(vp))[0]}.srt")
@@ -157,12 +167,16 @@ class VideoSubtitles:
                 s = float(getattr(seg, "start", 0.0))
                 e = float(getattr(seg, "end", 0.0))
                 raw_text = str(getattr(seg, "text", "")).strip()
+                if simplify_chinese:
+                    raw_text = self._to_simplified(raw_text)
                 chunks: list[tuple[float, float, str]]
                 if isinstance(max_chars_per_line, int) and max_chars_per_line > 0:
                     chunks = self._split_segment_text(s, e, raw_text, max_chars_per_line, max_lines_per_caption)
                 else:
                     chunks = [(s, e, raw_text)]
                 for cs, ce, ctext in chunks:
+                    if simplify_chinese:
+                        ctext = self._to_simplified(ctext)
                     start = format_srt_timestamp(cs)
                     end = format_srt_timestamp(ce)
                     f.write(f"{idx}\n")
@@ -170,6 +184,19 @@ class VideoSubtitles:
                     f.write(f"{ctext}\n\n")
                     idx += 1
         return out_path
+
+    def _to_simplified(self, text: str) -> str:
+        """将文本转换为中文简体。
+
+        优先使用 `opencc` (t2s)；若不可用则尝试 `zhconv`；若均不可用则返回原文本。
+        本方法对非中文文本无副作用。
+        """
+        try:
+            from zhconv import convert  # type: ignore
+            return str(convert(text, "zh-hans"))
+        except Exception:
+            pass
+        return str(text)
 
     def _wrap_text(self, text: str, max_chars: int) -> list[str]:
         """按最大字数将文本换行，严格控制每行字符数，优先在分隔符处换行。"""
