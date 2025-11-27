@@ -2,6 +2,7 @@ import os
 import argparse
 from typing import Optional
 
+from utils.xprint import xprint
 from video_tool.broadcast_video_slices import BroadcastVideoSlices
 
 
@@ -14,8 +15,7 @@ def main() -> None:
     p.add_argument("--profile", default="ecommerce", help="jumpcut 基于的场景化配置：ecommerce/game/entertainment")
     p.add_argument("--model-size", default="large-v3", help="Whisper 模型大小，如 large-v3/medium/small；默认自动")
     p.add_argument("--device", default="auto", help="运行设备：auto/cuda/cpu")
-    p.add_argument("--whisper-model-dir", required=True, help="faster-whisper 本地模型根目录（包含 Systran/faster-whisper-<size>）")
-    p.add_argument("--vision-model", default=None, help="Florence-2 模型本地路径或仓库ID")
+    p.add_argument("--models-root", required=True, help="模型基础目录，包含子目录 faster_wishper 与 florence2")
     p.add_argument("--language", default="zh", help="ASR语言，默认 zh")
     p.add_argument("--use-nvenc", action="store_true", help="使用 NVENC 进行视频编码")
     p.add_argument("--crf", type=int, default=23, help="编码质量参数（CRF/CQ）")
@@ -25,9 +25,9 @@ def main() -> None:
 
     args = p.parse_args()
 
-    whisper_dir: str = args.whisper_model_dir
-    if not whisper_dir:
-        raise SystemExit("未指定 faster-whisper 模型根目录：请使用 --whisper-model-dir")
+    models_root: str = args.models_root
+    if not models_root:
+        raise SystemExit("未指定模型基础目录：请使用 --models-root")
 
     inp = args.input_path
     if os.path.isdir(inp):
@@ -52,8 +52,7 @@ def main() -> None:
         slicer = BroadcastVideoSlices(
             model_size=args.model_size,
             device=args.device,
-            model_path=whisper_dir,
-            vision_model_path_or_id=args.vision_model,
+            models_root=models_root,
         )
 
         kwargs = {
@@ -63,7 +62,10 @@ def main() -> None:
             "add_subtitles": bool(args.add_subtitles),
             "translate": bool(args.translate),
             "max_chars_per_line": int(args.max_chars_per_line),
+            "vision_verify": True, # 用于给场景化切片做“视觉二次校验”。当开启时，会用 Florence‑2 对每个候选片段的中帧生成详细描述，并与该场景的视觉关键词匹配，只保留视觉上命中的片段
         }
+        xprint(kwargs)
+
         if args.mode == "jumpcut":
             kwargs["profile"] = args.profile
 

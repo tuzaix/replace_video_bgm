@@ -26,7 +26,7 @@ class VideoSubtitles:
     _MODEL_CACHE: Dict[str, Any] = {}
     _CACHE_LOCK: threading.Lock = threading.Lock()
 
-    def __init__(self, model_size: Optional[str] = None, device: str = "auto", model_path: Optional[str] = None) -> None:
+    def __init__(self, model_size: Optional[str] = None, device: str = "auto", model_path: Optional[str] = None, existing_model: Optional[Any] = None) -> None:
         """初始化字幕生成器。
 
         参数
@@ -56,19 +56,23 @@ class VideoSubtitles:
         if self.model_size == "auto":
             self.model_size = self._auto_select_model_size()
 
-        self.model_path = model_path
-        if not self.model_path:
-            raise ValueError("未指定模型目录。请通过 --model-path 或设置环境变量 WHISPER_MODEL_DIR 提供模型目录。")
+        if existing_model is not None:
+            self.model = existing_model
+            self.model_path = model_path or ""
+        else:
+            self.model_path = model_path
+            if not self.model_path:
+                raise ValueError("未指定模型目录。请通过 --model-path 或设置环境变量 WHISPER_MODEL_DIR 提供模型目录。")
 
-        # 自动选择计算类型
-        compute_type = "float16" if self.device == "cuda" else "int8"
+            # 自动选择计算类型
+            compute_type = "float16" if self.device == "cuda" else "int8"
 
-        repo_id = self._map_model_to_repo(self.model_size)
-        xprint(f"映射模型大小 {self.model_size} 到仓库 ID {repo_id}")
-        model_dir = self._pick_model_dir(self.model_path, repo_id)
-        xprint(f"使用模型目录: {model_dir}")
-        self.model_path = model_dir
-        self.model = self._get_or_create_model(model_dir, self.device, compute_type)
+            repo_id = self._map_model_to_repo(self.model_size)
+            xprint(f"映射模型大小 {self.model_size} 到仓库 ID {repo_id}")
+            model_dir = self._pick_model_dir(self.model_path, repo_id)
+            xprint(f"使用模型目录: {model_dir}")
+            self.model_path = model_dir
+            self.model = self._get_or_create_model(model_dir, self.device, compute_type)
 
     def transcribe(self, video_path: str, beam_size: int = 5, translate: bool = False) -> Tuple[Iterable[Any], Dict[str, Any]]:
         """执行语音识别并返回分段与信息。"""

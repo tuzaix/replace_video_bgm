@@ -7,6 +7,7 @@ import subprocess
 from typing import Optional, List, Dict, Any, Tuple
 import threading
 
+import traceback
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 from utils.xprint import xprint
 from video_tool.slice_config import SliceConfig
@@ -20,18 +21,13 @@ import torch  # type: ignore
 import cv2  # type: ignore
 from PIL import Image  # type: ignore
 from transformers import AutoProcessor, AutoModelForCausalLM  # type: ignore
+from faster_whisper import WhisperModel  # type: ignore
+from pydub import AudioSegment
+from pydub.utils import make_chunks
 
 env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffmpeg=True)
 ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe")
 ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg")
-
-try:
-    from faster_whisper import WhisperModel  # type: ignore
-except Exception:
-    raise RuntimeError("未找到 faster-whisper。请先安装：pip install faster-whisper，并确保 FFmpeg 可用。")
-from pydub import AudioSegment
-from pydub.silence import detect_nonsilent
-from pydub.utils import make_chunks
 
 class BroadcastVideoSlices:
     """直播长视频智能切片，支持场景化模式与基础模式。
@@ -42,14 +38,14 @@ class BroadcastVideoSlices:
     """
 
     _MODEL_CACHE: Dict[str, Any] = {}
+    _VISION_CACHE: Dict[str, Tuple[Any, Any, str]] = {}
     _CACHE_LOCK: threading.Lock = threading.Lock()
 
     def __init__(
         self,
         model_size: Optional[str] = None,
         device: str = "auto",
-        model_path: Optional[str] = None,
-        vision_model_path_or_id: Optional[str] = None,
+        models_root: Optional[str] = None,
     ) -> None:
         """初始化切片器并加载 Whisper 模型。
 
@@ -57,26 +53,33 @@ class BroadcastVideoSlices:
         ----
         model_size: Whisper 模型大小（例如 "large-v3"、"medium"、"small"），缺省自动选择
         device: 运行设备（"auto"/"cuda"/"cpu"），默认自动选择
-        model_path: 本地模型根目录路径，可直接传入已下载模型目录
+        models_root: 模型基础目录，需包含子目录 faster_wishper 与 florence2
         """
         self._WhisperModel = WhisperModel  # type: ignore
         self.model_size = model_size or self._auto_select_model_size()
         self.device = self._auto_pick_device(device)
-        if not model_path:
-            raise ValueError("未指定 faster-whisper 模型根目录。请通过 whisper_model_dir 或 --model-path 提供。")
-        self.whisper_model_dir_base = model_path
-        self.whisper_model_path = self._pick_model_dir(model_path, self._map_model_to_repo(self.model_size))
+        models_root
+        if not models_root:
+            raise ValueError("未指定模型基础目录。请通过 --models-root 提供。")
+        self.models_root = os.path.abspath(models_root)
+        self.whisper_model_dir_base = os.path.join(self.models_root, "faster_wishper")
+        whisper_model_path = self._pick_model_dir(self.whisper_model_dir_base, self._map_model_to_repo(self.model_size))
         self.compute_type = "float16" if self.device == "cuda" else "int8"
-        self.model = self._get_or_create_model(self.whisper_model_path, self.device, self.compute_type)
-        self.vision_model_id = vision_model_path_or_id or "microsoft/Florence-2-base"
+
+        # wishper 模型
+        self.model = self._get_or_create_model(whisper_model_path, self.device, self.compute_type)
+
+        # 加载 Florence-2 模型 路径
+        self.vision_model_id = os.path.join(self.models_root, "florence2")
+
         self.keywords_config = SliceConfig.KEYWORDS_CONFIG
         xprint({
             "phase": "init",
             "model_size": self.model_size,
             "device": self.device,
             "compute_type": self.compute_type,
+            "models_root": self.models_root,
             "whisper_root": self.whisper_model_dir_base,
-            "whisper_model": self.whisper_model_path,
             "vision_model": self.vision_model_id,
         })
 
@@ -105,20 +108,30 @@ class BroadcastVideoSlices:
         return bool(torch) and bool(cv2) and bool(Image) and bool(AutoProcessor) and bool(AutoModelForCausalLM)
 
     def _build_vision_models(self) -> Tuple[Any, Any, str]:
-        """构建 Florence-2 视觉模型与处理器，返回 (model, processor, device)。"""
+        """构建或复用 Florence-2 模型与处理器并做单例缓存。"""
         if AutoProcessor is None or AutoModelForCausalLM is None:
             raise ImportError("transformers 未安装或不可用")
         device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
         model_id = str(self.vision_model_id)
-        kwargs: Dict[str, Any] = {"trust_remote_code": True, "attn_implementation": "eager"}
-        if torch and torch.cuda.is_available():
-            try:
-                kwargs["dtype"] = torch.float16
-            except Exception:
-                pass
-        model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs).to(device).eval()
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        return model, processor, device
+        key = f"{os.path.abspath(model_id)}|{device}"
+        cached = self._VISION_CACHE.get(key)
+        if cached:
+            return cached
+        with self._CACHE_LOCK:
+            cached2 = self._VISION_CACHE.get(key)
+            if cached2:
+                return cached2
+            kwargs: Dict[str, Any] = {"trust_remote_code": True, "attn_implementation": "eager"}
+            if torch and torch.cuda.is_available():
+                try:
+                    kwargs["dtype"] = torch.float16
+                except Exception:
+                    pass
+            model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs).to(device).eval()
+            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            tup = (model, processor, device)
+            self._VISION_CACHE[key] = tup
+            return tup
 
     def _analyze_frame_caption(self, processor: Any, model: Any, device: str, pil_image: Any) -> str:
         """使用 Florence-2 生成详细画面描述。"""
@@ -138,7 +151,7 @@ class BroadcastVideoSlices:
 
     def filter_clips_by_vision(self, video_path: str, clips: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
         """利用视觉模型过滤片段：抽取中帧，生成描述并按模式视觉关键词匹配。若依赖缺失，直接返回原片段。"""
-        xprint({"phase": "vision_filter", "video": video_path, "clips": len(clips), "mode": mode, "vision_available": self._vision_available()})
+        xprint({"==phase": "vision_filter", "video": video_path, "clips": len(clips), "mode": mode, "vision_available": self._vision_available()})
         if not clips:
             return clips
         if not self._vision_available():
@@ -775,9 +788,10 @@ class BroadcastVideoSlices:
             subprocess.run(cmd)
             xprint({"phase": "export_done", "index": idx + 1, "out": out_path, "duration": round(duration, 3)})
             final_path = out_path
+            # 增加字幕
             try:
                 if bool(kwargs.get("add_subtitles", True)):
-                    vs = VideoSubtitles(model_size=self.model_size, device=self.device, model_path=self.whisper_model_dir_base)
+                    vs = VideoSubtitles(model_size=self.model_size, device=self.device, model_path=self.whisper_model_dir_base, existing_model=self.model)
                     srt_path = vs.save_srt(final_path, output_srt_path=output_dir, translate=bool(kwargs.get("translate", False)))
                     style_cfg = SliceConfig.SUBTITLE_STYLE
                     ass_path = os.path.splitext(srt_path)[0] + ".ass"
@@ -798,6 +812,7 @@ class BroadcastVideoSlices:
                     if os.path.isfile(subbed):
                         final_path = subbed
             except Exception as e:
+                traceback.print_exc()
                 xprint({"phase": "subtitle_error", "index": idx + 1, "error": str(e)})
             outs.append(final_path)
             total_export_duration += duration
@@ -818,11 +833,7 @@ def slice_broadcast_video(
     mode: str = "ecommerce",
     model_size: Optional[str] = None,
     device: str = "auto",
-    whisper_model_dir: Optional[str] = None,
-    vision_model: Optional[str] = None,
-    # 向后兼容旧参数名
-    model_path: Optional[str] = None,
-    vision_model_path: Optional[str] = None,
+    models_root: Optional[str] = None,
     **kwargs: Any,
 ) -> List[str]:
     """统一接口：执行直播长视频智能切片。
@@ -834,16 +845,12 @@ def slice_broadcast_video(
     mode: 切片模式：`ecommerce`、`game`、`entertainment` 或 `jumpcut`
     model_size: Whisper 模型大小（默认自动）
     device: 运行设备（auto/cuda/cpu）
-    whisper_model_dir: faster-whisper 本地模型根目录（推荐新参数名）
-    vision_model: Florence-2 模型 ID 或本地目录（推荐新参数名）
+    models_root: 模型基础目录（包含 faster_wishper 与 florence2 子目录）
     其余参数与模式相关
     """
-    whisper_dir = whisper_model_dir or model_path
-    vision_id = vision_model or vision_model_path
     slicer = BroadcastVideoSlices(
         model_size=model_size,
         device=device,
-        model_path=whisper_dir,
-        vision_model_path_or_id=vision_id,
+        models_root=models_root,
     )
     return slicer.cut_video(video_path=video_path, output_dir=out_dir, mode=mode, **kwargs)
