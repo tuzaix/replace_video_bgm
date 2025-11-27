@@ -138,6 +138,7 @@ class BroadcastVideoSlices:
 
     def filter_clips_by_vision(self, video_path: str, clips: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
         """利用视觉模型过滤片段：抽取中帧，生成描述并按模式视觉关键词匹配。若依赖缺失，直接返回原片段。"""
+        xprint({"phase": "vision_filter", "video": video_path, "clips": len(clips), "mode": mode, "vision_available": self._vision_available()})
         if not clips:
             return clips
         if not self._vision_available():
