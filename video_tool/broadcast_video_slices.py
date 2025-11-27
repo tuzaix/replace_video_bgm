@@ -421,80 +421,11 @@ class BroadcastVideoSlices:
         })
         return peaks
 
-    def analyze_speech(self, video_path: str, min_sec: int = 20, max_sec: int = 60, language: Optional[str] = "zh") -> List[Dict[str, Any]]:
-        """基础模式：基于语音语义的切片策略，保证“话没说完不能断”。"""
-        segments, _ = self.model.transcribe(video_path, beam_size=5, vad_filter=True, language=language)
-        segs = list(segments)
-        xprint({"phase": "asr_speech", "segments": len(segs), "language": language})
-        if not segs:
-            return []
-        clips: List[Dict[str, Any]] = []
-        cur = {"start": float(segs[0].start or 0.0), "end": float(segs[0].start or 0.0), "text": ""}
-        for seg in segs:
-            cur["end"] = float(seg.end or cur["end"]) 
-            cur["text"] += str(getattr(seg, "text", ""))
-            duration = float(cur["end"] - cur["start"]) if cur["end"] >= cur["start"] else 0.0
-            txt = str(getattr(seg, "text", "")).strip()
-            last = txt[-1:] if txt else ""
-            is_sentence_end = last in ["。", "！", "？", "!", "?", "."]
-            if duration >= max_sec or (duration >= min_sec and is_sentence_end):
-                clips.append({"start": cur["start"], "end": cur["end"], "type": "speech", "text": cur["text"]})
-                cur = {"start": float(seg.end or cur["end"]), "end": float(seg.end or cur["end"]), "text": ""}
-        if cur["end"] > cur["start"]:
-            clips.append({"start": cur["start"], "end": cur["end"], "type": "speech", "text": cur["text"]})
-        return clips
+    
 
-    def analyze_performance(
-        self,
-        video_path: str,
-        target_duration: int = 30,
-        min_silence_len: int = 2000,
-        silence_thresh: int = -40,
-        min_segment_sec: int = 10,
-        max_keep_sec: int = 60,
-        temp_root: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """基础模式：基于音频能量的切片策略，提取完整段落或高潮 highlight。"""
-        audio_path, tmpdir = self._extract_audio(video_path, temp_root=temp_root)
-        try:
-            
-            audio = AudioSegment.from_file(audio_path)
-            ranges = detect_nonsilent(audio, min_silence_len=min_silence_len, silence_thresh=silence_thresh)
-            xprint({"phase": "nonsilent_ranges", "count": len(ranges), "min_silence_len": min_silence_len, "silence_thresh": silence_thresh})
-            clips: List[Dict[str, Any]] = []
-            for start_ms, end_ms in ranges:
-                dur_sec = (end_ms - start_ms) / 1000.0
-                if dur_sec < float(min_segment_sec):
-                    continue
-                if dur_sec <= float(max_keep_sec):
-                    clips.append({"start": start_ms / 1000.0, "end": end_ms / 1000.0, "type": "full_performance"})
-                    continue
-                clip_audio = audio[start_ms:end_ms]
-                window_ms = int(target_duration * 1000)
-                step_ms = 1000
-                best_energy = -1
-                best_offset = 0
-                for offset in range(0, max(0, len(clip_audio) - window_ms), step_ms):
-                    chunk = clip_audio[offset: offset + window_ms]
-                    energy = int(chunk.rms or 0)
-                    if energy > best_energy:
-                        best_energy = energy
-                        best_offset = offset
-                final_start = (start_ms + best_offset) / 1000.0
-                final_end = final_start + float(target_duration)
-                clips.append({"start": final_start, "end": final_end, "type": "highlight"})
-            xprint({"phase": "performance_clips", "count": len(clips)})
-            return clips
-        finally:
-            try:
-                shutil.rmtree(tmpdir)
-            except Exception:
-                pass
+    
 
-    def _is_sentence_end(self, text: str) -> bool:
-        """判断文本是否以句号类标点结尾。"""
-        t = str(text or "").strip()
-        return bool(t) and (t[-1] in ["。", "！", "？", "!", "?", ".", "~"])
+    
 
     def _merge_overlapping_clips(self, clips: List[Dict[str, Any]], gap_tol: float = 2.0) -> List[Dict[str, Any]]:
         """合并时间重叠或相邻的片段。"""
@@ -770,11 +701,11 @@ class BroadcastVideoSlices:
         xprint({"phase": "jumpcut_all_done", "outputs": len(outs)})
         return outs
 
-    def cut_video(self, video_path: str, output_dir: Optional[str] = None, mode: str = "speech", **kwargs: Any) -> List[str]:
+    def cut_video(self, video_path: str, output_dir: Optional[str] = None, mode: str = "ecommerce", **kwargs: Any) -> List[str]:
         """执行切片并返回输出文件路径列表。默认输出目录为视频同名目录。
 
         当 `mode` 为场景化模式（`ecommerce`/`game`/`entertainment`）时，使用融合算法生成高光片段并采用 `libx264+aac` 重编码导出，以保证切割精确与兼容性。
-        基础模式 `speech`/`performance` 保持原有策略与导出方式。
+        另支持场景化聚合模式 `jumpcut`。
         """
         name = os.path.splitext(os.path.basename(video_path))[0]
         if not output_dir:
@@ -796,27 +727,8 @@ class BroadcastVideoSlices:
                 crf=int(kwargs.get("crf", 23)),
                 use_nvenc=self._use_nvenc(bool(kwargs.get("use_nvenc", True))),
             )
-        elif mode == "speech":
-            params = SliceConfig.SPEECH_PARAMS
-            clips = self.analyze_speech(
-                video_path,
-                min_sec=int(kwargs.get("min_sec", params["min_sec"])),
-                max_sec=int(kwargs.get("max_sec", params["max_sec"])),
-                language=kwargs.get("language", params["language"]),
-            )
-        elif mode == "performance":
-            params = SliceConfig.PERFORMANCE_PARAMS
-            clips = self.analyze_performance(
-                video_path,
-                target_duration=int(kwargs.get("target_duration", params["target_duration"])),
-                min_silence_len=int(kwargs.get("min_silence_len", params["min_silence_len"])),
-                silence_thresh=int(kwargs.get("silence_thresh", params["silence_thresh"])),
-                min_segment_sec=int(kwargs.get("min_segment_sec", params["min_segment_sec"])),
-                max_keep_sec=int(kwargs.get("max_keep_sec", params["max_keep_sec"])),
-                temp_root=output_dir,
-            )
         else:
-            raise ValueError("mode 需为 'speech'、'performance'、'jumpcut' 或 场景化模式")
+            raise ValueError("mode 需为 'ecommerce'、'game'、'entertainment' 或 'jumpcut'")
         outs: List[str] = []
         original_duration = self._probe_media_duration(video_path)
         total_export_duration = 0.0
@@ -843,41 +755,22 @@ class BroadcastVideoSlices:
             })
             out_name = f"{name}_{mode}_{idx + 1:03d}.mp4"
             out_path = os.path.join(output_dir, out_name)
-            if mode in {"ecommerce", "game", "entertainment"}:
-                use_nvenc = self._use_nvenc(bool(kwargs.get("use_nvenc", True)))
-                crf = int(kwargs.get("crf", 23))
-                cmd = [
-                    ffmpeg_bin,
-                    "-y",
-                    "-ss",
-                    f"{start:.3f}",
-                    "-t",
-                    f"{duration:.3f}",
-                    "-i",
-                    video_path,
-                ] + self._ffmpeg_encode_args(use_nvenc, crf) + [
-                    "-loglevel",
-                    "error",
-                    out_path,
-                ]
-            else:
-                cmd = [
-                    ffmpeg_bin,
-                    "-y",
-                    "-ss",
-                    f"{start:.3f}",
-                    "-t",
-                    f"{duration:.3f}",
-                    "-i",
-                    video_path,
-                    "-c",
-                    "copy",
-                    "-avoid_negative_ts",
-                    "1",
-                    "-loglevel",
-                    "error",
-                    out_path,
-                ]
+            use_nvenc = self._use_nvenc(bool(kwargs.get("use_nvenc", True)))
+            crf = int(kwargs.get("crf", 23))
+            cmd = [
+                ffmpeg_bin,
+                "-y",
+                "-ss",
+                f"{start:.3f}",
+                "-t",
+                f"{duration:.3f}",
+                "-i",
+                video_path,
+            ] + self._ffmpeg_encode_args(use_nvenc, crf) + [
+                "-loglevel",
+                "error",
+                out_path,
+            ]
             xprint({"cmd": cmd})
             subprocess.run(cmd)
             xprint({"phase": "export_done", "index": idx + 1, "out": out_path, "duration": round(duration, 3)})
@@ -886,20 +779,7 @@ class BroadcastVideoSlices:
                 if bool(kwargs.get("add_subtitles", True)):
                     vs = VideoSubtitles(model_size=self.model_size, device=self.device, model_path=self.whisper_model_dir_base)
                     srt_path = vs.save_srt(final_path, output_srt_path=output_dir, translate=bool(kwargs.get("translate", False)))
-                    style_cfg = getattr(SliceConfig, "SUBTITLE_STYLE", {
-                        "font_name": "Microsoft YaHei",
-                        "primary_color": "#FFFFFF",
-                        "outline_color": "#000000",
-                        "back_color": "#000000",
-                        "outline": 2,
-                        "shadow": 0,
-                        "alignment": 2,
-                        "margin_v": 30,
-                        "encoding": 1,
-                        "highlight_color": "#FFE400",
-                        "reserved_lr_percent": 0.05,
-                        "pos_y_percent": 0.92,
-                    })
+                    style_cfg = SliceConfig.SUBTITLE_STYLE
                     ass_path = os.path.splitext(srt_path)[0] + ".ass"
                     max_cpl = kwargs.get("max_chars_per_line", 14)
                     kw_cfg = self.keywords_config.get(mode, self.keywords_config.get("ecommerce", {}))
@@ -935,7 +815,7 @@ class BroadcastVideoSlices:
 def slice_broadcast_video(
     video_path: str,
     out_dir: Optional[str] = None,
-    mode: str = "speech",
+    mode: str = "ecommerce",
     model_size: Optional[str] = None,
     device: str = "auto",
     whisper_model_dir: Optional[str] = None,
@@ -951,7 +831,7 @@ def slice_broadcast_video(
     ----
     video_path: 输入视频文件路径
     out_dir: 输出目录，默认在视频同目录创建同名子目录
-    mode: 切片模式 'speech' 或 'performance'
+    mode: 切片模式：`ecommerce`、`game`、`entertainment` 或 `jumpcut`
     model_size: Whisper 模型大小（默认自动）
     device: 运行设备（auto/cuda/cpu）
     whisper_model_dir: faster-whisper 本地模型根目录（推荐新参数名）

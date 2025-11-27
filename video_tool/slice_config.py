@@ -103,21 +103,7 @@ class SliceConfig:
         },
     }
 
-    # 表演模式默认参数
-    PERFORMANCE_PARAMS = {
-        "target_duration": 30,
-        "min_silence_len": 1000,   # 工业优化：降低静音阈值以更灵敏检测停顿
-        "silence_thresh": -40,     # dBFS
-        "min_segment_sec": 5,      # 允许更短有效段
-        "max_keep_sec": 60,
-    }
-
-    # 语音模式默认参数
-    SPEECH_PARAMS = {
-        "min_sec": 15,             # 略微降低下限
-        "max_sec": 60,
-        "language": "zh",
-    }
+    
     SUBTITLE_STYLE = {
         "font_name": "Microsoft YaHei",
         "primary_color": "#ffde00",
