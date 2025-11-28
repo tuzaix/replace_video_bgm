@@ -43,18 +43,19 @@ def main() -> None:
     else:
         raise SystemExit(f"输入路径不可用：{inp}")
 
+    slicer = BroadcastVideoSlices(
+        model_size=args.model_size,
+        device=args.device,
+        models_root=models_root,
+    )
+
     for video_file in video_files:
         base_name = os.path.splitext(os.path.basename(video_file))[0]
         out_root = args.out_dir or video_dir
         out_dir = os.path.join(out_root, base_name)
         os.makedirs(out_dir, exist_ok=True)
 
-        slicer = BroadcastVideoSlices(
-            model_size=args.model_size,
-            device=args.device,
-            models_root=models_root,
-        )
-
+      
         kwargs = {
             "language": args.language,
             "use_nvenc": bool(args.use_nvenc),
