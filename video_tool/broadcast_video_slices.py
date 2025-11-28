@@ -792,18 +792,30 @@ class BroadcastVideoSlices:
             try:
                 if bool(kwargs.get("add_subtitles", True)):
                     vs = VideoSubtitles(model_size=self.model_size, device=self.device, model_path=self.whisper_model_dir_base, existing_model=self.model)
-                    srt_path = vs.save_srt(final_path, output_srt_path=output_dir, translate=bool(kwargs.get("translate", False)))
+                    kw_cfg = self.keywords_config.get(mode, self.keywords_config.get("ecommerce", {}))
+                    domain_words = [str(w) for w in (list(kw_cfg.get("high", [])) + list(kw_cfg.get("mid", [])))]
+                    initial_prompt = " ".join(domain_words) if domain_words else None
+                    srt_path = vs.save_srt(
+                        final_path,
+                        output_srt_path=os.path.join(output_dir, "subtitles"),
+                        translate=bool(kwargs.get("translate", False)),
+                        simplify_chinese=True,
+                        language=str(kwargs.get("language", "zh")),
+                        beam_size=int(kwargs.get("beam_size", 7)),
+                        best_of=int(kwargs.get("best_of", 5)),
+                        temperature=float(kwargs.get("temperature", 0.0)),
+                        initial_prompt=initial_prompt,
+                    )
                     style_cfg = SliceConfig.SUBTITLE_STYLE
                     ass_path = os.path.splitext(srt_path)[0] + ".ass"
                     max_cpl = kwargs.get("max_chars_per_line", 14)
-                    kw_cfg = self.keywords_config.get(mode, self.keywords_config.get("ecommerce", {}))
                     srt_to_ass_with_highlight(
                         srt_path=srt_path,
                         ass_path=ass_path,
                         video_path=final_path,
                         mode=mode,
                         style_cfg=style_cfg,
-                        keywords_cfg=kw_cfg,
+                        keywords_cfg=self.keywords_config.get(mode, self.keywords_config.get("ecommerce", {})),
                         max_chars_per_line=max_cpl,
                     )
                     use_nvenc = self._use_nvenc(bool(kwargs.get("use_nvenc", True)))

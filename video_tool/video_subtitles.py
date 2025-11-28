@@ -74,14 +74,14 @@ class VideoSubtitles:
             self.model_path = model_dir
             self.model = self._get_or_create_model(model_dir, self.device, compute_type)
 
-    def transcribe(self, video_path: str, beam_size: int = 5, translate: bool = False) -> Tuple[Iterable[Any], Dict[str, Any]]:
-        """执行语音识别并返回分段与信息。"""
+    def transcribe(self, video_path: str, beam_size: int = 7, translate: bool = False, language: Optional[str] = "zh", initial_prompt: Optional[str] = None, best_of: int = 5, temperature: float = 0.0) -> Tuple[Iterable[Any], Dict[str, Any]]:
+        """执行语音识别并返回分段与信息。提高准确性：增大 beam_size/best_of、降低 temperature，并可提供 initial_prompt 与 language。"""
         task = "translate" if translate else None
         try:
             if task:
-                segments, info = self.model.transcribe(video_path, task=task, beam_size=beam_size, vad_filter=True)
+                segments, info = self.model.transcribe(video_path, task=task, beam_size=beam_size, vad_filter=True, language=language, initial_prompt=initial_prompt, best_of=best_of, temperature=temperature)
             else:
-                segments, info = self.model.transcribe(video_path, beam_size=beam_size, vad_filter=True)
+                segments, info = self.model.transcribe(video_path, beam_size=beam_size, vad_filter=True, language=language, initial_prompt=initial_prompt, best_of=best_of, temperature=temperature)
         except Exception:
             base_dir = os.path.dirname(video_path)
             tmpdir = os.path.join(base_dir, "temp_subtitles", uuid.uuid4().hex[:8])
@@ -138,9 +138,9 @@ class VideoSubtitles:
                                 err_text = ""
                         raise RuntimeError(f"ffmpeg 转音频失败: {err_text.strip()}")
                 if task:
-                    segments, info = self.model.transcribe(tmpwav, task=task, beam_size=beam_size, vad_filter=True)
+                    segments, info = self.model.transcribe(tmpwav, task=task, beam_size=beam_size, vad_filter=True, language=language, initial_prompt=initial_prompt, best_of=best_of, temperature=temperature)
                 else:
-                    segments, info = self.model.transcribe(tmpwav, beam_size=beam_size, vad_filter=True)
+                    segments, info = self.model.transcribe(tmpwav, beam_size=beam_size, vad_filter=True, language=language, initial_prompt=initial_prompt, best_of=best_of, temperature=temperature)
             finally:
                 try:
                     shutil.rmtree(tmpdir)
@@ -149,7 +149,7 @@ class VideoSubtitles:
         meta = {"language": getattr(info, "language", None), "language_probability": float(getattr(info, "language_probability", 0.0))}
         return segments, meta
 
-    def save_srt(self, video_path: str, output_srt_path: Optional[str] = None, translate: bool = False, max_chars_per_line: Optional[int] = 14, max_lines_per_caption: int = 2, simplify_chinese: bool = True) -> str:
+    def save_srt(self, video_path: str, output_srt_path: Optional[str] = None, translate: bool = False, max_chars_per_line: Optional[int] = 14, max_lines_per_caption: int = 2, simplify_chinese: bool = True, language: Optional[str] = "zh", beam_size: int = 7, best_of: int = 5, temperature: float = 0.0, initial_prompt: Optional[str] = None) -> str:
         """生成并保存 SRT 文件，返回输出路径。
 
         参数
@@ -162,9 +162,12 @@ class VideoSubtitles:
         simplify_chinese: 是否将文本转换为中文简体（需要 opencc 或 zhconv，若不可用则原样输出）
         """
         vp = os.path.abspath(video_path)
-        out_dir = output_srt_path or os.path.dirname(vp)
+        
+        out_dir = output_srt_path or os.path.join(os.path.dirname(vp), "subtitles") # 字幕文件放到子目录下
+        os.makedirs(out_dir, exist_ok=True)
+
         out_path = os.path.join(out_dir, f"{os.path.splitext(os.path.basename(vp))[0]}.srt")
-        segments, _ = self.transcribe(vp, beam_size=5, translate=translate)
+        segments, _ = self.transcribe(vp, beam_size=beam_size, translate=translate, language=language, initial_prompt=initial_prompt, best_of=best_of, temperature=temperature)
         with open(out_path, "w", encoding="utf-8") as f:
             idx = 1
             for seg in segments:

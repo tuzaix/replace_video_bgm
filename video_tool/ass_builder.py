@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional, List
 import pathlib
 
 from utils.calcu_video_info import ffprobe_stream_info
+from utils.calcu_video_info import ffprobe_duration
 
 def _ass_color(hex_rgb: str) -> str:
     """将 #RRGGBB 转为 ASS 颜色格式 &HBBGGRR&。"""
@@ -24,6 +25,28 @@ def _srt_time_to_ass(t: str) -> str:
         ss, ms = rest.split(",")
         cs = int(round(int(ms) / 10.0))
         return f"{int(hh)}:{int(mm):02d}:{int(ss):02d}.{int(cs):02d}"
+    except Exception:
+        return "0:00:00.00"
+
+def _parse_srt_time(t: str) -> float:
+    """将 SRT 时间戳解析为秒。"""
+    try:
+        hh, mm, rest = t.split(":")
+        ss, ms = rest.split(",")
+        return int(hh) * 3600.0 + int(mm) * 60.0 + int(ss) + (int(ms) / 1000.0)
+    except Exception:
+        return 0.0
+
+def _sec_to_ass(sec: float) -> str:
+    """将秒转换为 ASS 时间戳（H:MM:SS.CS）。"""
+    try:
+        if sec < 0:
+            sec = 0.0
+        hh = int(sec // 3600)
+        mm = int((sec % 3600) // 60)
+        ss = int(sec % 60)
+        cs = int(round((sec - int(sec)) * 100.0))
+        return f"{hh}:{mm:02d}:{ss:02d}.{cs:02d}"
     except Exception:
         return "0:00:00.00"
 
@@ -102,7 +125,7 @@ def srt_to_ass_with_highlight(
     header.append("[Events]")
     header.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
 
-    events: List[str] = []
+    events_comp: List[Dict[str, Any]] = []
     i = 0
     while i < len(lines):
         if not lines[i].strip():
@@ -130,12 +153,31 @@ def srt_to_ass_with_highlight(
                     continue
                 ass_text = ass_text.replace(k, f"{'{\\c'}{hi_color}{'}'}{k}{'{\\c'}{primary}{'}'}")
             ass_text = f"{{\\pos({int(pos_x)},{int(pos_y)})}}{ass_text}"
-            ev = f"Dialogue: 0,{_srt_time_to_ass(t1)},{_srt_time_to_ass(t2)},Default,,0,0,0,,{ass_text}"
-            events.append(ev)
+            events_comp.append({
+                "start_sec": _parse_srt_time(t1),
+                "end_sec": _parse_srt_time(t2),
+                "start_ass": _srt_time_to_ass(t1),
+                "end_ass": _srt_time_to_ass(t2),
+                "text": ass_text,
+            })
         except Exception:
             i += 1
             continue
 
+    # 覆盖尾部至视频总时长，避免字幕比视频短
+    try:
+        vdur = float(ffprobe_duration(pathlib.Path(video_path)) or 0.0)
+    except Exception:
+        vdur = 0.0
+    if events_comp and vdur > 0:
+        last = events_comp[-1]
+        if float(last.get("end_sec", 0.0)) + 0.05 < vdur:
+            last["end_ass"] = _sec_to_ass(vdur)
+            events_comp[-1] = last
+    events = [
+        f"Dialogue: 0,{e['start_ass']},{e['end_ass']},Default,,0,0,0,,{e['text']}"
+        for e in events_comp
+    ]
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write("\n".join(header + events))
     return ass_path

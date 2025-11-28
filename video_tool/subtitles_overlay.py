@@ -69,7 +69,9 @@ def overlay_ass_subtitles(
         if not ffmpeg_bin:
             return src_path
         name, ext = os.path.splitext(os.path.basename(src_path))
-        outp = out_path or os.path.join(os.path.dirname(src_path), f"{name}_sub{ext}")
+        outd = os.path.join(out_path or os.path.dirname(src_path), "synthesis")
+        os.makedirs(outd, exist_ok=True)
+        outp = out_path or os.path.join(outd, f"{name}_sub{ext}")
         info = ffprobe_stream_info(pathlib.Path(src_path))
         w = int(info.get("width", 0) or 0)
         h = int(info.get("height", 0) or 0)
