@@ -34,6 +34,7 @@ from gui.tabs.video_concat_tab import VideoConcatTab
 from gui.tabs.generate_cover_tab import GenerateCoverTab
 from gui.tabs.video_bgm_replace_tab import VideoBgmReplaceTab
 from gui.tabs.video_normalize_tab import VideoNormalizeTab
+from gui.tabs.broadcast_video_slices_tab import BroadcastVideoSlicesTab
 from gui.tabs.video_beats_mixed_tab import VideoBeatsMixedTab
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -88,7 +89,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tab_name": "视频混剪",
                 "tab_widget": VideoConcatTab(self),
             },
-            
             {
                 "tab_name": "视频截图",
                 "tab_widget": ExtractFramesTab(self),
@@ -100,6 +100,10 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "tab_name": "BGM替换",
                 "tab_widget": VideoBgmReplaceTab(self),
+            },
+            {
+                "tab_name": "直播切片",
+                "tab_widget": BroadcastVideoSlicesTab(self),
             },
         ]
         # 注册到
