@@ -48,6 +48,8 @@ from concat_tool.normalize_video import VideoNormalizer  # type: ignore
 from concat_tool.concat import VideoConcat  # type: ignore
 from gui.utils import theme
 from gui.precheck import run_preflight_checks
+from utils.calcu_video_info import probe_resolution, get_resolution_dir_topn, confirm_resolution_dir, ffprobe_duration
+from utils.common_utils import is_video_file, is_image_file
 
 class ConcatWorker(QtCore.QObject):
     """后台混剪工作者：先归一化素材，再按分辨率分组进行拼接。
@@ -131,66 +133,6 @@ class ConcatWorker(QtCore.QObject):
         #     pass
         pass
 
-    @staticmethod
-    def _probe_resolution(path: Path) -> Optional[Tuple[int, int]]:
-        """使用 ffprobe 探测视频分辨率 (width, height)。"""
-        ffprobe_bin = shutil.which("ffprobe")
-        if not ffprobe_bin:
-            return None
-        cmd = [
-            ffprobe_bin,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0:s=x",
-            str(path),
-        ]
-        try:
-            res = subprocess.run(cmd, capture_output=True)
-            if res.returncode != 0:
-                return None
-            out = (res.stdout or b"").decode("utf-8", errors="ignore").strip()
-            if "x" in out:
-                w, h = out.split("x", 1)
-                return (int(float(w)), int(float(h)))
-        except Exception:
-            return None
-        return None
-
-    # 获取视频时长
-    @staticmethod
-    def _probe_duration(path: Path) -> Optional[float]:
-        """使用 ffprobe 探测视频时长（秒）。"""
-        ffprobe_bin = shutil.which("ffprobe")
-        if not ffprobe_bin:
-            return None
-        cmd = [
-            ffprobe_bin,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0:nokey=1",
-            str(path),
-        ]
-        try:
-            res = subprocess.run(cmd, capture_output=True)
-            if res.returncode != 0:
-                return None
-            out = (res.stdout or b"").decode("utf-8", errors="ignore").strip()
-            if out:
-                return float(out)
-        except Exception:
-            return None
-        return None
-
     def _choose_bgm_path(self) -> Optional[Path]:
         """选择用于混剪的背景音乐文件路径。
 
@@ -222,101 +164,6 @@ class ConcatWorker(QtCore.QObject):
             return None
         return None
 
-    # ----------------------------- 阶段方法 ----------------------------- #
-    def _normalize_sources(self) -> Optional[List[Path]]:
-        """执行归一化阶段，返回归一化输出所在的临时目录列表。
-
-        逻辑
-        ----
-        - 发射阶段 `normalize`，并输出日志。
-        - 预统计待转换总数（通过 `VideoNormalizer.find_videos()`）。
-        - 逐目录执行归一化，累加全局完成数，并发射 `progress(done, total)`。
-        - 返回含有归一化输出的临时目录列表；若失败则发射错误并返回 None。
-
-        Returns
-        -------
-        Optional[List[Path]]
-            成功时为包含各源目录下“临时”子目录的列表；失败为 None。
-        """
-        try:
-            self.phase.emit("normalize")
-        except Exception:
-            pass
-        self._emit("🔧 正在归一化素材…（裁剪仅在该阶段应用）")
-
-        normalized_dirs: List[Path] = []
-        total_dirs = len(self.video_dirs)
-        done_dirs = 0
-
-        # 计算需要归一化的视频总数
-        try:
-            normalize_total = 0
-            for src in self.video_dirs:
-                src_p = Path(src)
-                if src_p.exists() and src_p.is_dir():
-                    try:
-                        normalize_total += len(VideoNormalizer.find_videos(src_p))
-                    except Exception:
-                        pass
-        except Exception:
-            normalize_total = 0
-
-        normalize_state = {"done": 0}
-        for src in self.video_dirs:
-            if self._stopping:
-                self.error.emit("任务已取消")
-                return None
-            src_p = Path(src)
-            if not src_p.exists() or not src_p.is_dir():
-                self.error.emit(f"目录不存在或不可用: {src}")
-                return None
-            tmp_out = src_p / "临时"
-            try:
-                tmp_out.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
-
-            normalizer = VideoNormalizer(fps=25, use_gpu=True, threads=self.concurrency)
-
-            # 针对每个目录的进度回调，累加到全局归一化进度
-            last_local = {"d": 0}
-
-            def _on_norm_progress(d: int, t: int) -> None:
-                try:
-                    inc = max(0, int(d) - int(last_local["d"]))
-                    last_local["d"] = int(d)
-                    normalize_state["done"] += inc
-                    self.progress.emit(int(normalize_state["done"]), int(normalize_total))
-                except Exception:
-                    try:
-                        self.progress.emit(int(normalize_state["done"]), int(normalize_total))
-                    except Exception:
-                        pass
-
-            ok_count = normalizer.normalize(
-                str(src_p),
-                str(tmp_out),
-                on_progress=_on_norm_progress,
-                trim_head_s=self.trim_head_s,
-                trim_tail_s=self.trim_tail_s,
-            )
-            if ok_count > 0:
-                normalized_dirs.append(tmp_out)
-            done_dirs += 1
-            # 目录级别的推进：同步一次真实完成/总数
-            try:
-                self.progress.emit(int(normalize_state["done"]), int(normalize_total))
-            except Exception:
-                pass
-
-        self._emit(f"✅ 归一化完成，处理目录 {done_dirs}/{total_dirs}")
-        try:
-            self.progress.emit(int(normalize_total), int(normalize_total))
-        except Exception:
-            pass
-
-        return normalized_dirs
-
     def _concat_videos(self, normalized_dirs: List[Path], out_dir: Path) -> Optional[Tuple[List[str], int]]:
         """执行混剪阶段，基于归一化素材生成目标输出。
 
@@ -338,13 +185,16 @@ class ConcatWorker(QtCore.QObject):
         Optional[Tuple[List[str], int]]
             成功时返回 (success_paths, fail_count)；若候选为空或被取消则返回 None。
         """
-        # 收集归一化素材并按分辨率分组
+        # 收集候选素材（支持传入分辨率目录或具体文件列表）并按分辨率分组
         all_videos: List[Path] = []
         for nd in normalized_dirs:
             try:
-                for p in nd.iterdir():
-                    if p.is_file() and p.suffix.lower() == ".mp4" and "_normalized" in p.stem:
-                        all_videos.append(p)
+                if nd.is_dir():
+                    for p in nd.iterdir():
+                        if p.is_file() and p.suffix.lower() == ".mp4":
+                            all_videos.append(p)
+                elif nd.is_file() and nd.suffix.lower() == ".mp4":
+                    all_videos.append(nd)
             except Exception:
                 pass
         if not all_videos:
@@ -353,7 +203,10 @@ class ConcatWorker(QtCore.QObject):
 
         groups: dict[Tuple[int, int], List[Path]] = {}
         for v in all_videos:
-            res = self._probe_resolution(v) or (0, 0)
+            try:
+                res = probe_resolution(v) or (0, 0)
+            except Exception:
+                res = (0, 0)
             groups.setdefault(res, []).append(v)
         # 选择视频数量最多的分辨率组，若并列则取面积更大的分辨率
         best_res = max(groups.keys(), key=lambda r: (len(groups[r]), r[0] * r[1]))
@@ -450,13 +303,33 @@ class ConcatWorker(QtCore.QObject):
         except Exception:
             pass
 
-        # 阶段一：归一化
-        normalized_dirs = self._normalize_sources()
-        if normalized_dirs is None:
+        # 阶段一：素材收集
+        candidates: List[Path] = []
+        confirm_normalized_dirs: dict[str, bool] = {}
+        for d in self.video_dirs:
+            try:
+                confirm_normalized_dirs[d] = confirm_resolution_dir(d)
+                if not confirm_normalized_dirs[d]:
+                    continue
+                media_data = get_resolution_dir_topn(d, top_n=1, recursive=False)
+                files = media_data.get("files", []) if isinstance(media_data, dict) else []
+                for p in files:
+                    if isinstance(p, Path) and p.is_file() and is_video_file(p):
+                        candidates.append(p)
+            except Exception:
+                try:
+                    for name in os.listdir(d):
+                        p = Path(d) / name
+                        if p.is_file() and is_video_file(p):
+                            candidates.append(p)
+                except Exception:
+                    continue
+        if not candidates:
+            self.error.emit("未发现可用素材，请先在【视频预处理】中归一化")
             return
 
         # 阶段二：混剪
-        result = self._concat_videos(normalized_dirs, out_dir)
+        result = self._concat_videos(candidates, out_dir)
         if result is None:
             return
         success, fail = result
@@ -1229,7 +1102,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.results_table.setRowCount(0)
         for p in paths:
             pt = Path(p)
-            dur = self._worker._probe_duration(pt)
+            dur = ffprobe_duration(pt)
             # 秒转换成 HH:MM:SS
             if dur:
                 dur = time.strftime("%H:%M:%S", time.gmtime(dur))
