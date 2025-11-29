@@ -271,7 +271,7 @@ def get_resolution_dir_topn(
 
 
 # 添加一个弹窗，提示用户当前的素材目录下还没对素材进行预处理，请点击【视频预处理】进行处理
-def confirm_resolution_dir(video_dir: str, normalized_dir: str = "normalized-1080p") -> bool:
+def confirm_resolution_dir(video_dir: str, normalized_dir: str = "normalized") -> bool:
     """确认用户是否确认使用该分辨率目录下的素材。"""
     normalized_dir = pathlib.Path(video_dir) / normalized_dir
     # 确认目录下是否已经有归一化完成的视频/图片

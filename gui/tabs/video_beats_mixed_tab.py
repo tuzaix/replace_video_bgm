@@ -94,7 +94,6 @@ class VideoBeatsMixedWorker(QtCore.QObject):
                 confirm_normalized_dirs[d] = confirm_resolution_dir(d) # 检查是否有预处理的内容
                 if not confirm_normalized_dirs[d]:
                     continue
-                # media_data = get_resolution_topn(d, top_n=1, media_type="all", recursive=False)
                 media_data = get_resolution_dir_topn(d, top_n=1, media_type="all", recursive=False)
                 files = media_data.get("files", []) if isinstance(media_data, dict) else []
                 for p in files:
