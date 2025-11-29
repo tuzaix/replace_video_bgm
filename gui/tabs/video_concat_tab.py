@@ -82,8 +82,6 @@ class ConcatWorker(QtCore.QObject):
         slices_per_output: int,
         quality_profile: str,
         concurrency: int,
-        trim_head_s: float,
-        trim_tail_s: float,
     ) -> None:
         """初始化工作者并快照所有运行参数。
 
@@ -103,10 +101,7 @@ class ConcatWorker(QtCore.QObject):
             质量档位代码："balanced" | "compact" | "tiny"。
         concurrency : int
             并发数量（用于归一化与拼接并行）。
-        trim_head_s : float
-            对素材裁剪的头部秒数。
-        trim_tail_s : float
-            对素材裁剪的尾部秒数。
+        
         """
         super().__init__()
         self.video_dirs = [str(Path(p)) for p in video_dirs]
@@ -116,8 +111,6 @@ class ConcatWorker(QtCore.QObject):
         self.slices_per_output = int(slices_per_output)
         self.quality_profile = str(quality_profile or "balanced")
         self.concurrency = max(1, int(concurrency))
-        self.trim_head_s = max(0.0, float(trim_head_s))
-        self.trim_tail_s = max(0.0, float(trim_tail_s))
         self._stopping = False
 
     def stop(self) -> None:
@@ -191,9 +184,9 @@ class ConcatWorker(QtCore.QObject):
             try:
                 if nd.is_dir():
                     for p in nd.iterdir():
-                        if p.is_file() and p.suffix.lower() == ".mp4":
+                        if is_video_file(p.name):
                             all_videos.append(p)
-                elif nd.is_file() and nd.suffix.lower() == ".mp4":
+                elif is_video_file(nd.name):
                     all_videos.append(nd)
             except Exception:
                 pass
@@ -374,8 +367,6 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.slices_spin: Optional[QtWidgets.QSpinBox] = None
         self.quality_combo: Optional[QtWidgets.QComboBox] = None
         self.concurrency_spin: Optional[QtWidgets.QSpinBox] = None
-        self.trim_head_dbl: Optional[QtWidgets.QDoubleSpinBox] = None
-        self.trim_tail_dbl: Optional[QtWidgets.QDoubleSpinBox] = None
 
         # 右侧控件引用
         self.progress_bar: Optional[QtWidgets.QProgressBar] = None
@@ -502,25 +493,6 @@ class VideoConcatTab(QtWidgets.QWidget):
         g2.addRow("合成质量档位", self.quality_combo)
         g2.addRow("并发数量", self.concurrency_spin)
 
-        # b.3 素材裁剪头尾
-        self.trim_head_dbl = QtWidgets.QDoubleSpinBox()
-        self.trim_head_dbl.setRange(0.0, 600.0)
-        self.trim_head_dbl.setDecimals(1)
-        self.trim_head_dbl.setSingleStep(0.5)
-        self.trim_head_dbl.setValue(0.0)
-        # 支持手动输入并即时解析
-        self.trim_head_dbl.setKeyboardTracking(True)
-        self.trim_head_dbl.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.trim_tail_dbl = QtWidgets.QDoubleSpinBox()
-        self.trim_tail_dbl.setRange(0.0, 600.0)
-        self.trim_tail_dbl.setDecimals(1)
-        self.trim_tail_dbl.setSingleStep(0.5)
-        self.trim_tail_dbl.setValue(0.0)
-        # 支持手动输入并即时解析
-        self.trim_tail_dbl.setKeyboardTracking(True)
-        self.trim_tail_dbl.setFocusPolicy(QtCore.Qt.StrongFocus)
-        g2.addRow("剪裁头部(秒)", self.trim_head_dbl)
-        g2.addRow("剪裁尾部(秒)", self.trim_tail_dbl)
 
         # 放入垂直 Splitter 以获得更好的伸缩控制
         vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -531,8 +503,15 @@ class VideoConcatTab(QtWidgets.QWidget):
             pass
         vsplit.addWidget(group1)
         vsplit.addWidget(group2)
+        spacer = QtWidgets.QWidget()
+        try:
+            spacer.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        except Exception:
+            pass
+        vsplit.addWidget(spacer)
         vsplit.setStretchFactor(0, 0)
-        vsplit.setStretchFactor(1, 1)
+        vsplit.setStretchFactor(1, 0)
+        vsplit.setStretchFactor(2, 1)
 
         vbox.addWidget(vsplit)
         return panel
@@ -867,8 +846,6 @@ class VideoConcatTab(QtWidgets.QWidget):
         slices = int(self.slices_spin.value()) if self.slices_spin else 1
         quality = self.quality_combo.currentData() if self.quality_combo else "balanced"
         concurrency = int(self.concurrency_spin.value()) if self.concurrency_spin else 1
-        trim_head = float(self.trim_head_dbl.value()) if self.trim_head_dbl else 0.0
-        trim_tail = float(self.trim_tail_dbl.value()) if self.trim_tail_dbl else 0.0
 
         # 基本校验
         for d in dirs:
@@ -884,9 +861,6 @@ class VideoConcatTab(QtWidgets.QWidget):
         if outputs < 1 or slices < 1 or concurrency < 1:
             QtWidgets.QMessageBox.warning(self, "提示", "混剪视频数量、切片数、并发数均需 ≥ 1")
             return None
-        if trim_head < 0 or trim_tail < 0:
-            QtWidgets.QMessageBox.warning(self, "提示", "裁剪秒数不能为负")
-            return None
 
         return {
             "video_dirs": dirs,
@@ -896,8 +870,6 @@ class VideoConcatTab(QtWidgets.QWidget):
             "slices": slices,
             "quality": quality,
             "concurrency": concurrency,
-            "trim_head": trim_head,
-            "trim_tail": trim_tail,
         }
 
     def _on_start_stop_clicked(self) -> None:
@@ -940,8 +912,6 @@ class VideoConcatTab(QtWidgets.QWidget):
                 slices_per_output=settings["slices"],
                 quality_profile=settings["quality"],
                 concurrency=settings["concurrency"],
-                trim_head_s=settings["trim_head"],
-                trim_tail_s=settings["trim_tail"],
             )
             self._worker.moveToThread(self._thread)
             # 信号连接
