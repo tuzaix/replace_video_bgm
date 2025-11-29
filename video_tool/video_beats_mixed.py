@@ -457,35 +457,6 @@ class VideoBeatsMixed:
         except Exception:
             traceback.print_exc()
             pass
-        # try:
-        #     for p in segs:
-        #         try:
-        #             if p.exists():
-        #                 p.unlink()
-        #         except Exception:
-        #             pass
-        #     try:
-        #         if video_no_audio and pathlib.Path(video_no_audio).exists():
-        #             pathlib.Path(video_no_audio).unlink()
-        #     except Exception:
-        #         pass
-        #     try:
-        #         cl = self.temp_dir / f"concat_list_{self.run_id}.txt"
-        #         if cl.exists():
-        #             cl.unlink()
-        #     except Exception:
-        #         pass
-        #     try:
-        #         if bgm and pathlib.Path(bgm).exists():
-        #             pathlib.Path(bgm).unlink()
-        #     except Exception:
-        #         pass
-        #     try:
-        #         shutil.rmtree(self.temp_dir, ignore_errors=True)
-        #     except Exception:
-        #         pass
-        # except Exception:
-        #     pass
         return final
 
 
