@@ -38,8 +38,9 @@ from PySide6 import QtWidgets, QtCore, QtGui
 from moviepy.editor import VideoFileClip
 
 from gui.utils import theme
+from utils.xprint import xprint
 from gui.precheck import run_preflight_checks
-from utils.calcu_video_info import get_resolution_topn, get_resolution_dir_topn, confirm_resolution_dir
+from utils.calcu_video_info import get_resolution_dir_topn, confirm_resolution_dir
 from utils.common_utils import is_audio_file, is_video_file, is_image_file
 from video_tool.beats_checkpoint import beats_checkpoint
 from video_tool.video_beats_mixed import video_beats_mixed
@@ -646,7 +647,7 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
                 "min_interval": (None if mode == "dynamic" else float(min_interval)),
                 "clip_seconds": clip_seconds,
             }
-            print("[xprint] video_beats_mixed_tab submit:", json.dumps(params, ensure_ascii=False))
+            xprint("[xprint] video_beats_mixed_tab submit:", json.dumps(params, ensure_ascii=False))
         except Exception:
             pass
 
