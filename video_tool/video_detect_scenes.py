@@ -72,7 +72,19 @@ class VideoDetectScenes:
         enable_silence_split = bool(cfg.get("enable_silence_split", enable_silence_split))
         window_s = float(cfg.get("window_s", window_s))
         try:
-            self.threshold = float(cfg.get("threshold", self.threshold))
+            cfg_th = cfg.get("threshold")
+            if cfg_th is not None:
+                try:
+                    cfg_th_f = float(cfg_th)
+                    th_f = float(self.threshold)
+                    if abs(cfg_th_f - th_f) <= 1e-9:
+                        self.threshold = cfg_th_f
+                    else:
+                        self.threshold = th_f
+                except Exception:
+                    self.threshold = float(self.threshold)
+            else:
+                self.threshold = float(self.threshold)
         except Exception:
             pass
 
