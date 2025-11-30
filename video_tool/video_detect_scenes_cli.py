@@ -2,7 +2,7 @@ import argparse
 import sys
 import traceback
 
-from .video_detect_scenes import VideoDetectScenes, save_scenes_results
+from .video_detect_scenes import VideoDetectScenes
 
 
 def main() -> None:

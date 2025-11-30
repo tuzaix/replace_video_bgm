@@ -4,21 +4,19 @@ import os
 import json
 import pathlib
 from typing import List, Tuple, Dict, Any, Optional
+import uuid
 import shutil
 import subprocess
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
-from utils.calcu_video_info import ffprobe_stream_info, ffmpeg_bin
+from utils.calcu_video_info import ffprobe_stream_info, ffmpeg_bin, ffprobe_duration
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffprobe=True)
 
-try:
-    from transnetv2_pytorch import TransNetV2  # type: ignore
-except Exception:
-    raise RuntimeError(
-        "未找到 transnetv2-pytorch。请先安装：pip install transnetv2-pytorch ffmpeg-python，"
-        "并确保系统已安装 FFmpeg 并配置到 PATH。"
-    )
+from transnetv2_pytorch import TransNetV2  # type: ignore
 import torch  # type: ignore
+import numpy as np  # type: ignore
+import librosa  # type: ignore
+import cv2  # type: ignore
 
 class VideoDetectScenes:
     """使用 TransNet V2 进行镜头分割并生成切片与元数据。"""
@@ -49,10 +47,11 @@ class VideoDetectScenes:
             pass
         return 30.0
 
-    def detect(self, video_path: str) -> Dict[str, Any]:
+    def detect(self, video_path: str, min_duration: float = 0.6, similarity_threshold: float = 0.85, hist_sample_offset: int = 5, enable_audio_snap: bool = False, snap_tolerance: float = 0.2, min_segment_sec: float = 0.5, enable_silence_split: bool = False) -> Dict[str, Any]:
+        """检测镜头，使用 TransNet 召回 + HSV 直方图相似度过滤 + 最小时长约束，可选音频吸附对齐。"""
         fps = self._get_fps(video_path)
-        scenes_frames: List[Tuple[int, int]] = []
-        scenes_seconds: List[Tuple[float, float]] = []
+        raw_frames: List[Tuple[int, int]] = []
+        raw_seconds: List[Tuple[float, float]] = []
         try:
             results = self.model.analyze_video(video_path, threshold=self.threshold)  # type: ignore[attr-defined]
             fps = float(results.get("fps", fps))
@@ -78,8 +77,8 @@ class VideoDetectScenes:
                         e = int(item[1])
                     else:
                         continue
-                    scenes_frames.append((s, e))
-                    scenes_seconds.append((float(s) / fps, float(e) / fps))
+                    raw_frames.append((s, e))
+                    raw_seconds.append((float(s) / fps, float(e) / fps))
                 except Exception:
                     continue
         except Exception:
@@ -99,18 +98,121 @@ class VideoDetectScenes:
                             e = int(item.get("end", item.get("end_frame", 0)))
                         else:
                             continue
-                        scenes_frames.append((s, e))
-                        scenes_seconds.append((float(s) / fps, float(e) / fps))
+                        raw_frames.append((s, e))
+                        raw_seconds.append((float(s) / fps, float(e) / fps))
                     except Exception:
                         continue
             except Exception:
-                scenes_frames = []
-                scenes_seconds = []
+                raw_frames = []
+                raw_seconds = []
+
+        cut_frames: List[int] = [int(round(seg[1] * fps)) for seg in raw_seconds if seg[1] > seg[0]]
+        cap = None
+        try:
+            cap = cv2.VideoCapture(video_path)
+            cv_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            if cv_fps > 1.0:
+                fps = cv_fps
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        except Exception:
+            total_frames = int(max([int(round(seg[1] * fps)) for seg in raw_seconds], default=0))
+
+        final_cut_frames: List[int] = []
+        last_cut_frame = 0
+        for cf in sorted(set(cut_frames)):
+            try:
+                if (cf - last_cut_frame) / max(1.0, fps) < float(min_duration):
+                    continue
+                prev_idx = max(0, cf - int(hist_sample_offset))
+                next_idx = min(max(0, total_frames - 1), cf + int(hist_sample_offset))
+                sim = None
+                if cap:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, prev_idx)
+                    ok1, f1 = cap.read()
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, next_idx)
+                    ok2, f2 = cap.read()
+                    if ok1 and ok2 and f1 is not None and f2 is not None:
+                        sim = float(self._hist_similarity(f1, f2))
+                if sim is not None and sim > float(similarity_threshold):
+                    continue
+                final_cut_frames.append(cf)
+                last_cut_frame = cf
+            except Exception:
+                continue
+        try:
+            if cap:
+                cap.release()
+        except Exception:
+            pass
+
+        cut_times: List[float] = [float(cf) / float(fps) for cf in final_cut_frames]
+        if enable_audio_snap:
+            audio_path: Optional[str] = None
+            try:
+                audio_path = self._extract_audio_tmp(video_path)
+                y, sr = librosa.load(audio_path, sr=None, mono=True)
+                onset_frames = librosa.onset.onset_detect(y=y, sr=sr, backtrack=True)
+                onset_times = librosa.frames_to_time(onset_frames, sr=sr)
+                if enable_silence_split:
+                    try:
+                        intervals = librosa.effects.split(y, top_db=30)
+                        for st, et in intervals:
+                            cut_times.append(float(et) / float(sr))
+                    except Exception:
+                        pass
+                cut_times = self._snap_cuts(cut_times, onset_times, snap_tolerance)
+            except Exception:
+                pass
+            finally:
+                try:
+                    if audio_path and os.path.isfile(audio_path):
+                        os.remove(audio_path)
+                        d = os.path.dirname(audio_path)
+                        if os.path.isdir(d) and not os.listdir(d):
+                            os.rmdir(d)
+                except Exception:
+                    pass
+
+        duration = 0.0
+        try:
+            duration = float(ffprobe_duration(pathlib.Path(video_path)) or 0.0)
+        except Exception:
+            duration = max([t for _, t in raw_seconds], default=0.0)
+        if duration > 0:
+            cut_times = [t for t in cut_times if 0.0 < t < duration]
+
+        cut_times_sorted = sorted(set([round(t, 3) for t in cut_times]))
+        segments: List[Tuple[float, float]] = []
+        last_t = 0.0
+        for ct in cut_times_sorted:
+            if ct - last_t >= float(min_segment_sec):
+                segments.append((last_t, ct))
+                last_t = ct
+        if duration > last_t + float(min_segment_sec):
+            segments.append((last_t, duration))
+
+        scenes_frames: List[Tuple[int, int]] = []
+        scenes_seconds: List[Tuple[float, float]] = []
+        for ss, ee in segments:
+            scenes_seconds.append((ss, ee))
+            scenes_frames.append((int(round(ss * fps)), int(round(ee * fps))))
+
         return {
             "fps": float(fps),
             "scenes_frames": scenes_frames,
             "scenes_seconds": scenes_seconds,
         }
+
+    def _hist_similarity(self, frame1, frame2) -> float:
+        """计算两帧画面的 HSV 直方图相关性，相似度越大越相似。"""
+        hsv1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2HSV)
+        hsv2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2HSV)
+        hist1 = cv2.calcHist([hsv1], [0, 1], None, [180, 256], [0, 180, 0, 256])
+        hist2 = cv2.calcHist([hsv2], [0, 1], None, [180, 256], [0, 180, 0, 256])
+        cv2.normalize(hist1, hist1, 0, 1, cv2.NORM_MINMAX)
+        cv2.normalize(hist2, hist2, 0, 1, cv2.NORM_MINMAX)
+        sim = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+        return float(sim)
 
     def _detect(self, video_path: str) -> Dict[str, Any]:
         fps = self._get_fps(video_path)
@@ -144,6 +246,61 @@ class VideoDetectScenes:
             "scenes_frames": scenes_frames,
             "scenes_seconds": scenes_seconds,
         }
+
+    def _extract_audio_tmp(self, video_path: str) -> str:
+        """提取临时音频 WAV 文件用于音频分析。"""
+        base_dir = os.path.dirname(os.path.abspath(video_path))
+        tmpdir = os.path.join(base_dir, "temp_detect")
+        os.makedirs(tmpdir, exist_ok=True)
+        out = os.path.join(tmpdir, f"audio_{uuid.uuid4().hex[:8]}.wav")
+        si = None
+        kwargs: Dict[str, Any] = {}
+        try:
+            if os.name == "nt":
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
+        except Exception:
+            kwargs = {}
+        cmd = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i",
+            video_path,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "22050",
+            out,
+        ]
+        subprocess.run(cmd, capture_output=True, **kwargs)
+        return out
+
+    def _snap_cuts(self, visual_cuts: List[float], audio_cuts: List[float], tolerance: float) -> List[float]:
+        """吸附对齐：将视觉切点吸附到附近音频节拍。"""
+        if not audio_cuts:
+            return visual_cuts
+        a = np.sort(np.array(audio_cuts, dtype=float))
+        out: List[float] = []
+        for v in visual_cuts:
+            idx = int(np.searchsorted(a, v))
+            candidates: List[float] = []
+            if idx < len(a):
+                candidates.append(float(a[idx]))
+            if idx > 0:
+                candidates.append(float(a[idx - 1]))
+            best = v
+            dist = float("inf")
+            for c in candidates:
+                d = abs(c - v)
+                if d < dist:
+                    dist = d
+                    best = c
+            out.append(best if dist <= tolerance else v)
+        return out
 
 
     def save(self, video_path: str, output_dir: str = None) -> Dict[str, Any]:
@@ -244,11 +401,3 @@ class VideoDetectScenes:
             "clips_meta": clips_meta,
         }
 
-def detect_scenes_transnet(video_path: str) -> Dict[str, Any]:
-    """函数式封装：返回镜头检测结果。"""
-    return VideoDetectScenes().detect(video_path)
-
-
-def save_scenes_results(video_path: str, output_dir: Optional[str] = None, device: str = "auto") -> Dict[str, Any]:
-    """函数式封装：保存镜头检测结果并输出切片。"""
-    return VideoDetectScenes().save(video_path, output_dir=output_dir)
