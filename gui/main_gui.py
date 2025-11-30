@@ -30,6 +30,7 @@ if not getattr(sys, "frozen", False):
 
 # 线程与设置的生命周期已迁移到各自的 Tab 内部，MainWindow 不再直接导入
 from gui.tabs.extract_frames_tab import ExtractFramesTab
+from gui.tabs.video_detect_scenes_tab import VideoDetectScenesTab
 from gui.tabs.video_concat_tab import VideoConcatTab
 from gui.tabs.generate_cover_tab import GenerateCoverTab
 from gui.tabs.video_bgm_replace_tab import VideoBgmReplaceTab
@@ -45,7 +46,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("短视频切片拼接+替换bgm工具(NVIDIA GPU版)")
+        self.setWindowTitle("短视频工具V1.0")
         # 初始窗口尺寸加大，尽量使左侧参数全部可见
         try:
             screen = QtWidgets.QApplication.primaryScreen()
@@ -92,6 +93,10 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "tab_name": "视频截图",
                 "tab_widget": ExtractFramesTab(self),
+            },
+            {
+                "tab_name": "镜头分割",
+                "tab_widget": VideoDetectScenesTab(self),
             },
             {
                 "tab_name": "合成封面",
