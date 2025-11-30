@@ -13,9 +13,12 @@ import librosa  # type: ignore
 import cv2  # type: ignore
 import traceback
 from utils.calcu_video_info import ffprobe_stream_info, ffmpeg_bin, ffprobe_duration
+from .scenes_config import SCENE_CONFIGS
 
 class VideoDetectScenes:
     """使用 TransNet V2 进行镜头分割并生成切片与元数据。"""
+
+    
 
     def __init__(self, device: str = "auto", threshold: float = 0.5) -> None:
         self.ffmpeg_bin = ffmpeg_bin
@@ -52,9 +55,25 @@ class VideoDetectScenes:
                         snap_tolerance: float = 0.2, 
                         min_segment_sec: float = 0.5, 
                         enable_silence_split: bool = False,
-                        window_s: float = 0.5
+                        window_s: float = 0.5,
+                        profile: Optional[str] = None
         ) -> Dict[str, Any]:
         """检测镜头，使用 TransNet 召回 + HSV 直方图相似度过滤 + 最小时长约束，可选音频吸附对齐。"""
+        if profile:
+            cfg = SCENE_CONFIGS.get(str(profile)) or {}
+            min_duration = float(cfg.get("min_duration", min_duration))
+            similarity_threshold = float(cfg.get("similarity_threshold", similarity_threshold))
+            hist_sample_offset = int(cfg.get("hist_sample_offset", hist_sample_offset))
+            enable_audio_snap = bool(cfg.get("enable_audio_snap", enable_audio_snap))
+            snap_tolerance = float(cfg.get("snap_tolerance", snap_tolerance))
+            min_segment_sec = float(cfg.get("min_segment_sec", min_segment_sec))
+            enable_silence_split = bool(cfg.get("enable_silence_split", enable_silence_split))
+            window_s = float(cfg.get("window_s", window_s))
+            try:
+                self.threshold = float(cfg.get("threshold", self.threshold))
+            except Exception:
+                pass
+
         fps = self._get_fps(video_path)
         raw_frames: List[Tuple[int, int]] = []
         raw_seconds: List[Tuple[float, float]] = []
