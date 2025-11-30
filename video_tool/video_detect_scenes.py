@@ -11,6 +11,7 @@ import torch  # type: ignore
 import numpy as np  # type: ignore
 import librosa  # type: ignore
 import cv2  # type: ignore
+import traceback
 from utils.calcu_video_info import ffprobe_stream_info, ffmpeg_bin, ffprobe_duration
 
 class VideoDetectScenes:
@@ -33,16 +34,26 @@ class VideoDetectScenes:
     def _get_fps(self, video_path: str) -> float:
         try:
             sinfo = ffprobe_stream_info(pathlib.Path(video_path))
-            fr = str(sinfo.get("r_frame_rate", ""))
-            print(fr)
+            fr = str(sinfo.get("r_frame_rate", "") or "")
             if fr and "/" in fr:
                 a, b = fr.split("/", 1)
-                return max(1.0, float(a) / max(1.0, float(b)))
+                aa = float(a) if a else 0.0
+                bb = float(b) if b else 1.0
+                return max(1.0, aa / max(1.0, bb))
         except Exception:
             pass
         return 30.0
 
-    def detect(self, video_path: str, min_duration: float = 0.6, similarity_threshold: float = 0.85, hist_sample_offset: int = 5, enable_audio_snap: bool = False, snap_tolerance: float = 0.2, min_segment_sec: float = 0.5, enable_silence_split: bool = False) -> Dict[str, Any]:
+    def detect(self, video_path: str, 
+                        min_duration: float = 0.6, 
+                        similarity_threshold: float = 0.85, 
+                        hist_sample_offset: int = 5, 
+                        enable_audio_snap: bool = False, 
+                        snap_tolerance: float = 0.2, 
+                        min_segment_sec: float = 0.5, 
+                        enable_silence_split: bool = False,
+                        window_s: float = 0.5
+        ) -> Dict[str, Any]:
         """检测镜头，使用 TransNet 召回 + HSV 直方图相似度过滤 + 最小时长约束，可选音频吸附对齐。"""
         fps = self._get_fps(video_path)
         raw_frames: List[Tuple[int, int]] = []
@@ -188,7 +199,7 @@ class VideoDetectScenes:
 
         if segments:
             try:
-                segments = self._refine_segments(video_path, segments, float(fps), float(min_segment_sec), float(similarity_threshold))
+                segments = self._refine_segments(video_path, segments, float(fps), float(min_segment_sec), float(similarity_threshold), window_s)
             except Exception:
                 tail_trim_sec = 0.3
                 new_segments: List[Tuple[float, float]] = []
@@ -224,7 +235,7 @@ class VideoDetectScenes:
         sim = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
         return float(sim)
 
-    def _refine_segments(self, video_path: str, segments: List[Tuple[float, float]], fps: float, min_segment_sec: float, sim_threshold: float) -> List[Tuple[float, float]]:
+    def _refine_segments(self, video_path: str, segments: List[Tuple[float, float]], fps: float, min_segment_sec: float, sim_threshold: float, window_s: float = 0.5) -> List[Tuple[float, float]]:
         cap = None
         try:
             cap = cv2.VideoCapture(video_path)
@@ -243,7 +254,6 @@ class VideoDetectScenes:
             except Exception:
                 return None, False
 
-        window_s = 0.5
         window_f = int(round(window_s * max(1.0, fps)))
         out: List[Tuple[float, float]] = []
         n = len(segments)
