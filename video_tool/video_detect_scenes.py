@@ -59,18 +59,45 @@ class VideoDetectScenes:
                         profile: Optional[str] = None
         ) -> Dict[str, Any]:
         """检测镜头，使用 TransNet 召回 + HSV 直方图相似度过滤 + 最小时长约束，可选音频吸附对齐。"""
-        if profile:
-            cfg = SCENE_CONFIGS.get(str(profile)) or {}
-            min_duration = float(cfg.get("min_duration", min_duration))
-            similarity_threshold = float(cfg.get("similarity_threshold", similarity_threshold))
-            hist_sample_offset = int(cfg.get("hist_sample_offset", hist_sample_offset))
-            enable_audio_snap = bool(cfg.get("enable_audio_snap", enable_audio_snap))
-            snap_tolerance = float(cfg.get("snap_tolerance", snap_tolerance))
-            min_segment_sec = float(cfg.get("min_segment_sec", min_segment_sec))
-            enable_silence_split = bool(cfg.get("enable_silence_split", enable_silence_split))
-            window_s = float(cfg.get("window_s", window_s))
+        if not profile:
+            profile = "general"
+        cfg = SCENE_CONFIGS.get(str(profile)) or {}
+        
+        min_duration = float(cfg.get("min_duration", min_duration))
+        similarity_threshold = float(cfg.get("similarity_threshold", similarity_threshold))
+        hist_sample_offset = int(cfg.get("hist_sample_offset", hist_sample_offset))
+        enable_audio_snap = bool(cfg.get("enable_audio_snap", enable_audio_snap))
+        snap_tolerance = float(cfg.get("snap_tolerance", snap_tolerance))
+        min_segment_sec = float(cfg.get("min_segment_sec", min_segment_sec))
+        enable_silence_split = bool(cfg.get("enable_silence_split", enable_silence_split))
+        window_s = float(cfg.get("window_s", window_s))
+        try:
+            self.threshold = float(cfg.get("threshold", self.threshold))
+        except Exception:
+            pass
+
+        if profile == "general":
             try:
-                self.threshold = float(cfg.get("threshold", self.threshold))
+                tuned = self._auto_tune_config(video_path, {
+                    "threshold": self.threshold,
+                    "similarity_threshold": similarity_threshold,
+                    "hist_sample_offset": hist_sample_offset,
+                    "min_duration": min_duration,
+                    "min_segment_sec": min_segment_sec,
+                    "enable_audio_snap": enable_audio_snap,
+                    "snap_tolerance": snap_tolerance,
+                    "enable_silence_split": enable_silence_split,
+                    "window_s": window_s,
+                })
+                self.threshold = float(tuned.get("threshold", self.threshold))
+                similarity_threshold = float(tuned.get("similarity_threshold", similarity_threshold))
+                hist_sample_offset = int(tuned.get("hist_sample_offset", hist_sample_offset))
+                min_duration = float(tuned.get("min_duration", min_duration))
+                min_segment_sec = float(tuned.get("min_segment_sec", min_segment_sec))
+                enable_audio_snap = bool(tuned.get("enable_audio_snap", enable_audio_snap))
+                snap_tolerance = float(tuned.get("snap_tolerance", snap_tolerance))
+                enable_silence_split = bool(tuned.get("enable_silence_split", enable_silence_split))
+                window_s = float(tuned.get("window_s", window_s))
             except Exception:
                 pass
 
@@ -254,6 +281,85 @@ class VideoDetectScenes:
         sim = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
         return float(sim)
 
+    def _auto_tune_config(self, video_path: str, base: Dict[str, Any]) -> Dict[str, Any]:
+        """根据视频的画面与音频特征对场景参数进行自适应调整。"""
+        cfg = dict(base)
+        fps = max(1.0, float(self._get_fps(video_path)))
+        cap = None
+        total_frames = 0
+        try:
+            cap = cv2.VideoCapture(video_path)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        except Exception:
+            cap = None
+            total_frames = 0
+
+        motion_level = 0.0
+        try:
+            if cap and total_frames > int(fps * 2):
+                samples = min(80, max(10, int(total_frames / max(1, int(fps * 3)))))
+                idxs = [int(i * total_frames / (samples + 1)) for i in range(1, samples + 1)]
+                prev = None
+                diffs = []
+                for idx in idxs:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                    ok, f = cap.read()
+                    if not ok or f is None:
+                        continue
+                    if prev is not None:
+                        sim = self._hist_similarity(prev, f)
+                        diffs.append(max(0.0, 1.0 - float(sim)))
+                    prev = f
+                motion_level = float(np.mean(diffs)) if diffs else 0.0
+        except Exception:
+            motion_level = 0.0
+
+        onset_density = 0.0
+        audio_path = None
+        try:
+            audio_path = self._extract_audio_tmp(video_path)
+            y, sr = librosa.load(audio_path, sr=None, mono=True)
+            onset_frames = librosa.onset.onset_detect(y=y, sr=sr, backtrack=True)
+            onset_times = librosa.frames_to_time(onset_frames, sr=sr)
+            duration = float(ffprobe_duration(pathlib.Path(video_path)) or 0.0) or (float(total_frames) / fps)
+            onset_density = float(len(onset_times)) / max(1.0, duration)
+        except Exception:
+            onset_density = 0.0
+        finally:
+            try:
+                if audio_path and os.path.isfile(audio_path):
+                    os.remove(audio_path)
+                    d = os.path.dirname(audio_path)
+                    if os.path.isdir(d) and not os.listdir(d):
+                        os.rmdir(d)
+            except Exception:
+                pass
+
+        if motion_level >= 0.25:
+            cfg["threshold"] = max(float(cfg.get("threshold", 0.6)), 0.65)
+            cfg["similarity_threshold"] = max(float(cfg.get("similarity_threshold", 0.87)), 0.9)
+            cfg["window_s"] = max(float(cfg.get("window_s", 0.6)), 0.8)
+            cfg["min_duration"] = min(float(cfg.get("min_duration", 0.6)), 0.55)
+        elif motion_level <= 0.10:
+            cfg["threshold"] = min(float(cfg.get("threshold", 0.6)), 0.5)
+            cfg["similarity_threshold"] = min(float(cfg.get("similarity_threshold", 0.87)), 0.86)
+            cfg["window_s"] = min(float(cfg.get("window_s", 0.6)), 0.5)
+            cfg["min_duration"] = max(float(cfg.get("min_duration", 0.6)), 0.65)
+
+        if onset_density >= 0.35:
+            cfg["enable_audio_snap"] = True
+            cfg["snap_tolerance"] = max(float(cfg.get("snap_tolerance", 0.25)), 0.25)
+        else:
+            cfg["enable_audio_snap"] = bool(cfg.get("enable_audio_snap", False))
+
+        cfg["min_segment_sec"] = max(0.5, float(cfg.get("min_segment_sec", 0.6)))
+        try:
+            if cap:
+                cap.release()
+        except Exception:
+            pass
+        return cfg
+
     def _refine_segments(self, video_path: str, segments: List[Tuple[float, float]], fps: float, min_segment_sec: float, sim_threshold: float, window_s: float = 0.5) -> List[Tuple[float, float]]:
         cap = None
         try:
@@ -412,12 +518,13 @@ class VideoDetectScenes:
         return out
 
 
-    def save(self, video_path: str, output_dir: str = None) -> Dict[str, Any]:
+    def save(self, video_path: str, output_dir: str = None, **kwargs) -> Dict[str, Any]:
         vp = pathlib.Path(video_path)
         out_dir = pathlib.Path(output_dir or os.path.dirname(video_path)) / "scenes"
         out_dir.mkdir(parents=True, exist_ok=True)
-    
-        data = self.detect(video_path)
+        
+        kw = {k: v for k, v in kwargs.items() if v is not None}
+        data = self.detect(video_path, **kw)
         json_path = out_dir / (vp.stem + "_scenes.json")
         txt_path = out_dir / (vp.stem + "_scenes.txt")
 

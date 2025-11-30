@@ -3,6 +3,7 @@ import sys
 import traceback
 
 from .video_detect_scenes import VideoDetectScenes
+from .scenes_config import SCENE_CONFIGS
 
 
 def main() -> None:
@@ -31,25 +32,59 @@ def main() -> None:
         help="设备选择：auto/cpu/cuda（默认 auto）",
     )
     parser.add_argument(
+        "-p",
+        "--profile",
+        dest="profile",
+        type=str,
+        choices=list(SCENE_CONFIGS.keys()),
+        default="general",
+        help="场景配置（默认 general，含智能自适应）",
+    )
+    parser.add_argument(
         "-t",
         "--threshold",
         dest="threshold",
         type=float,
         default=0.5,
-        help="镜头分割阈值（默认 0.5）",
+        help="模型切点阈值（若设置 profile 将以场景配置为准）",
     )
+    parser.add_argument("--min_duration", dest="min_duration", type=float, default=None)
+    parser.add_argument("--similarity", dest="similarity_threshold", type=float, default=None)
+    parser.add_argument("--hist_offset", dest="hist_sample_offset", type=int, default=None)
+    parser.add_argument("--audio_snap", dest="enable_audio_snap", action="store_true")
+    parser.add_argument("--no_audio_snap", dest="enable_audio_snap", action="store_false")
+    parser.set_defaults(enable_audio_snap=None)
+    parser.add_argument("--snap_tolerance", dest="snap_tolerance", type=float, default=None)
+    parser.add_argument("--min_segment", dest="min_segment_sec", type=float, default=None)
+    parser.add_argument("--silence_split", dest="enable_silence_split", action="store_true")
+    parser.add_argument("--no_silence_split", dest="enable_silence_split", action="store_false")
+    parser.set_defaults(enable_silence_split=None)
+    parser.add_argument("--window_s", dest="window_s", type=float, default=None)
 
     args = parser.parse_args()
 
     print(f"视频文件: {args.video_path}")
     print(f"输出目录: {args.output_dir or '默认（视频同目录的 scenes）'}")
     print(f"设备选择: {args.device}")
+    print(f"场景: {args.profile}")
     print(f"阈值: {args.threshold}")
     print("-" * 30)
 
     try:
         detect_scenes = VideoDetectScenes(device=args.device, threshold=args.threshold)
-        saved = detect_scenes.save(args.video_path, output_dir=args.output_dir)
+        saved = detect_scenes.save(
+            args.video_path,
+            output_dir=args.output_dir,
+            profile=args.profile,
+            min_duration=args.min_duration,
+            similarity_threshold=args.similarity_threshold,
+            hist_sample_offset=args.hist_sample_offset,
+            enable_audio_snap=args.enable_audio_snap,
+            snap_tolerance=args.snap_tolerance,
+            min_segment_sec=args.min_segment_sec,
+            enable_silence_split=args.enable_silence_split,
+            window_s=args.window_s,
+        )
         clips_meta = list(saved.get("clips_meta", []))
         print("AI检测完成，前3个镜头：")
         preview_count = min(3, len(clips_meta))
