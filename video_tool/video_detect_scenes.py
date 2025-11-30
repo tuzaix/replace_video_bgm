@@ -5,18 +5,13 @@ import json
 import pathlib
 from typing import List, Tuple, Dict, Any, Optional
 import uuid
-import shutil
 import subprocess
-
-from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
-from utils.calcu_video_info import ffprobe_stream_info, ffmpeg_bin, ffprobe_duration
-bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffprobe=True)
-
 from transnetv2_pytorch import TransNetV2  # type: ignore
 import torch  # type: ignore
 import numpy as np  # type: ignore
 import librosa  # type: ignore
 import cv2  # type: ignore
+from utils.calcu_video_info import ffprobe_stream_info, ffmpeg_bin, ffprobe_duration
 
 class VideoDetectScenes:
     """使用 TransNet V2 进行镜头分割并生成切片与元数据。"""
@@ -191,6 +186,21 @@ class VideoDetectScenes:
         if duration > last_t + float(min_segment_sec):
             segments.append((last_t, duration))
 
+        if segments:
+            try:
+                segments = self._refine_segments(video_path, segments, float(fps), float(min_segment_sec), float(similarity_threshold))
+            except Exception:
+                tail_trim_sec = 0.3
+                new_segments: List[Tuple[float, float]] = []
+                n = len(segments)
+                for i, (ss_i, ee_i) in enumerate(segments):
+                    if i < n - 1:
+                        ee_trim = max(ss_i + float(min_segment_sec), ee_i - float(tail_trim_sec))
+                        new_segments.append((ss_i, ee_trim if ee_trim > ss_i else ee_i))
+                    else:
+                        new_segments.append((ss_i, ee_i))
+                segments = new_segments
+
         scenes_frames: List[Tuple[int, int]] = []
         scenes_seconds: List[Tuple[float, float]] = []
         for ss, ee in segments:
@@ -213,6 +223,76 @@ class VideoDetectScenes:
         cv2.normalize(hist2, hist2, 0, 1, cv2.NORM_MINMAX)
         sim = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
         return float(sim)
+
+    def _refine_segments(self, video_path: str, segments: List[Tuple[float, float]], fps: float, min_segment_sec: float, sim_threshold: float) -> List[Tuple[float, float]]:
+        cap = None
+        try:
+            cap = cv2.VideoCapture(video_path)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        except Exception:
+            total_frames = 0
+
+        def read_frame(idx: int):
+            try:
+                if not cap:
+                    return None, False
+                idx = max(0, min(int(idx), max(0, total_frames - 1)))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ok, f = cap.read()
+                return (f if ok else None), ok
+            except Exception:
+                return None, False
+
+        window_s = 0.5
+        window_f = int(round(window_s * max(1.0, fps)))
+        out: List[Tuple[float, float]] = []
+        n = len(segments)
+        for i, (ss_i, ee_i) in enumerate(segments):
+            start_f = int(round(ss_i * fps))
+            end_f = int(round(ee_i * fps))
+            prev_f = max(0, start_f - 1)
+            next_start_f = end_f + 1
+            if i < n - 1:
+                next_start_f = int(round(segments[i + 1][0] * fps))
+
+            new_start_f = start_f
+            ref_prev, ok_prev = read_frame(prev_f)
+            if ok_prev and ref_prev is not None:
+                head_limit = min(start_f + window_f, max(start_f, end_f - int(round(min_segment_sec * fps))))
+                for c in range(start_f, head_limit + 1):
+                    f_c, ok_c = read_frame(c)
+                    if ok_c and f_c is not None:
+                        sim = self._hist_similarity(ref_prev, f_c)
+                        if sim < sim_threshold:
+                            new_start_f = c
+                            break
+
+            new_end_f = end_f
+            if i < n - 1:
+                ref_next, ok_next = read_frame(next_start_f)
+                if ok_next and ref_next is not None:
+                    tail_start = max(start_f + int(round(min_segment_sec * fps)), end_f - window_f)
+                    for c in range(end_f, tail_start - 1, -1):
+                        f_c, ok_c = read_frame(c)
+                        if ok_c and f_c is not None:
+                            sim = self._hist_similarity(ref_next, f_c)
+                            if sim < sim_threshold:
+                                new_end_f = c
+                                break
+
+            new_ss = max(ss_i, float(new_start_f) / float(max(1.0, fps)))
+            new_ee = min(ee_i, float(new_end_f) / float(max(1.0, fps)))
+            if new_ee - new_ss < float(min_segment_sec):
+                new_ss = ss_i
+                new_ee = ee_i
+            out.append((new_ss, new_ee))
+
+        try:
+            if cap:
+                cap.release()
+        except Exception:
+            pass
+        return out
 
     def _detect(self, video_path: str) -> Dict[str, Any]:
         fps = self._get_fps(video_path)
@@ -400,4 +480,3 @@ class VideoDetectScenes:
             "clips": clips,
             "clips_meta": clips_meta,
         }
-

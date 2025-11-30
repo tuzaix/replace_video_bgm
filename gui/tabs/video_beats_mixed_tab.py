@@ -311,7 +311,7 @@ class VideoBeatsMixedTab(QtWidgets.QWidget):
         row_out = QtWidgets.QHBoxLayout()
         row_out.addWidget(QtWidgets.QLabel("合成输出："), 0)
         self.output_dir_edit = QtWidgets.QLineEdit()
-        self.output_dir_edit.setPlaceholderText("为空则默认 <音频文件父目录>/卡点视频")
+        self.output_dir_edit.setPlaceholderText("不能为空")
         btn_browse_out = QtWidgets.QPushButton("浏览…")
         btn_browse_out.clicked.connect(self._on_browse_output_dir)
         row_out.addWidget(self.output_dir_edit, 1)
