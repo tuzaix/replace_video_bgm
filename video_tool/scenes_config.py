@@ -2,6 +2,17 @@ from typing import Dict, Any, Optional
 
 
 SCENE_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "general": {
+        "threshold": 0.6,
+        "similarity_threshold": 0.87,
+        "hist_sample_offset": 6,
+        "min_duration": 0.55,
+        "min_segment_sec": 0.6,
+        "enable_audio_snap": True,
+        "snap_tolerance": 0.25,
+        "enable_silence_split": False,
+        "window_s": 0.6,
+    },
     "ecommerce": {
         "threshold": 0.55,
         "similarity_threshold": 0.85,
