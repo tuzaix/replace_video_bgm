@@ -529,10 +529,13 @@ class VideoDetectScenes:
             out.append(best if dist <= tolerance else v)
         return out
 
-
     def save(self, video_path: str, output_dir: str = None, **kwargs) -> Dict[str, Any]:
         vp = pathlib.Path(video_path)
-        out_dir = pathlib.Path(output_dir or os.path.dirname(video_path)) / "scenes"
+        if output_dir: # 指定路径则使用
+            out_dir = pathlib.Path(output_dir)
+        else: # 未指定路径
+            out_dir = pathlib.Path(os.path.dirname(video_path)) / "scenes"
+
         out_dir.mkdir(parents=True, exist_ok=True)
         
         kw = {k: v for k, v in kwargs.items() if v is not None}

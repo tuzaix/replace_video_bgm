@@ -46,9 +46,11 @@ class VideoDetectScenesWorker(QtCore.QObject):
                     if self._stopping:
                         break
                     in_path = os.path.join(d, name)
-                    base_dir = output_root.strip() or d
-                    stem = Path(in_path).stem
-                    out_dir = os.path.join(base_dir, stem)
+                    if output_root: # 指定了输出目录，则直接使用即可
+                        out_dir = output_root.strip() 
+                    else: # 未指定输出目录，则使用视频所在目录
+                        out_dir = os.path.join(d, Path(in_path).stem, "scenes")
+
                     try:
                         detector = VideoDetectScenes(device="auto", threshold=float(threshold))
                         saved = detector.save(in_path, output_dir=out_dir, profile=profile)
