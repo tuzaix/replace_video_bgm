@@ -14,7 +14,7 @@ from utils.gpu_detect import is_nvenc_available
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 from utils.xprint import xprint
 from utils.common_utils import is_video_file, is_image_file
-from utils.calcu_video_info import ffprobe_duration, ffprobe_stream_info
+from utils.calcu_video_info import ffprobe_duration, ffprobe_stream_info, ffmpeg_bin, ffprobe_bin
 
 class VideoBeatsMixed:
     """根据 BGM 卡点元数据与用户选择窗口，使用视频/图片素材合成卡点视频。"""
@@ -69,8 +69,8 @@ class VideoBeatsMixed:
         except Exception:
             pass
         env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffprobe=False)
-        self.ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg") or "ffmpeg"
-        self.ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe") or "ffprobe"
+        self.ffmpeg_bin = ffmpeg_bin
+        self.ffprobe_bin = ffprobe_bin
         try:
             self._use_nvenc = bool(is_nvenc_available())
         except Exception:
