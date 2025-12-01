@@ -266,9 +266,7 @@ def get_resolution_dir_topn(
             "files": v["files"],
         } for k, v in items[: max(1, int(top_n))]
     ]
-    topn_data = get_resolution_topn(dir_path, top_n=top_n, recursive=recursive)
     return topn_data[0] if top_n == 1 else topn_data
-
 
 # 添加一个弹窗，提示用户当前的素材目录下还没对素材进行预处理，请点击【视频预处理】进行处理
 def confirm_resolution_dir(video_dir: str, normalized_dir: str = "normalized") -> bool:
