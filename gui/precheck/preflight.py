@@ -37,7 +37,7 @@ from .license_check import (
 )
 from .runtime_paths import runtime_base_dir, resource_path
 
-def run_preflight_checks(app: QtWidgets.QApplication) -> bool:
+def _run_preflight_checks(app: QtWidgets.QApplication) -> bool:
     """Run startup preflight checks: GPU requirement and license check.
 
     This function orchestrates two independent checks and their UI prompts:
@@ -74,6 +74,21 @@ def run_preflight_checks(app: QtWidgets.QApplication) -> bool:
         return False
 
     return True
+
+def run_preflight_checks(app=None) -> bool:
+    """Wrapper for `_run_preflight_checks` that accepts optional `app`.
+
+    When `app` is not provided, attempts to use `QtWidgets.QApplication.instance()`.
+    Returns `False` if no application instance is available or an error occurs.
+    """
+    try:
+        if app is None:
+            app = QtWidgets.QApplication.instance()
+        if app is None:
+            return False
+        return _run_preflight_checks(app)
+    except Exception:
+        return False
 
 
 __all__ = [
