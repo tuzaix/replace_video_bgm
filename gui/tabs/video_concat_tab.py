@@ -457,14 +457,14 @@ class VideoConcatTab(QtWidgets.QWidget):
 
         # b.1 输出数量 & 每个混剪切片数
         self.outputs_spin = QtWidgets.QSpinBox()
-        self.outputs_spin.setRange(1, 100)
+        self.outputs_spin.setRange(1, 1000)
         self.outputs_spin.setValue(3)
         # 支持手动输入并即时解析
         self.outputs_spin.setKeyboardTracking(True)
         self.outputs_spin.setAccelerated(True)
         self.outputs_spin.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.slices_spin = QtWidgets.QSpinBox()
-        self.slices_spin.setRange(1, 50)
+        self.slices_spin.setRange(1, 100)
         self.slices_spin.setValue(8)
         # 支持手动输入并即时解析
         self.slices_spin.setKeyboardTracking(True)
