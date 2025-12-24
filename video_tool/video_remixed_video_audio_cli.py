@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--no-gpu", action="store_false", dest="gpu", help="禁用 GPU 加速")
     parser.add_argument("--profile", "-p", choices=["visual", "balanced", "size"], default="balanced", 
                         help="编码档位: visual(观感优先), balanced(平衡), size(体积优先)。默认 balanced")
+    parser.add_argument("--video_type", "-t", choices=["shorts", "video"], default="shorts",
+                        help="输出视频类型: shorts (1080x1920, 竖屏), video (1920x1080, 横屏)。默认 shorts")
 
     args = parser.parse_args()
     
@@ -34,7 +36,8 @@ def main():
         segment_dir=args.segment_dir, 
         output_dir=args.output_dir,
         use_gpu=args.gpu,
-        encode_profile=args.profile
+        encode_profile=args.profile,
+        video_type=args.video_type
     )
     
     # 开始处理
