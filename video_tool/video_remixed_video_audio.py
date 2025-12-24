@@ -33,7 +33,8 @@ class VideoRemixedVideoAudio:
     根据模仿视频的音频时长，从素材库中随机挑选视频切片进行混剪合成。
     """
 
-    def __init__(self, imitation_dir: str, segment_dir: str, output_dir: Optional[str] = None, use_gpu: bool = True, encode_profile: str = "balanced"):
+    def __init__(self, imitation_dir: str, segment_dir: str, output_dir: Optional[str] = None, 
+                 use_gpu: bool = True, encode_profile: str = "balanced", video_type: str = "shorts"):
         """
         初始化混剪类。
 
@@ -42,11 +43,19 @@ class VideoRemixedVideoAudio:
         :param output_dir: 输出目录，如果为 None 则在 imitation_dir 下创建 remixed 目录
         :param use_gpu: 是否使用 GPU 加速
         :param encode_profile: 编码档位 (visual/balanced/size)
+        :param video_type: 视频类型 (shorts: 1080x1920, video: 1920x1080)
         """
         self.imitation_dir = Path(imitation_dir)
         self.segment_dir = Path(segment_dir)
         self.use_gpu = use_gpu
         self.encode_profile = encode_profile
+        self.video_type = video_type.lower()
+
+        # 根据视频类型确定目标分辨率
+        if self.video_type == "video":
+            self.target_res = (1920, 1080)
+        else:
+            self.target_res = (1080, 1920)
 
         if output_dir:
             self.output_dir = Path(output_dir)
@@ -54,9 +63,14 @@ class VideoRemixedVideoAudio:
             self.output_dir = self.imitation_dir / "remixed"
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        # 音频剥离的临时目录放到模仿视频目录下
-        self.temp_dir = self.imitation_dir / "_temp_audio_extract"
+        # 音频剥离和视频标准化的临时目录
+        self.temp_dir = self.imitation_dir / "_temp_remix_work"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.norm_dir = self.temp_dir / "normalized_segments"
+        self.norm_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 缓存已标准化的分片路径 { (path, resolution): norm_path }
+        self._norm_cache: Dict[Tuple[str, Tuple[int, int]], Path] = {}
 
     def _get_encoding_opts(self) -> List[str]:
         """
@@ -239,17 +253,15 @@ class VideoRemixedVideoAudio:
 
                 # 提取路径列表
                 selected_paths = [item[0] for item in selected_data]
-                # 以挑选出的第一个素材的分辨率作为混剪视频的目标分辨率
-                target_res = selected_data[0][1]
                 
-                print(f"  📺 混剪目标分辨率: {target_res[0]}x{target_res[1]}")
+                print(f"  📺 混剪目标分辨率: {self.target_res[0]}x{self.target_res[1]} ({self.video_type})")
 
                 # 3. 合成视频
                 output_name = f"{video_path.stem}_remix_{i+1:02d}.mp4"
                 output_path = self.output_dir / output_name
                 
                 success = self._combine_segments_with_audio(
-                    selected_paths, audio_path, audio_duration, target_res, output_path
+                    selected_paths, audio_path, audio_duration, self.target_res, output_path
                 )
                 
                 if success:
@@ -265,6 +277,75 @@ class VideoRemixedVideoAudio:
                 pass
         print(f"\n🎉 处理完成！输出目录: {self.output_dir}")
 
+    def _normalize_segment(self, segment_path: Path, target_res: Tuple[int, int]) -> Optional[Path]:
+        """
+        将单个视频片段标准化为统一的分辨率、帧率和格式（MPEG-TS），以减少最终合成时的内存占用。
+        
+        :param segment_path: 原始视频路径
+        :param target_res: 目标分辨率 (width, height)
+        :return: 标准化后的 TS 文件路径
+        """
+        cache_key = (str(segment_path.resolve()), target_res)
+        if cache_key in self._norm_cache:
+            norm_path = self._norm_cache[cache_key]
+            if norm_path.exists():
+                return norm_path
+
+        width, height = target_res
+        # 使用稳定的文件名以便在同一次运行中复用
+        # 移除了时间戳，改用简单的 stem + resolution
+        norm_filename = f"norm_{segment_path.stem}_{width}x{height}.ts"
+        norm_path = self.norm_dir / norm_filename
+
+        # 标准化命令：缩放、填充、统一帧率(30)、去除音频
+        # 使用较快的预设以节省时间，TS 格式对拼接非常友好
+        cmd = [
+            ffmpeg_bin, "-y",
+        ]
+
+        # 如果启用 GPU，在输入前尝试添加硬件加速解码（可选，但编码加速更关键）
+        if self.use_gpu:
+            # 注意：某些格式硬件解码可能失败，这里主要加速编码
+            pass
+
+        cmd.extend(["-i", str(segment_path)])
+        
+        # 视频滤镜：缩放、填充、统一帧率
+        vf_chain = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30"
+        cmd.extend(["-vf", vf_chain])
+        
+        cmd.append("-an") # 标准化过程不需要音频
+
+        if self.use_gpu:
+            # 使用 NVIDIA GPU 加速编码
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-preset", "p4", # p4 是较快的平衡档位
+                "-cq", "20",     # 保持高质量
+                "-rc", "vbr",
+                "-pix_fmt", "yuv420p"
+            ])
+        else:
+            # 使用 CPU 编码
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18"
+            ])
+
+        cmd.extend([
+            "-f", "mpegts",
+            str(norm_path)
+        ])
+
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, **_popen_silent_kwargs())
+            self._norm_cache[cache_key] = norm_path
+            return norm_path
+        except Exception as e:
+            print(f"❌ 标准化分片失败 {segment_path.name}: {e}")
+            return None
+
     def _combine_segments_with_audio(
         self, 
         video_segments: List[Path], 
@@ -274,84 +355,64 @@ class VideoRemixedVideoAudio:
         output_path: Path
     ) -> bool:
         """
-        拼接视频素材并合成提取出的音频。
-        使用 filter_complex_script 避免命令行过长。
-
-        :param video_segments: 挑选出的视频切片列表
-        :param audio_path: 提取出的音频文件路径
-        :param target_duration: 目标时长（音频时长）
-        :param resolution: 目标分辨率 (width, height)
-        :param output_path: 最终合成视频的输出路径
-        :return: 是否合成成功
+        优化后的视频合成逻辑：先逐个标准化分片，再使用 concat demuxer 合并。
+        极大地减少了 FFmpeg 的内存占用。
         """
-        width, height = resolution
-        
-        # 构造 FFmpeg concat 滤镜脚本
-        filter_script_path = self.temp_dir / f"filter_script_{int(time.time())}_{random.randint(1000, 9999)}.txt"
-        
-        filter_lines = []
-        for i, p in enumerate(video_segments):
-            # 对每个片段进行缩放、填充、统一帧率和采样率
-            # force_original_aspect_ratio=decrease 保持比例缩放，不足部分 pad 补齐
-            line = (
-                f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v{i}];"
-            )
-            filter_lines.append(line)
-        
-        # 拼接视频流
-        concat_v_inputs = "".join([f"[v{i}]" for i in range(len(video_segments))])
-        filter_lines.append(f"{concat_v_inputs}concat=n={len(video_segments)}:v=1:a=0[outv]")
-        
-        with open(filter_script_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(filter_lines))
-        
-        cmd = [
-            ffmpeg_bin, "-y"
-        ]
-        # 添加所有视频切片输入
+        # 1. 逐个标准化分片
+        normalized_paths = []
         for p in video_segments:
-            cmd.extend(["-i", str(p)])
-            
-        # 添加音频输入
-        cmd.extend(["-i", str(audio_path)])
+            norm_p = self._normalize_segment(p, resolution)
+            if norm_p:
+                normalized_paths.append(norm_p)
         
-        # 最后一个输入是音频，索引为 len(video_segments)
-        audio_index = len(video_segments)
-        
-        cmd.extend([
-            "-filter_complex_script", str(filter_script_path),
-            "-map", "[outv]",
-            "-map", f"{audio_index}:a",
-        ])
+        if not normalized_paths:
+            return False
 
-        # 使用动态生成的编码参数
+        # 2. 创建 concat 列表文件
+        concat_list_path = self.temp_dir / f"concat_list_{int(time.time())}.txt"
+        with open(concat_list_path, "w", encoding="utf-8") as f:
+            for p in normalized_paths:
+                # 写入格式: file 'path/to/file'
+                # 注意路径中的反斜杠在 FFmpeg concat 协议中需要转义，或者统一用正斜杠
+                f.write(f"file '{str(p.absolute()).replace('\\', '/')}'\n")
+
+        # 3. 最终合成
+        # 使用 concat demuxer 合并视频，并混入音频
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_list_path),
+            "-i", str(audio_path),
+            "-map", "0:v:0", # 使用 concat 后的视频流
+            "-map", "1:a:0", # 使用输入音频流
+        ]
+
+        # 添加动态编码参数
         cmd.extend(self._get_encoding_opts())
 
         cmd.extend([
             "-c:a", "aac",
             "-b:a", "192k",
-            "-t", f"{target_duration:.3f}", # 确保时长对齐
+            "-t", f"{target_duration:.3f}",
             "-movflags", "+faststart",
             str(output_path)
         ])
-        
+
         try:
-            # 运行 FFmpeg
             subprocess.run(cmd, check=True, capture_output=True, **_popen_silent_kwargs())
             return True
         except subprocess.CalledProcessError as e:
             err = (e.stderr or b"").decode("utf-8", errors="ignore")
-            print(f"❌ FFmpeg 合成失败: {err[:500]}...")
+            print(f"❌ FFmpeg 最终合成失败: {err[:500]}...")
             return False
         except Exception as e:
             print(f"❌ 合成过程中出现错误: {e}")
             return False
         finally:
-            # 删除滤镜脚本
-            if filter_script_path.exists():
+            if concat_list_path.exists():
                 try:
-                    filter_script_path.unlink()
+                    concat_list_path.unlink()
                 except Exception:
                     pass
 
