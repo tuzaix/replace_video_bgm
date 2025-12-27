@@ -68,6 +68,8 @@ class VideoRemixedVideoAudio:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.norm_dir = self.temp_dir / "normalized_segments"
         self.norm_dir.mkdir(parents=True, exist_ok=True)
+        self.intro_dir = self.temp_dir / "intros"
+        self.intro_dir.mkdir(parents=True, exist_ok=True)
         
         # 缓存已标准化的分片路径 { (path, resolution): norm_path }
         self._norm_cache: Dict[Tuple[str, Tuple[int, int]], Path] = {}
@@ -242,11 +244,23 @@ class VideoRemixedVideoAudio:
             
             print(f"🎵 音频时长: {audio_duration:.2f}s")
 
+            # 1.1 提取并标准化片头（前3秒）
+            print(f"  🎬 正在生成片头预处理 ({self.video_type})...")
+            intro_path = self._extract_and_normalize_intro(video_path)
+            if not intro_path:
+                print(f"  ⚠️ 无法生成片头，将跳过当前视频: {video_path.name}")
+                continue
+            
+            print(f"  ✅ 片头预处理完成: {intro_path.name}")
+            
+            # 调整后续素材需要填补的时长
+            remaining_duration = max(0, audio_duration - 3.0)
+
             for i in range(count_per_video):
                 print(f"  ✨ 正在生成第 {i+1}/{count_per_video} 份混剪...")
                 
-                # 2. 挑选素材
-                selected_data = self._select_segments_for_duration(all_segments, audio_duration)
+                # 2. 挑选素材 (挑选时长为总时长减去片头时长)
+                selected_data = self._select_segments_for_duration(all_segments, remaining_duration)
                 if not selected_data:
                     print("  ❌ 未能挑选到有效的素材。")
                     continue
@@ -261,7 +275,7 @@ class VideoRemixedVideoAudio:
                 output_path = self.output_dir / output_name
                 
                 success = self._combine_segments_with_audio(
-                    selected_paths, audio_path, audio_duration, self.target_res, output_path
+                    selected_paths, audio_path, audio_duration, self.target_res, output_path, intro_path=intro_path
                 )
                 
                 if success:
@@ -276,6 +290,76 @@ class VideoRemixedVideoAudio:
             except Exception:
                 pass
         print(f"\n🎉 处理完成！输出目录: {self.output_dir}")
+
+    def _extract_and_normalize_intro(self, video_path: Path) -> Optional[Path]:
+        """
+        截取模仿视频的前3秒作为片头，并根据 self.video_type 标准化为 TS 格式。
+
+        :param video_path: 模仿视频路径
+        :return: 标准化后的片头 TS 文件路径
+        """
+        if not video_path.exists():
+            print(f"❌ 模仿视频文件不存在: {video_path}")
+            return None
+
+        width, height = self.target_res
+        # 在文件名中加入 video_type，以便区分不同类型的缓存
+        intro_filename = f"intro_{video_path.stem}_{self.video_type}_{width}x{height}.ts"
+        intro_path = self.intro_dir / intro_filename
+
+        if intro_path.exists():
+            return intro_path
+
+        # 提取前3秒并标准化的命令
+        # 将 -ss 和 -t 放在 -i 之后作为输出参数，通常更稳定
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", str(video_path),
+            "-ss", "0",
+            "-t", "3",
+        ]
+
+        # 视频滤镜：缩放、填充、统一帧率
+        vf_chain = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30"
+        cmd.extend(["-vf", vf_chain])
+        cmd.append("-an") # 片头不需要音频
+
+        if self.use_gpu:
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-preset", "p4",
+                "-cq", "20",
+                "-rc", "vbr",
+                "-pix_fmt", "yuv420p"
+            ])
+        else:
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18"
+            ])
+
+        cmd.extend([
+            "-f", "mpegts",
+            str(intro_path)
+        ])
+
+        try:
+            # 增加详细日志
+            # print(f"  DEBUG: 执行 FFmpeg 命令: {' '.join(cmd)}")
+            result = subprocess.run(cmd, check=True, capture_output=True, **_popen_silent_kwargs())
+            if intro_path.exists():
+                return intro_path
+            else:
+                print(f"❌ FFmpeg 执行成功但未生成片头文件: {intro_path}")
+                return None
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or b"").decode("utf-8", errors="ignore")
+            print(f"❌ 提取片头失败 {video_path.name}: {err[:500]}")
+            return None
+        except Exception as e:
+            print(f"❌ 提取片头过程中出现未知错误 {video_path.name}: {e}")
+            return None
 
     def _normalize_segment(self, segment_path: Path, target_res: Tuple[int, int]) -> Optional[Path]:
         """
@@ -352,7 +436,8 @@ class VideoRemixedVideoAudio:
         audio_path: Path, 
         target_duration: float,
         resolution: Tuple[int, int],
-        output_path: Path
+        output_path: Path,
+        intro_path: Optional[Path] = None
     ) -> bool:
         """
         优化后的视频合成逻辑：先逐个标准化分片，再使用 concat demuxer 合并。
@@ -360,6 +445,11 @@ class VideoRemixedVideoAudio:
         """
         # 1. 逐个标准化分片
         normalized_paths = []
+        
+        # 如果提供了片头，将其放在最前面
+        if intro_path and intro_path.exists():
+            normalized_paths.append(intro_path)
+
         for p in video_segments:
             norm_p = self._normalize_segment(p, resolution)
             if norm_p:
