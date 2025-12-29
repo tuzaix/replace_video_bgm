@@ -25,7 +25,6 @@ class VideoRemixWorker(QtCore.QObject):
     progress = QtCore.Signal(int, int) # (current, total)
     finished = QtCore.Signal(list)      # 成功的输出文件列表
     error = QtCore.Signal(str)
-    log = QtCore.Signal(str)
     
     def __init__(self) -> None:
         super().__init__()
@@ -64,7 +63,6 @@ class VideoRemixWorker(QtCore.QObject):
                 self.error.emit("模仿视频目录下没有找到视频文件。")
                 return
 
-            self.log.emit(f"🔍 正在扫描素材库: {remixer.segment_dir}")
             all_segments = remixer._get_video_segments()
             if not all_segments:
                 self.error.emit("素材库中没有找到有效的视频切片。")
@@ -76,7 +74,6 @@ class VideoRemixWorker(QtCore.QObject):
 
             for idx, video_path in enumerate(imitation_videos, 1):
                 if self._stopping: break
-                self.log.emit(f"🎬 [{idx}/{len(imitation_videos)}] 正在处理: {video_path.name}")
                 
                 audio_path = remixer._extract_audio_lossless(video_path)
                 if not audio_path: continue
@@ -85,20 +82,15 @@ class VideoRemixWorker(QtCore.QObject):
                 audio_duration = ffprobe_duration(audio_path)
                 
                 # 1.1 提取并标准化片头（前3秒）
-                self.log.emit(f"  🎬 正在生成片头预处理 ({remixer.video_type})...")
                 intro_path = remixer._extract_and_normalize_intro(video_path)
                 if not intro_path:
-                    self.log.emit(f"  ⚠️ 无法生成片头，将跳过当前视频: {video_path.name}")
                     continue
-                
-                self.log.emit(f"  ✅ 片头预处理完成: {intro_path.name}")
                 
                 # 调整后续素材需要填补的时长
                 remaining_duration = max(0, audio_duration - 3.0)
 
                 for i in range(count):
                     if self._stopping: break
-                    self.log.emit(f"  ✨ 正在生成第 {i+1}/{count} 份混剪...")
                     
                     selected_data = remixer._select_segments_for_duration(all_segments, remaining_duration)
                     if not selected_data: continue
@@ -113,16 +105,10 @@ class VideoRemixWorker(QtCore.QObject):
                     
                     if success:
                         results.append(str(output_path))
-                        self.log.emit(f"  ✅ 已生成: {output_path.name}")
-                    else:
-                        self.log.emit(f"  ❌ 生成失败: {output_name}")
                     
                     done_tasks += 1
                     self.progress.emit(done_tasks, total_tasks)
 
-            if self._stopping:
-                self.log.emit("🛑 任务已手动停止")
-            
             self.finished.emit(results)
             
         except Exception as e:
@@ -217,34 +203,68 @@ class VideoRemixedVideoAudioTab(QtWidgets.QWidget):
     def _build_right_panel(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
         
-        # 状态
-        group_status = QtWidgets.QGroupBox("运行状态")
-        status_lay = QtWidgets.QVBoxLayout(group_status)
-        
+        # 运行控制
+        ctrl_group = QtWidgets.QGroupBox("运行控制")
+        ctrl_h = QtWidgets.QHBoxLayout(ctrl_group)
         self.progress_bar = QtWidgets.QProgressBar()
-        status_lay.addWidget(self.progress_bar)
-        
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.run_btn = QtWidgets.QPushButton("开始混剪")
         self.run_btn.clicked.connect(self._on_toggle_run)
-        status_lay.addWidget(self.run_btn)
+        ctrl_h.addWidget(self.progress_bar, 1)
+        ctrl_h.addWidget(self.run_btn, 0)
+        layout.addWidget(ctrl_group)
         
-        layout.addWidget(group_status)
-        
-        # 日志输出
-        self.log_edit = QtWidgets.QPlainTextEdit()
-        self.log_edit.setReadOnly(True)
-        layout.addWidget(QtWidgets.QLabel("执行日志："))
-        layout.addWidget(self.log_edit)
+        self._apply_progressbar_style()
+        self._apply_action_button_style(False)
         
         # 结果表格
+        result_group = QtWidgets.QGroupBox("生成结果")
+        result_vbox = QtWidgets.QVBoxLayout(result_group)
         self.result_table = QtWidgets.QTableWidget(0, 1)
         self.result_table.setHorizontalHeaderLabels(["输出文件路径"])
         self.result_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(QtWidgets.QLabel("生成结果："))
-        layout.addWidget(self.result_table)
+        self.result_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.result_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        result_vbox.addWidget(self.result_table)
+        layout.addWidget(result_group)
         
         return widget
+
+    def _apply_progressbar_style(self, chunk_color: str = theme.PRIMARY_BLUE) -> None:
+        """统一设置进度条的尺寸与样式。"""
+        try:
+            if self.progress_bar is None:
+                return
+            self.progress_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            screen = QtWidgets.QApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInch() if screen else 96.0
+            scale = max(1.0, dpi / 96.0)
+        except Exception:
+            scale = 1.0
+        base_h = 32
+        height = int(max(28, min(52, base_h * scale)))
+        try:
+            self.progress_bar.setFixedHeight(height)
+            self._control_height = height
+        except Exception:
+            self._control_height = getattr(self, "_control_height", theme.BUTTON_HEIGHT)
+        try:
+            font = self.progress_bar.font()
+            base_pt = 11
+            pt_size = int(max(base_pt, min(16, base_pt * scale)))
+            font.setPointSize(pt_size)
+            self.progress_bar.setFont(font)
+        except Exception:
+            pass
+        try:
+            style = theme.build_progressbar_stylesheet(height=height, chunk_color=chunk_color)
+            self.progress_bar.setStyleSheet(style)
+        except Exception:
+            pass
 
     def _on_toggle_run(self):
         if self._is_running:
@@ -259,8 +279,7 @@ class VideoRemixedVideoAudioTab(QtWidgets.QWidget):
             return
         
         self._is_running = True
-        self.run_btn.setText("停止运行")
-        self.log_edit.clear()
+        self._apply_action_button_style(True)
         self.result_table.setRowCount(0)
         self.progress_bar.setValue(0)
         
@@ -280,19 +299,21 @@ class VideoRemixedVideoAudioTab(QtWidgets.QWidget):
         
         self._thread.started.connect(lambda: self._worker.run(params))
         self._worker.progress.connect(self._on_progress)
-        self._worker.log.connect(lambda msg: self.log_edit.appendPlainText(msg))
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(lambda e: QtWidgets.QMessageBox.critical(self, "错误", e))
         
         self._thread.start()
 
     def _on_progress(self, current, total):
-        self.progress_bar.setMaximum(total)
-        self.progress_bar.setValue(current)
+        try:
+            pct = int(round(0 if total <= 0 else (current / float(total)) * 100.0))
+            self.progress_bar.setValue(pct)
+        except Exception:
+            pass
 
     def _on_finished(self, results):
         self._is_running = False
-        self.run_btn.setText("开始混剪")
+        self._apply_action_button_style(False)
         
         for path in results:
             row = self.result_table.rowCount()
@@ -302,7 +323,38 @@ class VideoRemixedVideoAudioTab(QtWidgets.QWidget):
         if self._thread:
             self._thread.quit()
             self._thread.wait()
+            self._thread = None
+        self._worker = None
 
     def _apply_action_button_style(self, running: bool) -> None:
-        # 保持与项目主题一致
-        pass
+        """统一设置开始/停止按钮样式。"""
+        try:
+            if self.run_btn is None:
+                return
+            height = int(getattr(self, "_control_height", theme.BUTTON_HEIGHT))
+            primary_bg = theme.PRIMARY_BLUE
+            primary_bg_hover = theme.PRIMARY_BLUE_HOVER
+            danger_bg = theme.DANGER_RED
+            danger_bg_hover = theme.DANGER_RED_HOVER
+            idle_style = theme.build_button_stylesheet(
+                height=height,
+                bg_color=primary_bg,
+                hover_color=primary_bg_hover,
+                disabled_bg=theme.PRIMARY_BLUE_DISABLED,
+                radius=theme.BUTTON_RADIUS,
+                pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+                pad_v=theme.BUTTON_PADDING_VERTICAL,
+            )
+            running_style = theme.build_button_stylesheet(
+                height=height,
+                bg_color=danger_bg,
+                hover_color=danger_bg_hover,
+                disabled_bg=theme.DANGER_RED_DISABLED,
+                radius=theme.BUTTON_RADIUS,
+                pad_h=theme.BUTTON_PADDING_HORIZONTAL,
+                pad_v=theme.BUTTON_PADDING_VERTICAL,
+            )
+            self.run_btn.setText("停止运行" if running else "开始混剪")
+            self.run_btn.setStyleSheet(running_style if running else idle_style)
+        except Exception:
+            pass
