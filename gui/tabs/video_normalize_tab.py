@@ -323,11 +323,37 @@ class VideoNormalizeTab(QtWidgets.QWidget):
             pass
 
     def _on_add_dir(self) -> None:
-        """添加视频目录条目。"""
+        """添加视频目录条目（支持多选）。"""
         try:
-            d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择视频目录")
-            if d:
-                self.video_dirs_list.addItem(d)
+            dialog = QtWidgets.QFileDialog(self, "选择视频目录")
+            dialog.setFileMode(QtWidgets.QFileDialog.Directory)
+            dialog.setOption(QtWidgets.QFileDialog.DontUseNativeDialog, True)
+
+            # 兼容：尝试在非原生对话框中寻找视图并开启多选模式
+            try:
+                list_view = dialog.findChild(QtWidgets.QListView, "listView")
+                if list_view:
+                    list_view.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+                tree_view = dialog.findChild(QtWidgets.QTreeView)
+                if tree_view:
+                    tree_view.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+            except Exception:
+                pass
+
+            if dialog.exec():
+                paths = dialog.selectedFiles()
+                if not paths:
+                    return
+
+                # 获取当前已有的目录，避免重复添加
+                existing = set()
+                for i in range(self.video_dirs_list.count()):
+                    existing.add(self.video_dirs_list.item(i).text())
+
+                for p in paths:
+                    if p and os.path.isdir(p) and p not in existing:
+                        self.video_dirs_list.addItem(p)
+                        existing.add(p)
         except Exception:
             pass
 

@@ -37,6 +37,7 @@ from gui.tabs.video_bgm_replace_tab import VideoBgmReplaceTab
 from gui.tabs.video_normalize_tab import VideoNormalizeTab
 from gui.tabs.broadcast_video_slices_tab import BroadcastVideoSlicesTab
 from gui.tabs.video_beats_mixed_tab import VideoBeatsMixedTab
+from gui.tabs.video_remixed_video_audio_tab import VideoRemixedVideoAudioTab
 
 class MainWindow(QtWidgets.QMainWindow):
     """Main application window for Video Concat GUI.
@@ -109,6 +110,10 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "tab_name": "直播切片",
                 "tab_widget": BroadcastVideoSlicesTab(self),
+            },
+            {
+                "tab_name": "模仿混剪",
+                "tab_widget": VideoRemixedVideoAudioTab(self),
             },
         ]
         # 注册到

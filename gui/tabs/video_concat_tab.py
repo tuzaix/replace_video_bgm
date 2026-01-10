@@ -464,7 +464,7 @@ class VideoConcatTab(QtWidgets.QWidget):
         self.outputs_spin.setAccelerated(True)
         self.outputs_spin.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.slices_spin = QtWidgets.QSpinBox()
-        self.slices_spin.setRange(1, 100)
+        self.slices_spin.setRange(1, 1000)
         self.slices_spin.setValue(8)
         # 支持手动输入并即时解析
         self.slices_spin.setKeyboardTracking(True)
@@ -764,39 +764,51 @@ class VideoConcatTab(QtWidgets.QWidget):
 
     # ----------------------------- 交互逻辑 ----------------------------- #
     def _on_add_video_dir(self) -> None:
-        """添加一个视频目录到列表，并动态更新“混剪输出”目录。
+        """添加一个视频目录到列表（支持多选），并动态更新“混剪输出”目录。"""
+        try:
+            dlg = QtWidgets.QFileDialog(self, "选择视频目录")
+            dlg.setFileMode(QtWidgets.QFileDialog.Directory)
+            dlg.setOption(QtWidgets.QFileDialog.DontUseNativeDialog, True)
 
-        逻辑
-        ----
-        - 支持一次选择多个目录，逐一去重后添加到列表。
-        - 成功添加后，将下方“混剪输出”设置为“最后一个新增目录/混剪”。
-        """
-        dlg = QtWidgets.QFileDialog(self, "选择视频目录")
-        dlg.setFileMode(QtWidgets.QFileDialog.Directory)
-        dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
-        if dlg.exec():
-            dirs = dlg.selectedFiles()
-            if not self.video_list:
-                return
-            last_added: Optional[str] = None
-            for d in dirs:
-                if d and os.path.isdir(d):
-                    # 避免重复
-                    exists = False
-                    for i in range(self.video_list.count()):
-                        if self.video_list.item(i).text() == d:
-                            exists = True
-                            break
-                    if not exists:
-                        self.video_list.addItem(d)
-                        last_added = d
-
-            # 动态更新“混剪输出”为“最后一个新增目录/混剪”
+            # 兼容：尝试在非原生对话框中寻找视图并开启多选模式
             try:
-                if last_added and self.output_edit:
-                    self.output_edit.setText(os.path.join(last_added, "混剪"))
+                list_view = dlg.findChild(QtWidgets.QListView, "listView")
+                if list_view:
+                    list_view.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+                tree_view = dlg.findChild(QtWidgets.QTreeView)
+                if tree_view:
+                    tree_view.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
             except Exception:
                 pass
+
+            if dlg.exec():
+                dirs = dlg.selectedFiles()
+                if not self.video_list or not dirs:
+                    return
+
+                last_added: Optional[str] = None
+                # 获取当前已有的目录，避免重复添加
+                existing = set()
+                for i in range(self.video_list.count()):
+                    existing.add(self.video_list.item(i).text())
+
+                for d in dirs:
+                    if d and os.path.isdir(d) and d not in existing:
+                        self.video_list.addItem(d)
+                        last_added = d
+                        existing.add(d)
+
+                # 动态更新“混剪输出”为“最后一个新增目录/混剪”
+                if last_added and self.output_edit:
+                    try:
+                        # 如果用户还没手动修改过，或者还是默认提示文字，则自动设置
+                        current_out = self.output_edit.text().strip()
+                        if not current_out or "默认是" in current_out:
+                            self.output_edit.setText(os.path.join(last_added, "混剪"))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _on_remove_selected_dirs(self) -> None:
         """移除列表中选中的目录。"""

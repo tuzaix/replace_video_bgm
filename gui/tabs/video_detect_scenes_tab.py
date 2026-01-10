@@ -260,12 +260,36 @@ class VideoDetectScenesTab(QtWidgets.QWidget):
             pass
 
     def _on_add_dir(self) -> None:
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择视频目录")
-        if not d:
-            return
-        existing = {self.video_list.item(i).text() for i in range(self.video_list.count())}
-        if d not in existing:
-            self.video_list.addItem(d)
+        """添加视频目录到列表（支持多选）。"""
+        try:
+            dlg = QtWidgets.QFileDialog(self, "选择视频目录")
+            dlg.setFileMode(QtWidgets.QFileDialog.Directory)
+            dlg.setOption(QtWidgets.QFileDialog.DontUseNativeDialog, True)
+
+            # 兼容：尝试在非原生对话框中寻找视图并开启多选模式
+            try:
+                list_view = dlg.findChild(QtWidgets.QListView, "listView")
+                if list_view:
+                    list_view.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+                tree_view = dlg.findChild(QtWidgets.QTreeView)
+                if tree_view:
+                    tree_view.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+            except Exception:
+                pass
+
+            if dlg.exec():
+                dirs = dlg.selectedFiles()
+                if not self.video_list or not dirs:
+                    return
+
+                # 获取当前已有的目录，避免重复添加
+                existing = {self.video_list.item(i).text() for i in range(self.video_list.count())}
+                for d in dirs:
+                    if d and os.path.isdir(d) and d not in existing:
+                        self.video_list.addItem(d)
+                        existing.add(d)
+        except Exception:
+            pass
 
     def _on_remove_selected(self) -> None:
         items = self.video_list.selectedItems()
