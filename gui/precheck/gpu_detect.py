@@ -10,6 +10,7 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
+from utils.common_utils import get_subprocess_silent_kwargs
 from PySide6 import QtWidgets
 
 def detect_nvidia_gpu() -> bool:
@@ -31,7 +32,7 @@ def detect_nvidia_gpu() -> bool:
         nvsmi = shutil.which("nvidia-smi")
         if nvsmi:
             try:
-                out = subprocess.check_output([nvsmi, "-L"], stderr=subprocess.STDOUT, timeout=3)
+                out = subprocess.check_output([nvsmi, "-L"], stderr=subprocess.STDOUT, timeout=3, **get_subprocess_silent_kwargs())
                 text = out.decode(errors="ignore")
                 if any("GPU" in line for line in text.splitlines()):
                     return True
@@ -52,7 +53,7 @@ def detect_nvidia_gpu() -> bool:
                     "-Command",
                     "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
                 ]
-                out = subprocess.check_output(ps_cmd, stderr=subprocess.STDOUT, timeout=3)
+                out = subprocess.check_output(ps_cmd, stderr=subprocess.STDOUT, timeout=3, **get_subprocess_silent_kwargs())
                 text = out.decode(errors="ignore").lower()
                 if "nvidia" in text:
                     return True
@@ -64,7 +65,7 @@ def detect_nvidia_gpu() -> bool:
         # 3) macOS: system_profiler
         if system == "darwin":
             try:
-                out = subprocess.check_output(["system_profiler", "SPDisplaysDataType"], stderr=subprocess.STDOUT, timeout=4)
+                out = subprocess.check_output(["system_profiler", "SPDisplaysDataType"], stderr=subprocess.STDOUT, timeout=4, **get_subprocess_silent_kwargs())
                 text = out.decode(errors="ignore").lower()
                 if "nvidia" in text:
                     return True
@@ -78,7 +79,7 @@ def detect_nvidia_gpu() -> bool:
             try:
                 lspci = shutil.which("lspci")
                 if lspci:
-                    out = subprocess.check_output([lspci], stderr=subprocess.STDOUT, timeout=3)
+                    out = subprocess.check_output([lspci], stderr=subprocess.STDOUT, timeout=3, **get_subprocess_silent_kwargs())
                     text = out.decode(errors="ignore").lower()
                     if "nvidia" in text:
                         return True
@@ -136,7 +137,7 @@ def list_nvidia_gpus() -> list[str]:
         nvsmi = shutil.which("nvidia-smi")
         if nvsmi:
             try:
-                out = subprocess.check_output([nvsmi, "-L"], stderr=subprocess.STDOUT, timeout=3)
+                out = subprocess.check_output([nvsmi, "-L"], stderr=subprocess.STDOUT, timeout=3, **get_subprocess_silent_kwargs())
                 text = out.decode(errors="ignore")
                 for line in text.splitlines():
                     # Example: GPU 0: NVIDIA GeForce RTX 3080 (UUID: GPU-...)
@@ -163,7 +164,7 @@ def list_nvidia_gpus() -> list[str]:
                     "-Command",
                     "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
                 ]
-                out = subprocess.check_output(ps_cmd, stderr=subprocess.STDOUT, timeout=3)
+                out = subprocess.check_output(ps_cmd, stderr=subprocess.STDOUT, timeout=3, **get_subprocess_silent_kwargs())
                 text = out.decode(errors="ignore")
                 for line in text.splitlines():
                     l = line.strip()
@@ -176,7 +177,7 @@ def list_nvidia_gpus() -> list[str]:
 
         elif system == "darwin":
             try:
-                out = subprocess.check_output(["system_profiler", "SPDisplaysDataType"], stderr=subprocess.STDOUT, timeout=4)
+                out = subprocess.check_output(["system_profiler", "SPDisplaysDataType"], stderr=subprocess.STDOUT, timeout=4, **get_subprocess_silent_kwargs())
                 text = out.decode(errors="ignore")
                 # Extract lines containing "Chipset Model:" or vendor lines with NVIDIA
                 for line in text.splitlines():
@@ -196,7 +197,7 @@ def list_nvidia_gpus() -> list[str]:
             try:
                 lspci = shutil.which("lspci")
                 if lspci:
-                    out = subprocess.check_output([lspci], stderr=subprocess.STDOUT, timeout=3)
+                    out = subprocess.check_output([lspci], stderr=subprocess.STDOUT, timeout=3, **get_subprocess_silent_kwargs())
                     text = out.decode(errors="ignore")
                     for line in text.splitlines():
                         if "nvidia" in line.lower():

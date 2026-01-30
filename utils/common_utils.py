@@ -1,6 +1,22 @@
 from __future__ import annotations
 
 import os
+import subprocess
+from typing import Dict, Any
+
+
+def get_subprocess_silent_kwargs() -> Dict[str, Any]:
+    """获取隐藏控制台窗口的参数（仅限 Windows）。
+    
+    用于在打包后的 GUI 程序中调用 subprocess 时，避免弹出黑色的 cmd 窗口。
+    """
+    kwargs = {}
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        kwargs["startupinfo"] = si
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
 
 
 def is_audio_file(name: str) -> bool:

@@ -13,7 +13,7 @@ from moviepy.editor import AudioFileClip, VideoFileClip
 from utils.gpu_detect import is_nvenc_available
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 from utils.xprint import xprint
-from utils.common_utils import is_video_file, is_image_file
+from utils.common_utils import is_video_file, is_image_file, get_subprocess_silent_kwargs
 from utils.calcu_video_info import ffprobe_duration, ffprobe_stream_info, ffmpeg_bin, ffprobe_bin
 
 class VideoBeatsMixed:
@@ -254,16 +254,8 @@ class VideoBeatsMixed:
                 "-movflags", "+faststart",
                 str(outp),
             ]
-            si = None
-            kwargs = {}
             xprint(f"_image_to_segment: {cmd}")
-            try:
-                if os.name == "nt":
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-            except Exception:
-                kwargs = {}
+            kwargs = get_subprocess_silent_kwargs()
             r = subprocess.run(cmd, capture_output=True, **kwargs)
             if r.returncode == 0 and outp.exists():
                 return outp
@@ -277,7 +269,7 @@ class VideoBeatsMixed:
         try:
             with open(lst, "w", encoding="utf-8") as f:
                 for p in segs:
-                    f.write(f"file '{str(p).replace("'", "\\'")}'\n")
+                    f.write("file '{}'\n".format(str(p).replace("'", "\\'")))
         except Exception:
             return None
         outp = self.temp_dir / f"video_no_audio_{self.run_id}.mp4"
@@ -295,16 +287,8 @@ class VideoBeatsMixed:
                 "-movflags", "+faststart",
                 str(outp),
             ]
-            si = None
-            kwargs = {}
             xprint(f"_concat_segments_copy: {cmd}")
-            try:
-                if os.name == "nt":
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-            except Exception:
-                kwargs = {}
+            kwargs = get_subprocess_silent_kwargs()
             r = subprocess.run(cmd, capture_output=True, **kwargs)
             if r.returncode == 0 and outp.exists():
                 return outp
@@ -328,16 +312,8 @@ class VideoBeatsMixed:
                 "-ar","44100",
                 str(outa),
             ]
-            si = None
-            kwargs = {}
             xprint(f"_make_bgm_segment: {cmd}")
-            try:
-                if os.name == "nt":
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-            except Exception:
-                kwargs = {}
+            kwargs = get_subprocess_silent_kwargs()
             r = subprocess.run(cmd, capture_output=True, **kwargs)
             if r.returncode == 0 and outa.exists():
                 return outa
@@ -361,16 +337,8 @@ class VideoBeatsMixed:
                 "-movflags", "+faststart",
                 str(out_path),
             ]
-            si = None
-            kwargs = {}
             xprint(f"_mux_video_audio_copy: {cmd}")
-            try:
-                if os.name == "nt":
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-            except Exception:
-                kwargs = {}
+            kwargs = get_subprocess_silent_kwargs()
             r = subprocess.run(cmd, capture_output=True, **kwargs)
             if r.returncode == 0 and out_path.exists():
                 return out_path

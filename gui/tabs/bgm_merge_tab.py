@@ -67,12 +67,13 @@ class BgmMergeTab(QtWidgets.QWidget):
         """
         import os
         import subprocess
+        from utils.common_utils import get_subprocess_silent_kwargs
         try:
             base = os.path.dirname(os.path.dirname(__file__))
             readme_path = os.path.join(base, "README_v3.md")
             if os.path.exists(readme_path):
                 if os.name == "nt":
-                    subprocess.Popen(["explorer", readme_path])
+                    subprocess.Popen(["explorer", readme_path], **get_subprocess_silent_kwargs())
                 else:
                     subprocess.Popen(["open", readme_path])
             else:

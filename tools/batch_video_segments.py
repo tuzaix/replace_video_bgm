@@ -25,16 +25,7 @@ from utils.common_utils import is_video_file
 from utils.calcu_video_info import ffmpeg_bin, ffprobe_bin
 
 
-def _popen_silent_kwargs() -> dict:
-    """Return subprocess kwargs that suppress console windows on Windows."""
-    try:
-        if os.name == "nt":
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            return {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-    except Exception:
-        pass
-    return {}
+from utils.common_utils import get_subprocess_silent_kwargs as _popen_silent_kwargs
 
 
 def list_videos(dir_path: Path) -> List[Path]:

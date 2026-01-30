@@ -1,28 +1,51 @@
-# 视频BGM分离和替换工具依赖
+# ==============================================================================
+# 短视频工具V1.0 - 统一依赖文件
+# 整合自: requirements.txt, requirements_gui.txt, requirements_v3.txt, video_tool/requirements.txt
+# ==============================================================================
 
-# 深度学习框架
-torch>=1.12.0
-torchaudio>=0.12.0
+# --- GUI 界面与打包 ---
+PySide6>=6.6,<7.0
+pyinstaller>=6.0
+# nuitka==2.8.4
+pyarmor==9.2.0
+wmi==1.5.1
+pycryptodome==3.23.0
 
-# 音频分离库
-demucs>=4.0.0
+# --- 深度学习框架 (核心) ---
+# 默认安装 CPU 版本，如需 GPU 加速请参考下方注释
+# torch==2.3.1
+# torchaudio>=0.12.0
+# --extra-index-url https://download.pytorch.org/whl/cu118
+# torch==2.3.1+cu118
+# torchaudio==2.3.1+cu118
 
-# 视频处理库
-moviepy>=1.0.3
+# --- 视频处理与分析 ---
+moviepy==1.0.3
+opencv-python-headless==4.12.0.88
+# ultralytics
+# deepface
+# transnetv2-pytorch==1.0.5
 
-# 音频处理库
-librosa>=0.9.0
-soundfile>=0.10.0
+# --- 音频处理与分离 ---
+demucs==4.0.1
+librosa==0.11.0
+soundfile==0.13.1
+pydub==0.25.1
 
-# 数值计算
-numpy>=1.21.0
+# --- 语音识别与文本处理 ---
+faster_whisper==1.2.1
+transformers>=4.37.0
+huggingface_hub>=0.21.0,<1.0.0
+zhconv==1.4.3
 
-# 其他工具库
-pathlib2>=2.3.0
+# --- 科学计算与数据处理 ---
+numpy==2.2.6
+# scipy>=1.9.0
+# pandas==2.3.3
+# einops==0.8.1
+# timm==1.0.22
+
+# --- 基础工具库 ---
+Pillow==12.0.0
+# pathlib2>=2.3.0
 tqdm>=4.64.0
-
-# GPU支持（可选，如果有NVIDIA GPU）
-# 取消注释下面的行来安装CUDA版本的PyTorch
-# torch>=1.12.0+cu116
-# torchaudio>=0.12.0+cu116
-# --extra-index-url https://download.pytorch.org/whl/cu116

@@ -17,17 +17,7 @@ import shutil
 import subprocess
 from typing import Optional
 
-
-def _popen_silent_kwargs() -> dict:
-    """Return kwargs to suppress console windows for subprocess on Windows."""
-    try:
-        if os.name == "nt":
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            return {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-    except Exception:
-        pass
-    return {}
+from utils.common_utils import get_subprocess_silent_kwargs
 
 
 def _read_text(b: bytes) -> str:
@@ -47,7 +37,7 @@ def ffmpeg_output(args: list[str], timeout: int = 8) -> str:
     if not ffmpeg_bin:
         return ""
     try:
-        res = subprocess.run([ffmpeg_bin, *args], capture_output=True, timeout=timeout, **_popen_silent_kwargs())
+        res = subprocess.run([ffmpeg_bin, *args], capture_output=True, timeout=timeout, **get_subprocess_silent_kwargs())
         if res.returncode != 0:
             return _read_text(res.stdout) + "\n" + _read_text(res.stderr)
         return _read_text(res.stdout)

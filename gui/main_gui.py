@@ -30,12 +30,10 @@ if not getattr(sys, "frozen", False):
 
 # 线程与设置的生命周期已迁移到各自的 Tab 内部，MainWindow 不再直接导入
 from gui.tabs.extract_frames_tab import ExtractFramesTab
-from gui.tabs.video_detect_scenes_tab import VideoDetectScenesTab
 from gui.tabs.video_concat_tab import VideoConcatTab
 from gui.tabs.generate_cover_tab import GenerateCoverTab
 from gui.tabs.video_bgm_replace_tab import VideoBgmReplaceTab
 from gui.tabs.video_normalize_tab import VideoNormalizeTab
-from gui.tabs.broadcast_video_slices_tab import BroadcastVideoSlicesTab
 from gui.tabs.video_beats_mixed_tab import VideoBeatsMixedTab
 from gui.tabs.video_remixed_video_audio_tab import VideoRemixedVideoAudioTab
 
@@ -96,20 +94,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tab_widget": ExtractFramesTab(self),
             },
             {
-                "tab_name": "镜头分割",
-                "tab_widget": VideoDetectScenesTab(self),
-            },
-            {
                 "tab_name": "合成封面",
                 "tab_widget": GenerateCoverTab(self),
             },
             {
                 "tab_name": "BGM替换",
                 "tab_widget": VideoBgmReplaceTab(self),
-            },
-            {
-                "tab_name": "直播切片",
-                "tab_widget": BroadcastVideoSlicesTab(self),
             },
             {
                 "tab_name": "模仿混剪",

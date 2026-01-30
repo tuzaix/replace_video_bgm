@@ -35,22 +35,7 @@ if not getattr(sys, "frozen", False):
 from utils.calcu_video_info import ffmpeg_bin
 
 
-def _popen_silent_kwargs() -> dict:
-    """Return subprocess kwargs that suppress console windows on Windows.
-
-    Returns
-    -------
-    dict
-        Keyword arguments suitable for `subprocess.run` to hide windows.
-    """
-    try:
-        if os.name == "nt":
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            return {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-    except Exception:
-        pass
-    return {}
+from utils.common_utils import get_subprocess_silent_kwargs as _popen_silent_kwargs
 
 
 def list_target_videos(dir_path: Path) -> List[Path]:

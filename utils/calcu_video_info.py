@@ -8,7 +8,7 @@ from typing import List, Tuple, Dict, Literal
 from moviepy.editor import ImageClip
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffprobe=False)
-from utils.common_utils import is_video_file, is_image_file
+from utils.common_utils import is_video_file, is_image_file, get_subprocess_silent_kwargs
 
 ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe")
 ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg")
@@ -54,16 +54,7 @@ def probe_resolution(path: pathlib.Path) -> Tuple[int, int] | None:
             try:
                 
                 if ffprobe_bin:
-                    import subprocess
-                    si = None
-                    kwargs = {}
-                    try:
-                        if os.name == "nt":
-                            si = subprocess.STARTUPINFO()
-                            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                            kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-                    except Exception:
-                        kwargs = {}
+                    kwargs = get_subprocess_silent_kwargs()
                     cmd = [
                         ffprobe_bin,
                         "-v",
@@ -115,15 +106,7 @@ def get_image_resolution(path: pathlib.Path) -> Tuple[int, int]:
 def ffprobe_duration(path: pathlib.Path) -> float:
     try:
         cmd = [ffprobe_bin, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
-        si = None
-        kwargs = {}
-        try:
-            if os.name == "nt":
-                si = subprocess.STARTUPINFO()
-                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-        except Exception:
-            kwargs = {}
+        kwargs = get_subprocess_silent_kwargs()
         r = subprocess.run(cmd, capture_output=True, **kwargs)
         if r.returncode == 0:
             txt = (r.stdout or b"").decode("utf-8", errors="ignore").strip()
@@ -148,15 +131,7 @@ def ffprobe_stream_info(path: pathlib.Path) -> Dict[str, Any]:
             "-of","json",
             str(path),
         ]
-        si = None
-        kwargs = {}
-        try:
-            if os.name == "nt":
-                si = subprocess.STARTUPINFO()
-                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-        except Exception:
-            kwargs = {}
+        kwargs = get_subprocess_silent_kwargs()
         r = subprocess.run(cmd, capture_output=True, **kwargs)
         if r.returncode == 0:
             import json as _json

@@ -3,6 +3,7 @@ import hashlib
 import subprocess
 import json
 from typing import Optional
+from utils.common_utils import get_subprocess_silent_kwargs
 
 def get_stable_hardware_id():
     """
@@ -104,6 +105,7 @@ def get_stable_hardware_id():
                     stderr=subprocess.STDOUT,
                     shell=True,
                     text=True,
+                    **get_subprocess_silent_kwargs()
                 )
                 lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
                 # 过滤标题行，取最后一行可能是值
@@ -124,6 +126,7 @@ def get_stable_hardware_id():
                     stderr=subprocess.STDOUT,
                     shell=True,
                     text=True,
+                    **get_subprocess_silent_kwargs()
                 ).strip()
                 if out and not _is_invalid(out):
                     return out

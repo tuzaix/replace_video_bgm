@@ -8,6 +8,7 @@ import pathlib
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 from utils.calcu_video_info import ffprobe_stream_info
+from utils.common_utils import get_subprocess_silent_kwargs
 from utils.xprint import xprint
 
 env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffmpeg=True)
@@ -105,7 +106,7 @@ def overlay_ass_subtitles(
                 "-loglevel", "error",
                 outp,
             ]
-            r = subprocess.run(cmd, capture_output=True)
+            r = subprocess.run(cmd, capture_output=True, **get_subprocess_silent_kwargs())
             ok = (r.returncode == 0) and os.path.isfile(outp)
             if ok:
                 return outp

@@ -25,29 +25,8 @@ except Exception:
     pass
 
 
-def _popen_silent_kwargs() -> dict:
-    """Return kwargs to suppress console windows for subprocess on Windows.
+from utils.common_utils import get_subprocess_silent_kwargs as _popen_silent_kwargs
 
-    This helper ensures ffmpeg/ffprobe processes do not spawn visible console
-    windows (e.g., openconsole.exe) when launched from the GUI application.
-
-    Returns
-    -------
-    dict
-        Keyword arguments suitable for passing to subprocess.run/Popen. On
-        Windows, includes a STARTUPINFO and CREATE_NO_WINDOW flag. On other
-        platforms, returns an empty dict.
-    """
-    try:
-        import os
-        if os.name == 'nt':
-            # Hide console windows on Windows
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            return {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-    except Exception:
-        pass
-    return {}
 
 # 支持的视频格式
 SUPPORTED_VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v'}

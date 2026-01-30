@@ -16,6 +16,7 @@ import time
 # 统一启动策略：优先使用内置 FFmpeg，并在开发环境允许系统兜底（通过 FFMPEG_DEV_FALLBACK）。
 try:
     from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+    from utils.common_utils import get_subprocess_silent_kwargs
     # 在该工具中不强制要求 ffprobe/ffmpeg 存在，保持与原行为一致（调用失败由下游处理）
     bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
 except Exception:
@@ -107,7 +108,7 @@ def probe_video_resolution(video_path: str) -> Optional[Tuple[int, int]]:
         video_path,
     ]
     try:
-        res = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+        res = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="ignore", **get_subprocess_silent_kwargs())
         out = res.stdout.strip()
         if not out:
             return None
@@ -154,7 +155,7 @@ def probe_video_duration_seconds(video_path: str) -> Optional[float]:
         video_path,
     ]
     try:
-        res = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+        res = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="ignore", **get_subprocess_silent_kwargs())
         out = res.stdout.strip()
         if not out:
             return None

@@ -28,6 +28,7 @@ import shutil
 import os
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env  # type: ignore
+from utils.common_utils import get_subprocess_silent_kwargs
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
 
 # Hardware encoder detection utilities
@@ -232,7 +233,7 @@ class VideoConcat:
             cmd = self._build_ffmpeg_cmd(list_path)
             # Print for debugging/traceability
             xprint("[concat] ffmpeg cmd:", " ".join(cmd))
-            res = subprocess.run(cmd, capture_output=True)
+            res = subprocess.run(cmd, capture_output=True, **get_subprocess_silent_kwargs())
             if res.returncode == 0 and self.out_path.exists():
                 return True
             # Dump tail of stderr to aid debugging

@@ -16,17 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from utils.calcu_video_info import ffmpeg_bin, ffprobe_bin, ffprobe_duration, probe_resolution, is_video_file
-from utils.common_utils import is_video_file as is_video_check
-
-def _popen_silent_kwargs():
-    """获取隐藏控制台窗口的参数（仅限 Windows）。"""
-    kwargs = {}
-    if os.name == "nt":
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        kwargs["startupinfo"] = si
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return kwargs
+from utils.common_utils import is_video_file as is_video_check, get_subprocess_silent_kwargs
 
 class VideoRemixedVideoAudio:
     """
@@ -128,7 +118,7 @@ class VideoRemixedVideoAudio:
             str(video_path)
         ]
         try:
-            res = subprocess.run(cmd_probe, capture_output=True, text=True, **_popen_silent_kwargs())
+            res = subprocess.run(cmd_probe, capture_output=True, text=True, **get_subprocess_silent_kwargs())
             codec = res.stdout.strip()
             if not codec:
                 print(f"⚠️ 视频没有音频流: {video_path.name}")
@@ -156,7 +146,7 @@ class VideoRemixedVideoAudio:
                 "-c:a", "copy",
                 str(audio_out)
             ]
-            proc = subprocess.run(cmd_extract, capture_output=True, **_popen_silent_kwargs())
+            proc = subprocess.run(cmd_extract, capture_output=True, **get_subprocess_silent_kwargs())
             
             if proc.returncode != 0:
                 # 无损提取失败，可能是容器不支持 copy。回退到重编码为 aac
@@ -170,7 +160,7 @@ class VideoRemixedVideoAudio:
                     "-b:a", "192k",
                     str(audio_out)
                 ]
-                subprocess.run(cmd_fallback, check=True, **_popen_silent_kwargs())
+                subprocess.run(cmd_fallback, check=True, **get_subprocess_silent_kwargs())
                 
             return audio_out
         except Exception as e:
@@ -347,7 +337,7 @@ class VideoRemixedVideoAudio:
         try:
             # 增加详细日志
             # print(f"  DEBUG: 执行 FFmpeg 命令: {' '.join(cmd)}")
-            result = subprocess.run(cmd, check=True, capture_output=True, **_popen_silent_kwargs())
+            result = subprocess.run(cmd, check=True, capture_output=True, **get_subprocess_silent_kwargs())
             if intro_path.exists():
                 return intro_path
             else:
@@ -423,7 +413,7 @@ class VideoRemixedVideoAudio:
         ])
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, **_popen_silent_kwargs())
+            subprocess.run(cmd, check=True, capture_output=True, **get_subprocess_silent_kwargs())
             self._norm_cache[cache_key] = norm_path
             return norm_path
         except Exception as e:
@@ -464,7 +454,7 @@ class VideoRemixedVideoAudio:
             for p in normalized_paths:
                 # 写入格式: file 'path/to/file'
                 # 注意路径中的反斜杠在 FFmpeg concat 协议中需要转义，或者统一用正斜杠
-                f.write(f"file '{str(p.absolute()).replace('\\', '/')}'\n")
+                f.write("file '{}'\n".format(str(p.absolute()).replace('\\', '/')))
 
         # 3. 最终合成
         # 使用 concat demuxer 合并视频，并混入音频
@@ -490,7 +480,7 @@ class VideoRemixedVideoAudio:
         ])
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, **_popen_silent_kwargs())
+            subprocess.run(cmd, check=True, capture_output=True, **get_subprocess_silent_kwargs())
             return True
         except subprocess.CalledProcessError as e:
             err = (e.stderr or b"").decode("utf-8", errors="ignore")

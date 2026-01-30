@@ -9,6 +9,7 @@ import threading
 
 import traceback
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+from utils.common_utils import get_subprocess_silent_kwargs
 from utils.xprint import xprint
 from video_tool.slice_config import SliceConfig
 import pathlib
@@ -385,6 +386,7 @@ class BroadcastVideoSlices:
         audio_path = os.path.join(tmpdir, "audio.mp3")
         in_arg = f"file:{os.path.abspath(video_path).replace('\\', '/')}"
         xprint({"phase": "extract_audio", "video": video_path, "audio_out": audio_path})
+        kwargs = get_subprocess_silent_kwargs()
         r = subprocess.run([
             ffmpeg_bin,
             "-hide_banner",
@@ -402,7 +404,7 @@ class BroadcastVideoSlices:
             "-loglevel",
             "error",
             audio_path,
-        ], capture_output=True)
+        ], capture_output=True, **kwargs)
         if r.returncode != 0:
             err = (r.stderr or b"").decode("utf-8", errors="ignore")
             raise RuntimeError(f"提取音频失败: {err}")
@@ -674,7 +676,7 @@ class BroadcastVideoSlices:
                         "-loglevel", "error",
                         chunk_path,
                     ]
-                    subprocess.run(cmd)
+                    subprocess.run(cmd, **get_subprocess_silent_kwargs())
                     abs_chunk = os.path.abspath(chunk_path).replace("\\", "/")
                     f_list.write(f"file '{abs_chunk}'\n")
                     chunk_paths.append(chunk_path)
@@ -690,7 +692,7 @@ class BroadcastVideoSlices:
                 "-loglevel", "error",
                 out_path,
             ]
-            subprocess.run(cmd_concat)
+            subprocess.run(cmd_concat, **get_subprocess_silent_kwargs())
             seg_dur = 0.0
             try:
                 seg_dur = float(ffprobe_duration(pathlib.Path(out_path)) or 0.0)
@@ -785,7 +787,7 @@ class BroadcastVideoSlices:
                 out_path,
             ]
             xprint({"cmd": cmd})
-            subprocess.run(cmd)
+            subprocess.run(cmd, **get_subprocess_silent_kwargs())
             xprint({"phase": "export_done", "index": idx + 1, "out": out_path, "duration": round(duration, 3)})
             final_path = out_path
             # 增加字幕

@@ -158,20 +158,16 @@ def resolve_ffmpeg_paths(
     return FFResolution(ffmpeg_path=ffmpeg_path, ffprobe_path=ffprobe_path, source=source, directory=directory)
 
 
+from utils.common_utils import get_subprocess_silent_kwargs
+
+
 def _run_cmd_silent(cmd: list[str], timeout: int = 8) -> str:
     """Run a command and return combined stdout/stderr output.
 
     On Windows, suppress console window popups.
     """
     try:
-        kwargs = {}
-        try:
-            if os.name == "nt":
-                si = subprocess.STARTUPINFO()
-                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-        except Exception:
-            kwargs = {}
+        kwargs = get_subprocess_silent_kwargs()
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kwargs)
         out = res.stdout.strip() or res.stderr.strip()
         return out or "<无输出>"

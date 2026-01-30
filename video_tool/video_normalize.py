@@ -9,6 +9,7 @@ from typing import Optional, List
 from utils.xprint import xprint
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
 from utils.calcu_video_info import ffprobe_stream_info, ffmpeg_bin
+from utils.common_utils import get_subprocess_silent_kwargs
 
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffprobe=True)
 
@@ -20,15 +21,7 @@ class VideoNormalize:
 
     def _detect_hardware(self) -> str:
         try:
-            si = None
-            kwargs = {}
-            try:
-                if os.name == "nt":
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-            except Exception:
-                kwargs = {}
+            kwargs = get_subprocess_silent_kwargs()
             r = subprocess.run([self.ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True, **kwargs)
             out = (r.stdout or "") + (r.stderr or "")
             if "h264_nvenc" in out:
@@ -153,15 +146,7 @@ class VideoNormalize:
         xprint({"encoder": encoder, "encode_params": enc_params})
         cmd = [self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(vp)] + enc_params + [str(out_file)]
         xprint({"cmd": cmd})
-        si = None
-        kwargs = {}
-        try:
-            if os.name == "nt":
-                si = subprocess.STARTUPINFO()
-                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                kwargs = {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-        except Exception:
-            kwargs = {}
+        kwargs = get_subprocess_silent_kwargs()
         r = subprocess.run(cmd, capture_output=True, **kwargs)
         if r.returncode != 0:
             raise RuntimeError(((r.stderr or b"").decode("utf-8", errors="ignore")) if isinstance(r.stderr, (bytes, bytearray)) else str(r.stderr))

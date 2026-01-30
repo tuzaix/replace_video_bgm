@@ -36,6 +36,7 @@ from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 
+from utils.common_utils import get_subprocess_silent_kwargs
 # 统一启动策略：优先使用内置 FFmpeg（可通过环境变量在开发环境允许系统兜底）
 from gui.precheck.ffmpeg_paths import resolve_ffmpeg_paths, allow_system_fallback_env
 
@@ -79,7 +80,8 @@ def probe_duration(ffprobe_bin: str, media: Path) -> float | None:
             capture_output=True,
             text=True,
             encoding='utf-8',
-            errors='replace'
+            errors='replace',
+            **get_subprocess_silent_kwargs()
         )
         if proc.returncode == 0:
             s = proc.stdout.strip()
@@ -137,7 +139,7 @@ def probe_video_bitrate(ffprobe_bin: str, video: Path) -> int | None:
             '-show_entries', 'stream=bit_rate',
             '-of', 'default=nw=1:nk=1',
             str(video)
-        ], capture_output=True, text=True, encoding='utf-8', errors='replace')
+        ], capture_output=True, text=True, encoding='utf-8', errors='replace', **get_subprocess_silent_kwargs())
         if proc.returncode == 0:
             out = proc.stdout.strip()
             if out:
@@ -156,7 +158,7 @@ def probe_video_bitrate(ffprobe_bin: str, video: Path) -> int | None:
             '-show_entries', 'format=bit_rate',
             '-of', 'default=nw=1:nk=1',
             str(video)
-        ], capture_output=True, text=True, encoding='utf-8', errors='replace')
+        ], capture_output=True, text=True, encoding='utf-8', errors='replace', **get_subprocess_silent_kwargs())
         if proc2.returncode == 0:
             out2 = proc2.stdout.strip()
             if out2:
@@ -335,7 +337,8 @@ def process_one(ffmpeg_bin: str, ffprobe_bin: str, video: Path, bgm: Path, out_d
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
-                errors='replace'
+                errors='replace',
+                **get_subprocess_silent_kwargs()
             )
         except Exception as e:
             class MockProc:

@@ -5,6 +5,7 @@ import subprocess
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
 from moviepy.audio.fx import all as afx
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+from utils.common_utils import get_subprocess_silent_kwargs
 bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True)
 
 from utils.gpu_detect import is_nvenc_available
@@ -129,10 +130,14 @@ class BGMReplacer:
                     "-shortest",
                     str(final_out),
                 ]
-                subprocess.run(cmd, check=True, capture_output=True, encoding="utf-8")
+                subprocess.run(
+                    cmd, check=True, capture_output=True, encoding="utf-8", **get_subprocess_silent_kwargs()
+                )
                 mux_success = final_out.exists()
-        except Exception as e:
+        except subprocess.CalledProcessError as e:
             xprint(f"警告：FFmpeg 复用失败，将回退到重编码: {e}")
+        except Exception as e:
+            xprint(f"警告：FFmpeg 复用时发生非进程错误，将回退到重编码: {e}")
     
         if not mux_success:
             try:

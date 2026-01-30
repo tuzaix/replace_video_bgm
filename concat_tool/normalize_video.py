@@ -34,6 +34,7 @@ except Exception:
 # Hardware encoder detection utilities
 from utils.gpu_detect import is_nvenc_available
 from utils.xprint import xprint
+from utils.common_utils import get_subprocess_silent_kwargs
 
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".m4v"}
 
@@ -64,18 +65,6 @@ class VideoNormalizer:
         self.use_gpu = bool(use_gpu)
         self.threads = max(1, int(threads))
         self.pix_fmt = pix_fmt
-
-    @staticmethod
-    def _popen_silent_kwargs() -> dict:
-        """Return kwargs to suppress console windows for subprocess on Windows."""
-        try:
-            if os.name == "nt":
-                si = subprocess.STARTUPINFO()
-                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                return {"startupinfo": si, "creationflags": subprocess.CREATE_NO_WINDOW}
-        except Exception:
-            pass
-        return {}
 
     @staticmethod
     def find_videos(directory: Path) -> List[Path]:
@@ -171,7 +160,7 @@ class VideoNormalizer:
             str(path),
         ]
         try:
-            res = subprocess.run(cmd, capture_output=True, **VideoNormalizer._popen_silent_kwargs())
+            res = subprocess.run(cmd, capture_output=True, **get_subprocess_silent_kwargs())
             if res.returncode != 0:
                 return None
             data = json.loads((res.stdout or b"{}").decode("utf-8", errors="ignore") or "{}")
@@ -454,7 +443,7 @@ class VideoNormalizer:
                     if dur is not None:
                         end_s = max(0.0, dur - float(trim_tail_s))
                 cmd = self._build_ffmpeg_cmd(v, out_path, start_s=start_s, end_s=end_s)
-                res = subprocess.run(cmd, capture_output=True, **VideoNormalizer._popen_silent_kwargs())
+                res = subprocess.run(cmd, capture_output=True, **get_subprocess_silent_kwargs())
                 if res.returncode == 0 and out_path.exists():
                     try:
                         orig_sz = v.stat().st_size

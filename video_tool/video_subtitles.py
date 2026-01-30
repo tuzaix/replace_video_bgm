@@ -8,8 +8,8 @@ import shutil
 import uuid
 
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
+from utils.common_utils import format_srt_timestamp, get_subprocess_silent_kwargs
 from utils.xprint import xprint
-from utils.common_utils import format_srt_timestamp
 
 env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffmpeg=True)
 ffprobe_bin = env.get("ffprobe_path") or shutil.which("ffprobe")
@@ -89,6 +89,7 @@ class VideoSubtitles:
             tmpwav = os.path.join(tmpdir, "audio.wav")
             in_arg = f"file:{video_path.replace('\\', '/')}"
             try:
+                kwargs = get_subprocess_silent_kwargs()
                 res = subprocess.run([
                     ffmpeg_bin,
                     "-hide_banner",
@@ -104,7 +105,7 @@ class VideoSubtitles:
                     "-f",
                     "wav",
                     tmpwav,
-                ], capture_output=True)
+                ], capture_output=True, **kwargs)
                 if res.returncode != 0:
                     safe_copy = os.path.join(tmpdir, "source.mp4")
                     try:
@@ -126,7 +127,7 @@ class VideoSubtitles:
                         "-f",
                         "wav",
                         tmpwav,
-                    ], capture_output=True)
+                    ], capture_output=True, **kwargs)
                     if res2.returncode != 0:
                         err_text = ""
                         try:
