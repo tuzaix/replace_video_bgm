@@ -81,13 +81,15 @@ class VideoRemixWorker(QtCore.QObject):
                 from utils.calcu_video_info import ffprobe_duration
                 audio_duration = ffprobe_duration(audio_path)
                 
-                # 1.1 提取并标准化片头（前3秒）
-                intro_path = remixer._extract_and_normalize_intro(video_path)
-                if not intro_path:
-                    continue
+                # # 1.1 提取并标准化片头（前3秒）
+                # intro_path = remixer._extract_and_normalize_intro(video_path)
+                # if not intro_path:
+                #     continue
                 
                 # 调整后续素材需要填补的时长
-                remaining_duration = max(0, audio_duration - 3.0)
+                # remaining_duration = max(0, audio_duration - 3.0)
+
+                remaining_duration = audio_duration
 
                 for i in range(count):
                     if self._stopping: break
@@ -99,8 +101,11 @@ class VideoRemixWorker(QtCore.QObject):
                     output_name = f"{video_path.stem}_remix_{i+1:02d}.mp4"
                     output_path = remixer.output_dir / output_name
                     
+                    # success = remixer._combine_segments_with_audio(
+                    #     selected_paths, audio_path, audio_duration, remixer.target_res, output_path, intro_path=intro_path
+                    # )
                     success = remixer._combine_segments_with_audio(
-                        selected_paths, audio_path, audio_duration, remixer.target_res, output_path, intro_path=intro_path
+                        selected_paths, audio_path, audio_duration, remixer.target_res, output_path
                     )
                     
                     if success:
