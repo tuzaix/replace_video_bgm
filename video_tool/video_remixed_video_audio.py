@@ -234,17 +234,18 @@ class VideoRemixedVideoAudio:
             
             print(f"🎵 音频时长: {audio_duration:.2f}s")
 
-            # 1.1 提取并标准化片头（前3秒）
-            print(f"  🎬 正在生成片头预处理 ({self.video_type})...")
-            intro_path = self._extract_and_normalize_intro(video_path)
-            if not intro_path:
-                print(f"  ⚠️ 无法生成片头，将跳过当前视频: {video_path.name}")
-                continue
+            # # 1.1 提取并标准化片头（前3秒）
+            # print(f"  🎬 正在生成片头预处理 ({self.video_type})...")
+            # intro_path = self._extract_and_normalize_intro(video_path)
+            # if not intro_path:
+            #     print(f"  ⚠️ 无法生成片头，将跳过当前视频: {video_path.name}")
+            #     continue
             
-            print(f"  ✅ 片头预处理完成: {intro_path.name}")
+            # print(f"  ✅ 片头预处理完成: {intro_path.name}")
             
             # 调整后续素材需要填补的时长
-            remaining_duration = max(0, audio_duration - 3.0)
+            # remaining_duration = max(0, audio_duration - 3.0)
+            remaining_duration = audio_duration
 
             for i in range(count_per_video):
                 print(f"  ✨ 正在生成第 {i+1}/{count_per_video} 份混剪...")
@@ -264,8 +265,11 @@ class VideoRemixedVideoAudio:
                 output_name = f"{video_path.stem}_remix_{i+1:02d}.mp4"
                 output_path = self.output_dir / output_name
                 
+                # success = self._combine_segments_with_audio(
+                #     selected_paths, audio_path, audio_duration, self.target_res, output_path, intro_path=intro_path
+                # )
                 success = self._combine_segments_with_audio(
-                    selected_paths, audio_path, audio_duration, self.target_res, output_path, intro_path=intro_path
+                    selected_paths, audio_path, audio_duration, self.target_res, output_path
                 )
                 
                 if success:
