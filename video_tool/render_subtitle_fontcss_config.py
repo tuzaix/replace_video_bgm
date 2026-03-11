@@ -12,10 +12,12 @@ def get_subtitle_styles(font_family: str = "Microsoft YaHei"):
                 font-family: '{font_family}', sans-serif;
                 color: white;
                 text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
-                background: rgba(0, 0, 0, 0.5);
+                background: transparent;
                 padding: 12px 20px;
                 border-radius: 10px;
-                margin: 20px;
+                margin: 40px;
+                line-height: 1.8;
+                letter-spacing: 2px;
                 text-align: center;
             }}
         """,
@@ -27,13 +29,15 @@ def get_subtitle_styles(font_family: str = "Microsoft YaHei"):
                 color: #ffff00;
                 text-shadow: 3px 3px 0px #000, -1px -1px 0px #000, 1px -1px 0px #000, -1px 1px 0px #000, 1px 1px 0px #000;
                 padding: 10px;
-                margin: 30px;
+                margin: 50px;
+                line-height: 1.6;
+                letter-spacing: 1px;
                 text-align: center;
             }}
         """,
         "vlog_minimal": f"""
             .line {{
-                font-size: 34px;
+                font-size: 20px;
                 font-family: '{font_family}', sans-serif;
                 color: #ffffff;
                 text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
@@ -58,20 +62,22 @@ def get_subtitle_styles(font_family: str = "Microsoft YaHei"):
         """,
         "jianyin_black_gold": f"""
             .line {{
-                font-size: 48px;
+                font-size: 20px;
                 font-family: '{font_family}', sans-serif;
                 font-weight: bold;
                 color: #FFD700;
                 background: #1A1A1A;
                 padding: 15px 30px;
                 border: 2px solid #FFD700;
+                margin: 40px;
+                line-height: 1.8;
                 text-align: center;
                 text-transform: uppercase;
             }}
         """,
         "news_headline": f"""
             .line {{
-                font-size: 45px;
+                font-size: 20px;
                 font-family: '{font_family}', sans-serif;
                 font-weight: 900;
                 color: white;
@@ -83,7 +89,7 @@ def get_subtitle_styles(font_family: str = "Microsoft YaHei"):
         """,
         "cute_pink": f"""
             .line {{
-                font-size: 44px;
+                font-size: 20px;
                 font-family: '{font_family}', sans-serif;
                 color: #FF69B4;
                 background: rgba(255, 255, 255, 0.9);
@@ -95,7 +101,7 @@ def get_subtitle_styles(font_family: str = "Microsoft YaHei"):
         """,
         "cyberpunk": f"""
             .line {{
-                font-size: 50px;
+                font-size: 20px;
                 font-family: '{font_family}', sans-serif;
                 font-weight: bold;
                 color: #00FFFF;

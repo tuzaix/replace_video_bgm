@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from pycaps import CapsPipelineBuilder, load_transcription
+from pycaps import CapsPipelineBuilder, load_transcription, SubtitleLayoutOptions, VerticalAlignment, VerticalAlignmentType
 
 from utils.common_utils import get_subprocess_silent_kwargs
 from video_tool.render_subtitle_fontcss_config import get_subtitle_styles
@@ -38,8 +38,19 @@ class SubtitleRenderer:
                 return subtitle_path
         return None
 
-    def render(self, video_path: str, output_path: Optional[str] = None, css: Optional[str] = None, style_name: str = "classic_white") -> bool:
-        """Render styled subtitles onto the video."""
+    def render(self, video_path: str, output_path: Optional[str] = None, css: Optional[str] = None, 
+               style_name: str = "classic_white", 
+               v_align: str = "bottom", v_offset: float = 0.0) -> bool:
+        """Render styled subtitles onto the video.
+        
+        Args:
+            video_path: Path to the input video.
+            output_path: Optional output path.
+            css: Custom CSS content.
+            style_name: Predefined style name.
+            v_align: Vertical alignment (top, center, bottom).
+            v_offset: Vertical offset (-1.0 to 1.0).
+        """
         if not CapsPipelineBuilder:
             return False
 
@@ -63,13 +74,21 @@ class SubtitleRenderer:
         if not final_css:
             final_css = self.styles.get(style_name, self.default_css)
 
-        print(f"🚀 Starting subtitle rendering (Style: {style_name})...")
+        print(f"🚀 Starting subtitle rendering (Style: {style_name}, Position: {v_align}+{v_offset})...")
         print(f"🎬 Video: {v_path.name}")
         print(f"📝 Subtitle: {s_path.name}")
         print(f"📦 Output: {out_path.name}")
 
         try:
             builder = CapsPipelineBuilder()
+            
+            # Configure layout options for positioning
+            align_type = VerticalAlignmentType(v_align.lower())
+            layout_options = SubtitleLayoutOptions(
+                vertical_align=VerticalAlignment(align=align_type, offset=v_offset)
+            )
+            builder.with_layout_options(layout_options)
+
             # 确保路径转换为绝对路径字符串，处理 Windows 路径编码问题
             video_input = str(v_path.absolute())
             subtitle_input = str(s_path.absolute())
