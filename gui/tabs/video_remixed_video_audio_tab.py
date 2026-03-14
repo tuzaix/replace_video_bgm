@@ -121,8 +121,18 @@ class VideoRemixWorker(QtCore.QObject):
                                 try:
                                     shutil.copy2(sub_path, dest_sub_path)
                                     # xprint(f"[+] 拷贝字幕文件: {sub_path.name} -> {dest_sub_path.name}")
+                                
                                 except Exception as se:
                                     xprint(f"[-] 拷贝字幕文件失败: {se}")
+                                # 增加拷贝文案配置文件到字幕文件所在目录
+                                caption_config_path = sub_path.with_name(f"{sub_path.stem}_caption_config.json")
+                                if caption_config_path.exists():
+                                    dest_caption_config_path = dest_sub_path.with_name(f"{dest_sub_path.stem}_caption_config.json")
+                                    try:
+                                        shutil.copy2(caption_config_path, dest_caption_config_path)
+                                        # xprint(f"[+] 拷贝字幕配置文件: {caption_config_path.name} -> {dest_caption_config_path.name}")
+                                    except Exception as se:
+                                        xprint(f"[-] 拷贝字幕配置文件失败: {se}")
                                 break # 拷贝一个即可
                         return str(output_path)
                 except Exception as e:

@@ -38,19 +38,36 @@ class SubtitleRenderer:
                 return subtitle_path
         return None
 
+    def _run_pycaps_render(self, input_video: str, output_video: str, srt_path: str, 
+                           v_align: str, v_offset: float, css: str) -> bool:
+        """Internal helper to run a single pycaps rendering pass."""
+        try:
+            builder = CapsPipelineBuilder()
+            
+            # Configure layout options
+            align_type = VerticalAlignmentType(v_align.lower())
+            layout_options = SubtitleLayoutOptions(
+                vertical_align=VerticalAlignment(align=align_type, offset=v_offset)
+            )
+            builder.with_layout_options(layout_options)
+            
+            builder.with_input_video(input_video)
+            builder.with_output_video(output_video)
+            builder.with_transcription(srt_path)
+            builder.add_css_content(css)
+            
+            pipeline = builder.build()
+            pipeline.run()
+            return True
+        except Exception as e:
+            print(f"❌ Pass Error: {e}")
+            return False
+
     def render(self, video_path: str, output_path: Optional[str] = None, css: Optional[str] = None, 
                style_name: str = "classic_white", 
-               v_align: str = "bottom", v_offset: float = 0.0) -> bool:
-        """Render styled subtitles onto the video.
-        
-        Args:
-            video_path: Path to the input video.
-            output_path: Optional output path.
-            css: Custom CSS content.
-            style_name: Predefined style name.
-            v_align: Vertical alignment (top, center, bottom).
-            v_offset: Vertical offset (-1.0 to 1.0).
-        """
+               v_align: str = "bottom", v_offset: float = 0.0,
+               caption_text: Optional[str] = None) -> bool:
+        """Render styled subtitles onto the video."""
         if not CapsPipelineBuilder:
             return False
 
@@ -69,54 +86,77 @@ class SubtitleRenderer:
         else:
             out_path = Path(output_path).resolve()
 
-        # Determine CSS to use
-        final_css = css
-        if not final_css:
-            final_css = self.styles.get(style_name, self.default_css)
+        final_css = css if css else self.styles.get(style_name, self.default_css)
 
-        print(f"🚀 Starting subtitle rendering (Style: {style_name}, Position: {v_align}+{v_offset})...")
-        print(f"🎬 Video: {v_path.name}")
-        print(f"📝 Subtitle: {s_path.name}")
-        print(f"📦 Output: {out_path.name}")
+        print(f"🚀 Starting rendering (Style: {style_name}, Position: {v_align}+{v_offset})...")
+        if caption_text:
+            print(f"💡 With Caption: {caption_text}")
 
+        import uuid
+        temp_dir = v_path.parent / "temp"
+        temp_dir.mkdir(exist_ok=True)
+        
+        temp_files = []
         try:
-            builder = CapsPipelineBuilder()
+            current_video = str(v_path.absolute())
             
-            # Configure layout options for positioning
-            align_type = VerticalAlignmentType(v_align.lower())
-            layout_options = SubtitleLayoutOptions(
-                vertical_align=VerticalAlignment(align=align_type, offset=v_offset)
+            # --- PASS 1: Render Cover Caption (if exists) ---
+            if caption_text:
+                print(f"⏳ Pass 1: Rendering cover caption...")
+                temp_caption_srt = temp_dir / f"temp_cap_{uuid.uuid4().hex[:8]}.srt"
+                temp_files.append(temp_caption_srt)
+                with open(temp_caption_srt, 'w', encoding='utf-8') as f:
+                    # 展示前 600ms 作为封面
+                    f.write(f"1\n00:00:00,000 --> 00:00:00,600\n{caption_text}")
+                
+                # 为文案定制大号居中样式
+                import re
+                font_size_match = re.search(r"font-size:\s*(\d+)px", final_css)
+                base_size = int(font_size_match.group(1)) if font_size_match else 40
+                caption_css = final_css + f"\n.line {{ font-size: {int(base_size * 2.2)}px !important; text-align: center !important; font-weight: bold !important; }}"
+                
+                temp_v1 = temp_dir / f"temp_v1_{uuid.uuid4().hex[:8]}{v_path.suffix}"
+                temp_files.append(temp_v1)
+                
+                # 强制居中对齐渲染文案
+                success = self._run_pycaps_render(
+                    current_video, str(temp_v1.absolute()), str(temp_caption_srt.absolute()),
+                    "center", 0.0, caption_css
+                )
+                if not success: return False
+                current_video = str(temp_v1.absolute())
+
+            # --- PASS 2: Render Main Subtitles ---
+            print(f"⏳ Pass 2: Rendering main subtitles...")
+            success = self._run_pycaps_render(
+                current_video, str(out_path.absolute()), str(s_path.absolute()),
+                v_align, v_offset, final_css
             )
-            builder.with_layout_options(layout_options)
+            
+            if success:
+                print(f"✨ Successfully rendered to: {out_path.name}")
+            return success
 
-            # 确保路径转换为绝对路径字符串，处理 Windows 路径编码问题
-            video_input = str(v_path.absolute())
-            subtitle_input = str(s_path.absolute())
-            output_file = str(out_path.absolute())
-            
-            builder.with_input_video(video_input)
-            builder.with_output_video(output_file)
-            
-            # 使用新的 transcription 加载接口
-            builder.with_transcription(subtitle_input)
-
-            # 使用 add_css_content 直接添加 CSS 字符串
-            builder.add_css_content(final_css)
-
-            # Build and run the pipeline
-            pipeline = builder.build()
-            
-            print(f"⏳ Running pycaps pipeline...")
-            # pipeline.run() 在新版本中会自动完成渲染并输出到 with_output_video 指定的路径
-            pipeline.run()
-            
-            print(f"✨ Successfully rendered styled subtitles to: {out_path}")
-            return True
         except Exception as e:
             import traceback
-            print(f"❌ Error during rendering: {e}")
             traceback.print_exc()
             return False
+        finally:
+            # Cleanup all temp files
+            for f in temp_files:
+                if f.exists():
+                    try:
+                        f.unlink()
+                    except:
+                        pass
+            
+            # 如果 temp 目录为空，则删除它
+            if 'temp_dir' in locals() and temp_dir.exists():
+                try:
+                    if not any(temp_dir.iterdir()):
+                        temp_dir.rmdir()
+                except:
+                    pass
 
 
 if __name__ == "__main__":

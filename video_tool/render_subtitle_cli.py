@@ -86,13 +86,37 @@ def main():
             
         output_path = str(final_output_dir / output_filename)
         
+        # 尝试在视频同目录下读取封面文案配置
+        caption_text = None
+        config_path = video_file.parent / f"{video_file.stem}_caption_config.json"
+        if config_path.exists():
+            try:
+                import json
+                import random
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # 支持之前的格式 {"captions": [...]} 和现在的格式 [{"category": "...", "content": "..."}]
+                    if isinstance(data, list):
+                        captions = [item.get("content") for item in data if item.get("content")]
+                    elif isinstance(data, dict):
+                        captions = data.get("captions", [])
+                    else:
+                        captions = []
+                    
+                    if captions:
+                        selected_caption = random.choice(captions)
+                        caption_text = f"#{selected_caption}"
+            except Exception as ce:
+                print(f"⚠️ Warning: Failed to read caption config for {video_file.name}: {ce}")
+
         success = renderer.render(
             video_path=str(video_file),
             output_path=output_path,
             css=args.css,
             style_name=args.style,
             v_align=args.v_align,
-            v_offset=args.v_offset
+            v_offset=args.v_offset,
+            caption_text=caption_text
         )
         return success, video_file.name
 
