@@ -111,6 +111,19 @@ class VideoRemixWorker(QtCore.QObject):
                     )
                     
                     if success:
+                        # 查找并拷贝同名字幕文件
+                        import shutil
+                        sub_extensions = [".srt", ".ass", ".vtt"]
+                        for ext in sub_extensions:
+                            sub_path = video_path.with_suffix(ext)
+                            if sub_path.exists():
+                                dest_sub_path = output_path.with_suffix(ext)
+                                try:
+                                    shutil.copy2(sub_path, dest_sub_path)
+                                    # xprint(f"[+] 拷贝字幕文件: {sub_path.name} -> {dest_sub_path.name}")
+                                except Exception as se:
+                                    xprint(f"[-] 拷贝字幕文件失败: {se}")
+                                break # 拷贝一个即可
                         return str(output_path)
                 except Exception as e:
                     xprint(f"Error processing {video_path}: {e}")
