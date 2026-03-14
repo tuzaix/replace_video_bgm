@@ -24,11 +24,18 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utils.common_utils import get_subprocess_silent_kwargs, format_srt_timestamp, is_video_file
 from utils.bootstrap_ffmpeg import bootstrap_ffmpeg_env
-from utils.xprint import xprint
+# from utils.xprint import xprint
 
 # Bootstrap FFmpeg
 env = bootstrap_ffmpeg_env(prefer_bundled=True, dev_fallback_env=True, modify_env=True, require_ffmpeg=True)
 ffmpeg_bin = env.get("ffmpeg_path") or shutil.which("ffmpeg")
+
+def xprint(*values: object) -> dict:
+    # 在系统上设置 DEBUG=1 来启用调试打印，默认不打印，
+    # 例如：linux: export DEBUG=1 或 win: $env:DEBUG=1
+    print(*values)
+
+
 
 class ASRProvider:
     """ASR 抽象基类，用于支持不同的 AI 平台"""
@@ -204,6 +211,12 @@ def run_subtitle_generation(video_path: str, provider: ASRProvider):
         xprint(f"[-] 视频文件不存在: {video_path}")
         return
 
+    # 0. 检查字幕文件是否已存在
+    srt_path = v_path.with_suffix(".srt")
+    if srt_path.exists() and srt_path.stat().st_size > 0:
+        xprint(f"[!] 字幕文件已存在，跳过处理: {srt_path.name}")
+        return
+
     # 1. 提取音频到同目录下的 audio 子目录
     audio_dir = v_path.parent / "audio"
     xprint(f"[*] 正在为识别准备音频: {v_path.name}")
@@ -226,7 +239,7 @@ def run_subtitle_generation(video_path: str, provider: ASRProvider):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="API 视频字幕生成工具 (支持火山引擎/豆包语音)")
-    parser.add_argument("video", help="待处理的视频文件路径")
+    parser.add_argument("input_path", help="待处理的视频文件路径或视频所在的目录路径")
     parser.add_argument("--appid", help="火山引擎 AppID (也可通过环境变量 VOLC_APPID 设置)")
     parser.add_argument("--token", help="火山引擎 Access Token (也可通过环境变量 VOLC_TOKEN 设置)")
     
@@ -238,12 +251,40 @@ if __name__ == "__main__":
     
     if not appid or not token:
         xprint("[-] 错误: 请提供 AppID 和 Token。")
-        xprint("    使用方式: python api_subtitle_generator.py <video_path> --appid XXX --token YYY")
+        xprint("    使用方式: python api_subtitle_generator.py <input_path> --appid XXX --token YYY")
         xprint("    或者设置环境变量: VOLC_APPID 和 VOLC_TOKEN")
         sys.exit(1)
         
     # 初始化火山引擎识别服务
     provider = VolcengineASR(appid, token)
     
+    # 确定待处理的视频文件列表
+    input_path = Path(args.input_path).resolve()
+    if not input_path.exists():
+        xprint(f"[-] 输入路径不存在: {input_path}")
+        sys.exit(1)
+
+    video_files = []
+    if input_path.is_file():
+        if is_video_file(input_path.name):
+            video_files.append(input_path)
+        else:
+            xprint(f"[-] 文件不是有效的视频格式: {input_path}")
+            sys.exit(1)
+    elif input_path.is_dir():
+        xprint(f"[*] 正在扫描目录中的视频文件: {input_path}")
+        for file in input_path.iterdir():
+            if file.is_file() and is_video_file(file.name):
+                video_files.append(file)
+        
+        if not video_files:
+            xprint(f"[-] 目录中没有找到有效的视频文件: {input_path}")
+            sys.exit(1)
+        
+        xprint(f"[+] 找到 {len(video_files)} 个视频文件待处理。")
+
     # 开始生成字幕
-    run_subtitle_generation(args.video, provider)
+    for idx, video_file in enumerate(video_files, 1):
+        if len(video_files) > 1:
+            xprint(f"\n[进度 {idx}/{len(video_files)}] 正在处理: {video_file.name}")
+        run_subtitle_generation(str(video_file), provider)
