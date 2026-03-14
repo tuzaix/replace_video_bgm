@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import os
 import pathlib
+import threading
 from typing import Optional, List, Tuple, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6 import QtWidgets, QtCore, QtGui
 
@@ -44,6 +46,7 @@ class VideoRemixWorker(QtCore.QObject):
             use_gpu = params['use_gpu']
             profile = params['profile']
             video_type = params['video_type']
+            workers = params.get('workers', 1)
 
             remixer = VideoRemixedVideoAudio(
                 imitation_dir=imitation_dir,
@@ -54,13 +57,10 @@ class VideoRemixWorker(QtCore.QObject):
                 video_type=video_type
             )
             
-            # 由于 VideoRemixedVideoAudio.process 内部没有暴露进度回调，
-            # 我们这里通过重写或包装来实现进度反馈。
-            # 为了不破坏原有逻辑，我们手动模拟 process 的部分核心逻辑以便发送信号。
-            
-            imitation_videos = [p for p in remixer.imitation_dir.glob("*") if p.is_file() and is_video_file(str(p))]
-            if not imitation_videos:
-                self.error.emit("模仿视频目录下没有找到视频文件。")
+            from utils.common_utils import is_video_file, is_audio_file
+            imitation_files = [p for p in remixer.imitation_dir.glob("*") if p.is_file() and (is_video_file(str(p)) or is_audio_file(str(p)))]
+            if not imitation_files:
+                self.error.emit("模仿视频目录下没有找到有效的视频或音频文件。")
                 return
 
             all_segments = remixer._get_video_segments()
@@ -68,51 +68,73 @@ class VideoRemixWorker(QtCore.QObject):
                 self.error.emit("素材库中没有找到有效的视频切片。")
                 return
             
-            total_tasks = len(imitation_videos) * count
+            total_tasks = len(imitation_files) * count
             done_tasks = 0
             results = []
-
-            for idx, video_path in enumerate(imitation_videos, 1):
-                if self._stopping: break
-                
-                audio_path = remixer._extract_audio_lossless(video_path)
-                if not audio_path: continue
-                
-                from utils.calcu_video_info import ffprobe_duration
-                audio_duration = ffprobe_duration(audio_path)
-                
-                # # 1.1 提取并标准化片头（前3秒）
-                # intro_path = remixer._extract_and_normalize_intro(video_path)
-                # if not intro_path:
-                #     continue
-                
-                # 调整后续素材需要填补的时长
-                # remaining_duration = max(0, audio_duration - 3.0)
-
-                remaining_duration = audio_duration
-
+            results_lock = threading.Lock()
+            
+            tasks = []
+            for video_path in imitation_files:
                 for i in range(count):
-                    if self._stopping: break
+                    tasks.append((video_path, i + 1))
+
+            def process_single_task(video_path: pathlib.Path, remix_idx: int) -> Optional[str]:
+                if self._stopping: return None
+                try:
+                    # 提取音频
+                    from utils.common_utils import is_audio_file
+                    if is_audio_file(str(video_path)):
+                        audio_path = video_path
+                    else:
+                        audio_path = remixer._extract_audio_lossless(video_path)
                     
-                    selected_data = remixer._select_segments_for_duration(all_segments, remaining_duration)
-                    if not selected_data: continue
+                    if not audio_path or not audio_path.exists():
+                        return None
+                    
+                    from utils.calcu_video_info import ffprobe_duration
+                    audio_duration = ffprobe_duration(audio_path)
+                    if audio_duration <= 0:
+                        return None
+
+                    # 选择素材
+                    selected_data = remixer._select_segments_for_duration(all_segments, audio_duration)
+                    if not selected_data:
+                        return None
                     
                     selected_paths = [item[0] for item in selected_data]
-                    output_name = f"{video_path.stem}_remix_{i+1:02d}.mp4"
+                    output_name = f"{video_path.stem}_remix_{remix_idx:02d}.mp4"
                     output_path = remixer.output_dir / output_name
                     
-                    # success = remixer._combine_segments_with_audio(
-                    #     selected_paths, audio_path, audio_duration, remixer.target_res, output_path, intro_path=intro_path
-                    # )
+                    # 合并视频
                     success = remixer._combine_segments_with_audio(
                         selected_paths, audio_path, audio_duration, remixer.target_res, output_path
                     )
                     
                     if success:
-                        results.append(str(output_path))
-                    
-                    done_tasks += 1
-                    self.progress.emit(done_tasks, total_tasks)
+                        return str(output_path)
+                except Exception as e:
+                    xprint(f"Error processing {video_path}: {e}")
+                return None
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(process_single_task, vp, idx): (vp, idx) for vp, idx in tasks}
+                for future in as_completed(futures):
+                    if self._stopping:
+                        break
+                    res = future.result()
+                    with results_lock:
+                        done_tasks += 1
+                        if res:
+                            results.append(res)
+                        self.progress.emit(done_tasks, total_tasks)
+
+            # 清理临时文件
+            if hasattr(remixer, 'temp_dir') and remixer.temp_dir.exists():
+                import shutil
+                try:
+                    shutil.rmtree(remixer.temp_dir, ignore_errors=True)
+                except:
+                    pass
 
             self.finished.emit(results)
             
@@ -183,6 +205,11 @@ class VideoRemixedVideoAudioTab(QtWidgets.QWidget):
         self.type_combo = QtWidgets.QComboBox()
         self.type_combo.addItems(["shorts", "video"])
         param_lay.addRow("视频类型：", self.type_combo)
+        
+        self.workers_spin = QtWidgets.QSpinBox()
+        self.workers_spin.setRange(1, 16)
+        self.workers_spin.setValue(1)
+        param_lay.addRow("并发线程数：", self.workers_spin)
         
         layout.addWidget(group_params)
         layout.addStretch()
@@ -299,7 +326,8 @@ class VideoRemixedVideoAudioTab(QtWidgets.QWidget):
             'count': self.count_spin.value(),
             'use_gpu': self.gpu_check.isChecked(),
             'profile': self.profile_combo.currentText(),
-            'video_type': self.type_combo.currentText()
+            'video_type': self.type_combo.currentText(),
+            'workers': self.workers_spin.value()
         }
         
         self._thread.started.connect(lambda: self._worker.run(params))
