@@ -8,6 +8,7 @@ import shutil
 import time
 import argparse
 from pathlib import Path
+import threading
 from typing import List, Tuple, Optional, Dict, Any
 
 # 将项目根目录添加到 sys.path
@@ -63,6 +64,7 @@ class VideoRemixedVideoAudio:
         
         # 缓存已标准化的分片路径 { (path, resolution): norm_path }
         self._norm_cache: Dict[Tuple[str, Tuple[int, int]], Path] = {}
+        self._lock = threading.Lock()
 
     def _get_encoding_opts(self) -> List[str]:
         """
@@ -110,6 +112,14 @@ class VideoRemixedVideoAudio:
         :return: 提取出的音频文件路径，失败返回 None
         """
         # 先探测音频编码
+        with self._lock:
+            # 查找是否已经提取过
+            existing = list(self.temp_dir.glob(f"{video_path.stem}_audio.*"))
+            if existing:
+                # 简单起见，如果文件存在且大小不为0，我们就复用它
+                if existing[0].stat().st_size > 0:
+                    return existing[0]
+
         cmd_probe = [
             ffprobe_bin, "-v", "error",
             "-select_streams", "a:0",
@@ -364,10 +374,12 @@ class VideoRemixedVideoAudio:
         :return: 标准化后的 TS 文件路径
         """
         cache_key = (str(segment_path.resolve()), target_res)
-        if cache_key in self._norm_cache:
-            norm_path = self._norm_cache[cache_key]
-            if norm_path.exists():
-                return norm_path
+        with self._lock:
+            if cache_key in self._norm_cache:
+                norm_path = self._norm_cache[cache_key]
+                if norm_p := norm_path:
+                    if norm_p.exists():
+                        return norm_p
 
         width, height = target_res
         # 使用稳定的文件名以便在同一次运行中复用
@@ -418,7 +430,8 @@ class VideoRemixedVideoAudio:
 
         try:
             subprocess.run(cmd, check=True, capture_output=True, **get_subprocess_silent_kwargs())
-            self._norm_cache[cache_key] = norm_path
+            with self._lock:
+                self._norm_cache[cache_key] = norm_path
             return norm_path
         except Exception as e:
             print(f"❌ 标准化分片失败 {segment_path.name}: {e}")
