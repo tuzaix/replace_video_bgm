@@ -33,8 +33,14 @@ def main():
     parser.add_argument("--v-align", type=str, default="bottom", choices=["top", "center", "bottom"], help="Vertical alignment of subtitles (default: bottom)")
     parser.add_argument("--v-offset", type=float, default=0.0, help="Vertical offset from -1.0 to 1.0 (default: 0.0)")
     parser.add_argument("--workers", "-w", type=int, default=1, help="Number of concurrent workers (default: 1, serial)")
+    parser.add_argument("--no-gpu", action="store_true", help="Disable GPU acceleration even if available")
 
     args = parser.parse_args()
+
+    if args.no_gpu:
+        os.environ["MOVIELITE_USE_GPU"] = "0"
+    else:
+        os.environ["MOVIELITE_USE_GPU"] = "1"
 
     renderer.font_family = args.font
     # Update styles with the potentially new font family

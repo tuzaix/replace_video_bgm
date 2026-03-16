@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pycaps import CapsPipelineBuilder, load_transcription, SubtitleLayoutOptions, VerticalAlignment, VerticalAlignmentType
 
 from utils.common_utils import get_subprocess_silent_kwargs
+from utils.gpu_detect import is_nvenc_available
 from video_tool.render_subtitle_fontcss_config import get_subtitle_styles
 
 
@@ -88,7 +89,8 @@ class SubtitleRenderer:
 
         final_css = css if css else self.styles.get(style_name, self.default_css)
 
-        print(f"🚀 Starting rendering (Style: {style_name}, Position: {v_align}+{v_offset})...")
+        gpu_status = "GPU (NVENC)" if is_nvenc_available() else "CPU"
+        print(f"🚀 Starting rendering ({gpu_status}) (Style: {style_name}, Position: {v_align}+{v_offset})...")
         if caption_text:
             print(f"💡 With Caption: {caption_text}")
 
