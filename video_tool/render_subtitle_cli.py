@@ -84,37 +84,50 @@ def main():
     
     def process_single_video(video_file: Path) -> tuple[bool, str]:
         """Process a single video file and return success status and filename."""
-        # Output filename: if in the same directory as input, add a suffix to avoid overwriting
-        if final_output_dir == video_file.parent:
+        # 尝试在视频同目录下读取配置
+        caption_text = None
+        copywriter_name = None
+        config_path = video_file.parent / f"{video_file.stem}_caption_config.json"
+        if config_path.exists():
+            try:
+                import json
+                import random
+                import re
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # 支持之前的格式 {"captions": [...]} 和现在的格式 [{"category": "...", "content": "...", "copywriter": "..."}]
+                    items = []
+                    if isinstance(data, list):
+                        items = data
+                    elif isinstance(data, dict):
+                        # 兼容旧格式
+                        captions = data.get("captions", [])
+                        items = [{"content": c} for c in captions]
+                    
+                    if items:
+                        selected_item = random.choice(items)
+                        caption_text = f"#{selected_item.get('content')}" if selected_item.get('content') else None
+                        
+                        # 获取 copywriter 字段作为文件名
+                        raw_copywriter = selected_item.get('copywriter')
+                        if raw_copywriter:
+                            # 移除非法文件名字符，保留话题标签
+                            clean_name = re.sub(r'[\\/:*?"<>|\r\n]', '', raw_copywriter).strip()
+                            # 限制长度
+                            copywriter_name = clean_name[:100] if clean_name else None
+            except Exception as ce:
+                print(f"⚠️ Warning: Failed to read caption config for {video_file.name}: {ce}")
+
+        # Output filename: 优先使用 copywriter_name
+        if copywriter_name:
+            output_filename = f"{copywriter_name}{video_file.suffix}"
+        elif final_output_dir == video_file.parent:
             output_filename = f"{video_file.stem}-字幕版{video_file.suffix}"
         else:
             output_filename = f"{video_file.stem}{video_file.suffix}"
             
         output_path = str(final_output_dir / output_filename)
         
-        # 尝试在视频同目录下读取封面文案配置
-        caption_text = None
-        config_path = video_file.parent / f"{video_file.stem}_caption_config.json"
-        if config_path.exists():
-            try:
-                import json
-                import random
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    # 支持之前的格式 {"captions": [...]} 和现在的格式 [{"category": "...", "content": "..."}]
-                    if isinstance(data, list):
-                        captions = [item.get("content") for item in data if item.get("content")]
-                    elif isinstance(data, dict):
-                        captions = data.get("captions", [])
-                    else:
-                        captions = []
-                    
-                    if captions:
-                        selected_caption = random.choice(captions)
-                        caption_text = f"#{selected_caption}"
-            except Exception as ce:
-                print(f"⚠️ Warning: Failed to read caption config for {video_file.name}: {ce}")
-
         success = renderer.render(
             video_path=str(video_file),
             output_path=output_path,
