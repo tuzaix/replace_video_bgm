@@ -117,7 +117,7 @@ def main():
                             copywriter_name = clean_name[:100] if clean_name else None
             except Exception as ce:
                 print(f"⚠️ Warning: Failed to read caption config for {video_file.name}: {ce}")
-
+        copywriter_name = None
         # Output filename: 优先使用 copywriter_name
         if copywriter_name:
             output_filename = f"{copywriter_name}{video_file.suffix}"
